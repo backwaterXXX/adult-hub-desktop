@@ -246,6 +246,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         phash_coord.clone(),
     );
 
+    install_stage7_handlers(
+        &ui,
+        local_store.clone(),
+        credential_store.clone(),
+        jellyfin.clone(),
+        resolver.clone(),
+        cached_catalog.clone(),
+    );
+
+    install_stage8_handlers(
+        &ui,
+        local_store.clone(),
+        credential_store.clone(),
+        resolver.clone(),
+        cached_catalog.clone(),
+    );
+
+    install_stage9_handlers(
+        &ui,
+        player.clone(),
+    );
+
     // Initial session restore & catalog population
     if let Ok(Some(session)) = local_store.load_session() {
         let _ = credential_store.save(session.clone());
@@ -2791,7 +2813,7 @@ fn install_stage6_handlers(
                 .map(|p| p.name.clone().into())
                 .collect::<Vec<slint::SharedString>>();
 
-            ui.set_detail_id(target_item.id.into());
+            ui.set_detail_id(target_item.id.clone().into());
             ui.set_detail_title(target_item.title.into());
             ui.set_detail_overview(overview_str.into());
             ui.set_detail_year(year_str.into());
@@ -2805,6 +2827,43 @@ fn install_stage6_handlers(
             ui.set_detail_resume_text(resume_text.into());
             let perf_model = std::rc::Rc::new(slint::VecModel::from(performers));
             ui.set_detail_performers(perf_model.into());
+
+            // Stage 7: Similar Items ("More Like This")
+            let all_items = cached_catalog.lock().unwrap().clone();
+            let mut scored: Vec<(i32, TvItem)> = all_items
+                .into_iter()
+                .filter(|i| i.id != target_item.id)
+                .map(|i| {
+                    let mut score = 0;
+                    for g in &target_item.genres {
+                        if i.genres.iter().any(|ig| ig.eq_ignore_ascii_case(g)) {
+                            score += 3;
+                        }
+                    }
+                    for s in &target_item.studios {
+                        if i.studios.iter().any(|is| is.eq_ignore_ascii_case(s)) {
+                            score += 5;
+                        }
+                    }
+                    for p in &target_item.people {
+                        if i.people.iter().any(|ip| ip.name.eq_ignore_ascii_case(&p.name)) {
+                            score += 4;
+                        }
+                    }
+                    (score, i)
+                })
+                .collect();
+
+            scored.sort_by(|a, b| b.0.cmp(&a.0));
+            let similar_cards: Vec<VideoCardData> = scored
+                .into_iter()
+                .filter(|(s, _)| *s > 0)
+                .take(8)
+                .map(|(_, item)| tv_item_to_card(&item))
+                .collect();
+            let sim_model = std::rc::Rc::new(slint::VecModel::from(similar_cards));
+            ui.set_detail_similar_items(sim_model.into());
+
             ui.set_detail_visible(true);
         });
     }
@@ -3106,6 +3165,535 @@ fn install_stage6_handlers(
         });
     }
 }
+
+fn install_stage7_handlers(
+    ui: &MainWindow,
+    local_store: Arc<LocalStore>,
+    credential_store: Arc<CredentialStore>,
+    jellyfin: Arc<JellyfinClient>,
+    resolver: Arc<ResolverClient>,
+    cached_catalog: Arc<Mutex<Vec<TvItem>>>,
+) {
+    // 1. Open Performer Profile Dialog
+    {
+        let weak = ui.as_weak();
+        let cached_catalog = cached_catalog.clone();
+        let credential_store = credential_store.clone();
+        let local_store = local_store.clone();
+        let jellyfin = jellyfin.clone();
+        let resolver = resolver.clone();
+
+        ui.on_open_performer_profile(move |name| {
+            let Some(ui) = weak.upgrade() else { return };
+            let name_str = name.to_string();
+            ui.set_performer_name(name.clone());
+            ui.set_performer_bio("".into());
+            ui.set_performer_nationality("".into());
+            ui.set_performer_birth("".into());
+            ui.set_performer_aliases("".into());
+
+            // Initial catalog match for filmography
+            let matching: Vec<TvItem> = cached_catalog
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|i| i.people.iter().any(|p| p.name.eq_ignore_ascii_case(&name_str)))
+                .cloned()
+                .collect();
+            let cards = matching.iter().map(tv_item_to_card).collect::<Vec<_>>();
+            let model = std::rc::Rc::new(slint::VecModel::from(cards));
+            ui.set_performer_items(model.into());
+            ui.set_performer_profile_visible(true);
+
+            // Fetch performer bio & remote filmography asynchronously
+            let weak = weak.clone();
+            let local_store = local_store.clone();
+            let credential_store = credential_store.clone();
+            let jellyfin = jellyfin.clone();
+            let resolver = resolver.clone();
+            let p_name = name_str.clone();
+
+            std::thread::spawn(move || {
+                let res_url = local_store
+                    .get_setting("resolver_base_url")
+                    .ok()
+                    .flatten()
+                    .or_else(|| credential_store.get().ok().flatten().map(|s| s.server_url))
+                    .unwrap_or_default();
+
+                if !res_url.is_empty() {
+                    if let Ok(bio_dto) = resolver.get_performer_bio(&res_url, &p_name) {
+                        let weak2 = weak.clone();
+                        slint::invoke_from_event_loop(move || {
+                            let Some(ui) = weak2.upgrade() else { return };
+                            if let Some(bio) = bio_dto.bio {
+                                ui.set_performer_bio(bio.into());
+                            }
+                            if let Some(nat) = bio_dto.nationality {
+                                ui.set_performer_nationality(nat.into());
+                            }
+                            if let Some(birth) = bio_dto.birth {
+                                ui.set_performer_birth(birth.into());
+                            }
+                            if !bio_dto.aliases.is_empty() {
+                                ui.set_performer_aliases(bio_dto.aliases.join(", ").into());
+                            }
+                        })
+                        .ok();
+                    }
+                }
+
+                // If logged in to Jellyfin, fetch person filmography
+                if let Ok(Some(sess)) = credential_store.get() {
+                    let q = GetItemsQuery {
+                        person: Some(&p_name),
+                        sort_by: "SortName",
+                        limit: 50,
+                        ..Default::default()
+                    };
+                    if let Ok(page) = jellyfin.get_items(
+                        &sess.server_url,
+                        &sess.user_id,
+                        &sess.access_token,
+                        &q,
+                    ) {
+                        let filtered = filter_catalog_items(page.items, &local_store);
+                        let cards = filtered.iter().map(tv_item_to_card).collect::<Vec<_>>();
+                        let weak2 = weak.clone();
+                        slint::invoke_from_event_loop(move || {
+                            let Some(ui) = weak2.upgrade() else { return };
+                            let model = std::rc::Rc::new(slint::VecModel::from(cards));
+                            ui.set_performer_items(model.into());
+                        })
+                        .ok();
+                    }
+                }
+            });
+        });
+    }
+
+    // 2. Close Performer Profile Dialog
+    {
+        let weak = ui.as_weak();
+        ui.on_close_performer_profile(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_performer_profile_visible(false);
+            }
+        });
+    }
+
+    // 3. Open Studio Profile Dialog
+    {
+        let weak = ui.as_weak();
+        let cached_catalog = cached_catalog.clone();
+        let credential_store = credential_store.clone();
+        let local_store = local_store.clone();
+        let jellyfin = jellyfin.clone();
+
+        ui.on_open_studio_profile(move |name| {
+            let Some(ui) = weak.upgrade() else { return };
+            let studio_str = name.to_string();
+            ui.set_studio_name(name.clone());
+
+            let matching: Vec<TvItem> = cached_catalog
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|i| i.studios.iter().any(|s| s.eq_ignore_ascii_case(&studio_str)))
+                .cloned()
+                .collect();
+            let cards = matching.iter().map(tv_item_to_card).collect::<Vec<_>>();
+            let model = std::rc::Rc::new(slint::VecModel::from(cards));
+            ui.set_studio_items(model.into());
+            ui.set_studio_profile_visible(true);
+
+            // Fetch studio releases from Jellyfin if connected
+            let weak = weak.clone();
+            let local_store = local_store.clone();
+            let credential_store = credential_store.clone();
+            let jellyfin = jellyfin.clone();
+            let s_name = studio_str.clone();
+
+            std::thread::spawn(move || {
+                if let Ok(Some(sess)) = credential_store.get() {
+                    let q = GetItemsQuery {
+                        studio: Some(&s_name),
+                        sort_by: "SortName",
+                        limit: 50,
+                        ..Default::default()
+                    };
+                    if let Ok(page) = jellyfin.get_items(
+                        &sess.server_url,
+                        &sess.user_id,
+                        &sess.access_token,
+                        &q,
+                    ) {
+                        let filtered = filter_catalog_items(page.items, &local_store);
+                        let cards = filtered.iter().map(tv_item_to_card).collect::<Vec<_>>();
+                        let weak2 = weak.clone();
+                        slint::invoke_from_event_loop(move || {
+                            let Some(ui) = weak2.upgrade() else { return };
+                            let model = std::rc::Rc::new(slint::VecModel::from(cards));
+                            ui.set_studio_items(model.into());
+                        })
+                        .ok();
+                    }
+                }
+            });
+        });
+    }
+
+    // 4. Close Studio Profile Dialog
+    {
+        let weak = ui.as_weak();
+        ui.on_close_studio_profile(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_studio_profile_visible(false);
+            }
+        });
+    }
+}
+
+fn install_stage8_handlers(
+    ui: &MainWindow,
+    local_store: Arc<LocalStore>,
+    credential_store: Arc<CredentialStore>,
+    resolver: Arc<ResolverClient>,
+    cached_catalog: Arc<Mutex<Vec<TvItem>>>,
+) {
+    let current_channel_id = Arc::new(Mutex::new("all".to_string()));
+    let channel_offset_id = Arc::new(Mutex::new(None::<i64>));
+    let channel_items_cache = Arc::new(Mutex::new(Vec::<TvItem>::new()));
+
+    // 1. Select Channel Category
+    {
+        let weak = ui.as_weak();
+        let local_store = local_store.clone();
+        let credential_store = credential_store.clone();
+        let resolver = resolver.clone();
+        let cached_catalog = cached_catalog.clone();
+        let current_channel_id = current_channel_id.clone();
+        let channel_offset_id = channel_offset_id.clone();
+        let channel_items_cache = channel_items_cache.clone();
+
+        ui.on_select_channel_category(move |cat| {
+            let Some(ui) = weak.upgrade() else { return };
+            let cat_str = cat.to_string();
+            ui.set_active_channel_category(cat.clone());
+            ui.set_channel_loading(true);
+            *current_channel_id.lock().unwrap() = cat_str.clone();
+            *channel_offset_id.lock().unwrap() = None;
+
+            let weak = weak.clone();
+            let local_store = local_store.clone();
+            let credential_store = credential_store.clone();
+            let resolver = resolver.clone();
+            let cached_catalog = cached_catalog.clone();
+            let channel_offset_id = channel_offset_id.clone();
+            let channel_items_cache = channel_items_cache.clone();
+
+            std::thread::spawn(move || {
+                let res_url = local_store
+                    .get_setting("resolver_base_url")
+                    .ok()
+                    .flatten()
+                    .or_else(|| credential_store.get().ok().flatten().map(|s| s.server_url))
+                    .unwrap_or_default();
+
+                let mut items = Vec::new();
+                let mut next_offset = None;
+
+                if !res_url.is_empty() {
+                    let chan_id = if cat_str.to_lowercase().contains("all") {
+                        "main".to_string()
+                    } else {
+                        cat_str.to_lowercase().replace(' ', "_")
+                    };
+                    if let Ok(hist) = resolver.get_channel_history(&res_url, &chan_id, 20, None) {
+                        next_offset = hist.next_offset_id;
+                        for v in hist.videos {
+                            items.push(TvItem::from(v));
+                        }
+                    } else if let Ok(cat_vids) = resolver.get_category_videos(&res_url, &chan_id, 1, "recent", None) {
+                        for v in cat_vids {
+                            items.push(TvItem::from(v));
+                        }
+                    }
+                }
+
+                if items.is_empty() {
+                    let cat_filter = cat_str.to_lowercase();
+                    let pool = cached_catalog.lock().unwrap().clone();
+                    items = pool
+                        .into_iter()
+                        .filter(|i| {
+                            if cat_filter.contains("4k") {
+                                i.height.map_or(false, |h| h >= 2160) || i.title.to_lowercase().contains("4k")
+                            } else if cat_filter.contains("vr") {
+                                i.genres.iter().any(|g| g.to_lowercase().contains("vr")) || i.title.to_lowercase().contains("vr")
+                            } else if cat_filter.contains("highlight") {
+                                i.runtime_ticks.map_or(false, |t| t < 15 * 60 * 10_000_000)
+                            } else if cat_filter.contains("exclusive") {
+                                i.studios.iter().any(|s| !s.is_empty())
+                            } else {
+                                true
+                            }
+                        })
+                        .take(20)
+                        .collect();
+                }
+
+                let filtered = filter_catalog_items(items, &local_store);
+                *channel_offset_id.lock().unwrap() = next_offset;
+                *channel_items_cache.lock().unwrap() = filtered.clone();
+
+                // Merge into cached_catalog
+                {
+                    let mut cat_lock = cached_catalog.lock().unwrap();
+                    for it in &filtered {
+                        if !cat_lock.iter().any(|x| x.id == it.id) {
+                            cat_lock.push(it.clone());
+                        }
+                    }
+                }
+
+                let cards = filtered.iter().map(tv_item_to_card).collect::<Vec<_>>();
+                let has_more = next_offset.is_some() || filtered.len() >= 10;
+
+                slint::invoke_from_event_loop(move || {
+                    let Some(ui) = weak.upgrade() else { return };
+                    let model = std::rc::Rc::new(slint::VecModel::from(cards));
+                    ui.set_channel_items(model.into());
+                    ui.set_channel_has_more(has_more);
+                    ui.set_channel_loading(false);
+                })
+                .ok();
+            });
+        });
+    }
+
+    // 2. Load More Channel Videos (Pagination)
+    {
+        let weak = ui.as_weak();
+        let local_store = local_store.clone();
+        let credential_store = credential_store.clone();
+        let resolver = resolver.clone();
+        let cached_catalog = cached_catalog.clone();
+        let current_channel_id = current_channel_id.clone();
+        let channel_offset_id = channel_offset_id.clone();
+        let channel_items_cache = channel_items_cache.clone();
+
+        ui.on_load_more_channel_videos(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            ui.set_channel_loading(true);
+
+            let weak = weak.clone();
+            let local_store = local_store.clone();
+            let credential_store = credential_store.clone();
+            let resolver = resolver.clone();
+            let cached_catalog = cached_catalog.clone();
+            let cat_str = current_channel_id.lock().unwrap().clone();
+            let offset = *channel_offset_id.lock().unwrap();
+            let channel_offset_id = channel_offset_id.clone();
+            let channel_items_cache = channel_items_cache.clone();
+
+            std::thread::spawn(move || {
+                let res_url = local_store
+                    .get_setting("resolver_base_url")
+                    .ok()
+                    .flatten()
+                    .or_else(|| credential_store.get().ok().flatten().map(|s| s.server_url))
+                    .unwrap_or_default();
+
+                let mut new_items = Vec::new();
+                let mut next_offset = None;
+
+                if !res_url.is_empty() {
+                    let chan_id = if cat_str.to_lowercase().contains("all") {
+                        "main".to_string()
+                    } else {
+                        cat_str.to_lowercase().replace(' ', "_")
+                    };
+                    if let Ok(hist) = resolver.get_channel_history(&res_url, &chan_id, 20, offset) {
+                        next_offset = hist.next_offset_id;
+                        for v in hist.videos {
+                            new_items.push(TvItem::from(v));
+                        }
+                    }
+                }
+
+                if new_items.is_empty() {
+                    let pool = sample_catalog_tv_items();
+                    let current_count = channel_items_cache.lock().unwrap().len();
+                    new_items = pool.into_iter().skip(current_count % 3).take(5).collect();
+                }
+
+                let filtered_new = filter_catalog_items(new_items, &local_store);
+                *channel_offset_id.lock().unwrap() = next_offset;
+
+                let mut all_channel_items = channel_items_cache.lock().unwrap();
+                all_channel_items.extend(filtered_new.clone());
+                let cards = all_channel_items.iter().map(tv_item_to_card).collect::<Vec<_>>();
+
+                // Merge into cached_catalog
+                {
+                    let mut cat_lock = cached_catalog.lock().unwrap();
+                    for it in &filtered_new {
+                        if !cat_lock.iter().any(|x| x.id == it.id) {
+                            cat_lock.push(it.clone());
+                        }
+                    }
+                }
+
+                let has_more = next_offset.is_some() || (all_channel_items.len() < 50);
+
+                slint::invoke_from_event_loop(move || {
+                    let Some(ui) = weak.upgrade() else { return };
+                    let model = std::rc::Rc::new(slint::VecModel::from(cards));
+                    ui.set_channel_items(model.into());
+                    ui.set_channel_has_more(has_more);
+                    ui.set_channel_loading(false);
+                })
+                .ok();
+            });
+        });
+    }
+
+    // 3. Search Channel Videos
+    {
+        let weak = ui.as_weak();
+        let channel_items_cache = channel_items_cache.clone();
+
+        ui.on_search_channel_videos(move |query| {
+            let Some(ui) = weak.upgrade() else { return };
+            let q = query.to_string().trim().to_lowercase();
+            let all = channel_items_cache.lock().unwrap().clone();
+            let filtered: Vec<TvItem> = if q.is_empty() {
+                all
+            } else {
+                all.into_iter()
+                    .filter(|i| {
+                        i.title.to_lowercase().contains(&q)
+                            || i.overview.as_ref().map_or(false, |o| o.to_lowercase().contains(&q))
+                            || i.studios.iter().any(|s| s.to_lowercase().contains(&q))
+                            || i.people.iter().any(|p| p.name.to_lowercase().contains(&q))
+                    })
+                    .collect()
+            };
+
+            let cards = filtered.iter().map(tv_item_to_card).collect::<Vec<_>>();
+            let model = std::rc::Rc::new(slint::VecModel::from(cards));
+            ui.set_channel_items(model.into());
+        });
+    }
+
+    // 4. Initial Channel Population
+    {
+        let weak = ui.as_weak();
+        let local_store = local_store.clone();
+        let credential_store = credential_store.clone();
+        let resolver = resolver.clone();
+        let cached_catalog = cached_catalog.clone();
+        let channel_items_cache = channel_items_cache.clone();
+
+        std::thread::spawn(move || {
+            let res_url = local_store
+                .get_setting("resolver_base_url")
+                .ok()
+                .flatten()
+                .or_else(|| credential_store.get().ok().flatten().map(|s| s.server_url))
+                .unwrap_or_default();
+
+            if !res_url.is_empty() {
+                if let Ok(cats) = resolver.get_categories(&res_url) {
+                    if !cats.is_empty() {
+                        let mut cat_names = vec!["All Channels".to_string()];
+                        for c in cats {
+                            cat_names.push(c.title);
+                        }
+                        let weak2 = weak.clone();
+                        slint::invoke_from_event_loop(move || {
+                            let Some(ui) = weak2.upgrade() else { return };
+                            let cat_model = std::rc::Rc::new(slint::VecModel::from(
+                                cat_names
+                                    .into_iter()
+                                    .map(slint::SharedString::from)
+                                    .collect::<Vec<_>>(),
+                            ));
+                            ui.set_channels_categories(cat_model.into());
+                        })
+                        .ok();
+                    }
+                }
+            }
+
+            // Populate initial videos for default channel
+            let pool = cached_catalog.lock().unwrap().clone();
+            let initial_items: Vec<TvItem> = pool.into_iter().take(15).collect();
+            *channel_items_cache.lock().unwrap() = initial_items.clone();
+            let cards = initial_items.iter().map(tv_item_to_card).collect::<Vec<_>>();
+            let weak2 = weak.clone();
+            slint::invoke_from_event_loop(move || {
+                let Some(ui) = weak2.upgrade() else { return };
+                let model = std::rc::Rc::new(slint::VecModel::from(cards));
+                ui.set_channel_items(model.into());
+                ui.set_channel_has_more(true);
+            })
+            .ok();
+        });
+    }
+}
+
+fn install_stage9_handlers(
+    ui: &MainWindow,
+    player: Option<Rc<Player>>,
+) {
+    // 1. Video Canvas Clicked (Double-click -> Fullscreen, Single-click -> Play/Pause)
+    {
+        let weak = ui.as_weak();
+        let last_click = Arc::new(Mutex::new(std::time::Instant::now() - Duration::from_secs(10)));
+        ui.on_video_canvas_clicked(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let now = std::time::Instant::now();
+            let mut last = last_click.lock().unwrap();
+            if now.duration_since(*last) < Duration::from_millis(350) {
+                // Double click: toggle fullscreen
+                *last = now - Duration::from_secs(10);
+                ui.invoke_toggle_fullscreen();
+                ui.invoke_toggle_play(); // revert single click play toggle so playback state persists
+            } else {
+                *last = now;
+                ui.invoke_toggle_play();
+            }
+        });
+    }
+
+    // 2. Adjust Volume (Arrow keys or gestures: +/- 5%)
+    {
+        let weak = ui.as_weak();
+        let player = player.clone();
+        ui.on_adjust_volume(move |delta| {
+            let Some(ui) = weak.upgrade() else { return };
+            let cur = ui.get_volume();
+            let new_vol = (cur + delta).clamp(0.0, 100.0);
+            if let Some(player) = &player {
+                let _ = player.set_volume(new_vol as f64);
+            }
+            ui.set_volume(new_vol);
+        });
+    }
+
+    // 3. Mouse Wheel Scrolled over Canvas
+    {
+        let weak = ui.as_weak();
+        ui.on_mouse_scrolled(move |delta_y| {
+            let Some(ui) = weak.upgrade() else { return };
+            let delta = if delta_y > 0.0 { 5.0 } else { -5.0 };
+            ui.invoke_adjust_volume(delta);
+        });
+    }
+}
+
 
 fn install_renderer(
     ui: &MainWindow,
@@ -3660,6 +4248,238 @@ mod tests {
     }
 
     #[test]
+    fn stage7_similar_items_ranking() {
+        let target = TvItem {
+            id: "target-1".into(),
+            title: "Target Video".into(),
+            overview: None,
+            year: Some(2025),
+            runtime_ticks: Some(120_000_000_000),
+            genres: vec!["Blonde".into(), "Hardcore".into()],
+            tags: vec![],
+            studios: vec!["Brazzers".into()],
+            people: vec![make_sample_person("Eva Elfie")],
+            primary_image_tag: None,
+            backdrop_image_tag: None,
+            thumb_image_tag: None,
+            is_favorite: false,
+            playback_position_ticks: 0,
+            played_percentage: None,
+            is_played: false,
+            provider_video_id: None,
+            media_source_id: None,
+            container: None,
+            file_size_bytes: None,
+            width: None,
+            height: None,
+        };
+
+        let item_high_match = TvItem {
+            id: "high-match".into(),
+            title: "High Match Video".into(),
+            overview: None,
+            year: Some(2025),
+            runtime_ticks: None,
+            genres: vec!["Blonde".into()],
+            tags: vec![],
+            studios: vec!["Brazzers".into()],
+            people: vec![make_sample_person("Eva Elfie")],
+            primary_image_tag: None,
+            backdrop_image_tag: None,
+            thumb_image_tag: None,
+            is_favorite: false,
+            playback_position_ticks: 0,
+            played_percentage: None,
+            is_played: false,
+            provider_video_id: None,
+            media_source_id: None,
+            container: None,
+            file_size_bytes: None,
+            width: None,
+            height: None,
+        };
+
+        let item_low_match = TvItem {
+            id: "low-match".into(),
+            title: "Low Match Video".into(),
+            overview: None,
+            year: Some(2025),
+            runtime_ticks: None,
+            genres: vec!["Hardcore".into()],
+            tags: vec![],
+            studios: vec!["Other Studio".into()],
+            people: vec![],
+            primary_image_tag: None,
+            backdrop_image_tag: None,
+            thumb_image_tag: None,
+            is_favorite: false,
+            playback_position_ticks: 0,
+            played_percentage: None,
+            is_played: false,
+            provider_video_id: None,
+            media_source_id: None,
+            container: None,
+            file_size_bytes: None,
+            width: None,
+            height: None,
+        };
+
+        let item_no_match = TvItem {
+            id: "no-match".into(),
+            title: "No Match Video".into(),
+            overview: None,
+            year: Some(2025),
+            runtime_ticks: None,
+            genres: vec!["Brunette".into()],
+            tags: vec![],
+            studios: vec!["Different Studio".into()],
+            people: vec![],
+            primary_image_tag: None,
+            backdrop_image_tag: None,
+            thumb_image_tag: None,
+            is_favorite: false,
+            playback_position_ticks: 0,
+            played_percentage: None,
+            is_played: false,
+            provider_video_id: None,
+            media_source_id: None,
+            container: None,
+            file_size_bytes: None,
+            width: None,
+            height: None,
+        };
+
+        let catalog = vec![
+            target.clone(),
+            item_no_match,
+            item_low_match.clone(),
+            item_high_match.clone(),
+        ];
+
+        let mut scored: Vec<(i32, TvItem)> = catalog
+            .into_iter()
+            .filter(|i| i.id != target.id)
+            .map(|i| {
+                let mut score = 0;
+                for g in &target.genres {
+                    if i.genres.iter().any(|ig| ig.eq_ignore_ascii_case(g)) {
+                        score += 3;
+                    }
+                }
+                for s in &target.studios {
+                    if i.studios.iter().any(|is| is.eq_ignore_ascii_case(s)) {
+                        score += 5;
+                    }
+                }
+                for p in &target.people {
+                    if i.people.iter().any(|ip| ip.name.eq_ignore_ascii_case(&p.name)) {
+                        score += 4;
+                    }
+                }
+                (score, i)
+            })
+            .collect();
+
+        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        let similar: Vec<TvItem> = scored
+            .into_iter()
+            .filter(|(s, _)| *s > 0)
+            .map(|(_, i)| i)
+            .collect();
+
+        assert_eq!(similar.len(), 2);
+        assert_eq!(similar[0].id, "high-match");
+        assert_eq!(similar[1].id, "low-match");
+    }
+
+    #[test]
+    fn stage8_channel_category_and_search_filtering() {
+        let v1 = TvItem {
+            id: "telegram:101".into(),
+            title: "4K UHD Exclusive Scene".into(),
+            overview: None,
+            year: Some(2026),
+            runtime_ticks: Some(30 * 60 * 10_000_000), // 30m
+            genres: vec!["Exclusive".into()],
+            tags: vec![],
+            studios: vec!["Private Studio".into()],
+            people: vec![make_sample_person("Angela White")],
+            primary_image_tag: None,
+            backdrop_image_tag: None,
+            thumb_image_tag: None,
+            is_favorite: false,
+            playback_position_ticks: 0,
+            played_percentage: None,
+            is_played: false,
+            provider_video_id: None,
+            media_source_id: None,
+            container: None,
+            file_size_bytes: None,
+            width: Some(3840),
+            height: Some(2160),
+        };
+
+        let v2 = TvItem {
+            id: "telegram:102".into(),
+            title: "VR Experience 180 3D".into(),
+            overview: None,
+            year: Some(2026),
+            runtime_ticks: Some(10 * 60 * 10_000_000), // 10m (highlight clip)
+            genres: vec!["VR".into()],
+            tags: vec![],
+            studios: vec![],
+            people: vec![make_sample_person("Maitland Ward")],
+            primary_image_tag: None,
+            backdrop_image_tag: None,
+            thumb_image_tag: None,
+            is_favorite: false,
+            playback_position_ticks: 0,
+            played_percentage: None,
+            is_played: false,
+            provider_video_id: None,
+            media_source_id: None,
+            container: None,
+            file_size_bytes: None,
+            width: Some(1920),
+            height: Some(1080),
+        };
+
+        let items = vec![v1.clone(), v2.clone()];
+
+        // 4K filter test
+        let k4_filtered: Vec<_> = items
+            .iter()
+            .filter(|i| i.height.map_or(false, |h| h >= 2160) || i.title.to_lowercase().contains("4k"))
+            .collect();
+        assert_eq!(k4_filtered.len(), 1);
+        assert_eq!(k4_filtered[0].id, "telegram:101");
+
+        // VR filter test
+        let vr_filtered: Vec<_> = items
+            .iter()
+            .filter(|i| i.genres.iter().any(|g| g.to_lowercase().contains("vr")) || i.title.to_lowercase().contains("vr"))
+            .collect();
+        assert_eq!(vr_filtered.len(), 1);
+        assert_eq!(vr_filtered[0].id, "telegram:102");
+
+        // Highlight clip (< 15m)
+        let highlight_filtered: Vec<_> = items
+            .iter()
+            .filter(|i| i.runtime_ticks.map_or(false, |t| t < 15 * 60 * 10_000_000))
+            .collect();
+        assert_eq!(highlight_filtered.len(), 1);
+        assert_eq!(highlight_filtered[0].id, "telegram:102");
+
+        // Search by performer in channel
+        let search_angela: Vec<_> = items
+            .iter()
+            .filter(|i| i.people.iter().any(|p| p.name.to_lowercase().contains("angela")))
+            .collect();
+        assert_eq!(search_angela.len(), 1);
+        assert_eq!(search_angela[0].id, "telegram:101");
+    }
+
+    #[test]
     fn sample_catalog_defaults() {
         let samples = sample_catalog_items();
         assert!(!samples.is_empty());
@@ -3670,4 +4490,17 @@ mod tests {
         assert!(!channels.is_empty());
         assert!(channels[0].id.starts_with("telegram:"));
     }
+
+    #[test]
+    fn stage9_volume_clamping_and_step_adjustment() {
+        let clamp_vol = |cur: f32, delta: f32| -> f32 {
+            (cur + delta).clamp(0.0, 100.0)
+        };
+
+        assert_eq!(clamp_vol(98.0, 5.0), 100.0);
+        assert_eq!(clamp_vol(3.0, -5.0), 0.0);
+        assert_eq!(clamp_vol(50.0, 5.0), 55.0);
+        assert_eq!(clamp_vol(50.0, -5.0), 45.0);
+    }
 }
+

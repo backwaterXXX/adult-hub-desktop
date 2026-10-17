@@ -156,6 +156,61 @@ fn default_provider() -> String {
     "telegram".into()
 }
 
+impl From<VideoDto> for TvItem {
+    fn from(v: VideoDto) -> Self {
+        let prov_id = if v.provider_video_id.is_empty() {
+            v.id.clone()
+        } else {
+            v.provider_video_id
+        };
+        let full_id = if v.provider == "telegram" && !prov_id.starts_with("telegram:") {
+            format!("telegram:{prov_id}")
+        } else {
+            prov_id.clone()
+        };
+        let people = v
+            .performers
+            .into_iter()
+            .map(|name| TvPersonRole {
+                id: name.to_lowercase().replace(' ', "_"),
+                name,
+                role: Some("Actor".into()),
+                person_type: Some("Actor".into()),
+                primary_image_tag: None,
+            })
+            .collect();
+
+        TvItem {
+            id: full_id,
+            title: v.title,
+            overview: v.description,
+            year: None,
+            runtime_ticks: if v.duration > 0.0 {
+                Some((v.duration * 10_000_000.0) as i64)
+            } else {
+                None
+            },
+            genres: v.categories,
+            tags: vec![],
+            studios: vec![],
+            people,
+            primary_image_tag: v.thumbnail,
+            backdrop_image_tag: None,
+            thumb_image_tag: None,
+            is_favorite: false,
+            playback_position_ticks: 0,
+            played_percentage: None,
+            is_played: false,
+            provider_video_id: Some(prov_id),
+            media_source_id: None,
+            container: Some("mp4".into()),
+            file_size_bytes: v.file_size,
+            width: None,
+            height: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PerformerBioDto {
     pub name: String,
@@ -284,6 +339,44 @@ pub struct PhashJobDto {
     pub error_code: Option<String>,
     #[serde(default)]
     pub thumbnail_ready: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn video_dto_to_tv_item_conversion() {
+        let dto = VideoDto {
+            id: "vid_999".into(),
+            provider: "telegram".into(),
+            provider_video_id: "channel_4k:999".into(),
+            title: "Ultra 4K Scene".into(),
+            slug: "ultra-4k-scene".into(),
+            url: "https://t.me/c/123/999".into(),
+            thumbnail: Some("https://thumb/999.jpg".into()),
+            duration: 120.0,
+            performers: vec!["Eva Green".into(), "Mia Ray".into()],
+            categories: vec!["4K".into(), "Exclusive".into()],
+            views: Some("15k".into()),
+            published: Some("2026-10-15".into()),
+            description: Some("Top tier performance".into()),
+            file_size: Some(1_048_576),
+        };
+
+        let item: TvItem = dto.into();
+        assert_eq!(item.id, "telegram:channel_4k:999");
+        assert_eq!(item.title, "Ultra 4K Scene");
+        assert_eq!(item.overview.as_deref(), Some("Top tier performance"));
+        assert_eq!(item.runtime_ticks, Some(1_200_000_000));
+        assert_eq!(item.genres, vec!["4K", "Exclusive"]);
+        assert_eq!(item.people.len(), 2);
+        assert_eq!(item.people[0].name, "Eva Green");
+        assert_eq!(item.people[1].name, "Mia Ray");
+        assert_eq!(item.primary_image_tag.as_deref(), Some("https://thumb/999.jpg"));
+        assert_eq!(item.provider_video_id.as_deref(), Some("channel_4k:999"));
+        assert!(item.is_telegram());
+    }
 }
 
 

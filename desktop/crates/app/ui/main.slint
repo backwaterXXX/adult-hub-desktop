@@ -536,6 +536,44 @@ export component MainWindow inherits Window {
     callback select-performer(string);
     callback select-studio(string);
 
+    // Stage 7 Performer & Studio Profiles & Similar Items
+    in-out property <bool> performer-profile-visible: false;
+    in-out property <string> performer-name: "";
+    in-out property <string> performer-bio: "";
+    in-out property <string> performer-nationality: "";
+    in-out property <string> performer-birth: "";
+    in-out property <string> performer-aliases: "";
+    in-out property <[VideoCardData]> performer-items: [];
+
+    callback open-performer-profile(string);
+    callback close-performer-profile();
+
+    in-out property <bool> studio-profile-visible: false;
+    in-out property <string> studio-name: "";
+    in-out property <[VideoCardData]> studio-items: [];
+
+    callback open-studio-profile(string);
+    callback close-studio-profile();
+
+    in-out property <[VideoCardData]> detail-similar-items: [];
+
+    // Stage 8 Hierarchical Channels Browser & Telegram Cursor Pagination
+    in-out property <[string]> channels-categories: ["All Channels", "4K Studios", "VR Experience", "Highlight Clips", "Exclusive"];
+    in-out property <string> active-channel-category: "All Channels";
+    in-out property <string> channel-search-query: "";
+    in-out property <[VideoCardData]> channel-items: [];
+    in-out property <bool> channel-has-more: false;
+    in-out property <bool> channel-loading: false;
+
+    callback select-channel-category(string);
+    callback load-more-channel-videos();
+    callback search-channel-videos(string);
+
+    // Stage 9 HTPC / Gamepad / Remote Navigation & Enhanced Desktop Gestures
+    callback video-canvas-clicked();
+    callback mouse-scrolled(float);
+    callback adjust-volume(float);
+
 
     VerticalLayout {
         spacing: 0px;
@@ -600,6 +638,12 @@ export component MainWindow inherits Window {
                     text: "Browse";
                     selected: root.active-screen == "browse";
                     clicked => { root.switch-screen("browse"); }
+                }
+
+                TvChoiceChip {
+                    text: "Channels";
+                    selected: root.active-screen == "channels";
+                    clicked => { root.switch-screen("channels"); }
                 }
 
                 TvChoiceChip {
@@ -819,7 +863,180 @@ export component MainWindow inherits Window {
             }
 
             // ==========================================
-            // 2. PLAYER SCREEN
+            // 2. CHANNELS SCREEN (Stage 8)
+            // ==========================================
+            if root.active-screen == "channels" : HorizontalLayout {
+                spacing: 0px;
+
+                // Left Sidebar: Categories & Channels
+                Rectangle {
+                    width: 240px;
+                    background: #0d0d12;
+
+                    Rectangle {
+                        x: parent.width - 1px;
+                        width: 1px;
+                        height: 100%;
+                        background: #ffffff14;
+                    }
+
+                    VerticalLayout {
+                        padding: 16px;
+                        spacing: 12px;
+
+                        Text {
+                            text: "CHANNELS & CATEGORIES";
+                            color: #9e9e9e;
+                            font-size: 11px;
+                            font-weight: 700;
+                            letter-spacing: 1px;
+                        }
+
+                        ListView {
+                            vertical-stretch: 1;
+
+                            for cat in root.channels-categories : VerticalLayout {
+                                padding-bottom: 6px;
+
+                                Rectangle {
+                                    height: 38px;
+                                    border-radius: 8px;
+                                    background: cat == root.active-channel-category ? #e91e6322 : (cat-touch.has-hover ? #1c1c24 : #121216);
+                                    border-width: 1px;
+                                    border-color: cat == root.active-channel-category ? #e91e63 : (cat-touch.has-hover ? #ffffff22 : transparent);
+
+                                    HorizontalLayout {
+                                        padding-left: 14px;
+                                        padding-right: 14px;
+                                        alignment: center;
+                                        spacing: 10px;
+
+                                        Text {
+                                            text: "📺";
+                                            font-size: 13px;
+                                            vertical-alignment: center;
+                                        }
+
+                                        Text {
+                                            text: cat;
+                                            color: cat == root.active-channel-category ? #ffffff : (cat-touch.has-hover ? #ffffff : #cccccc);
+                                            font-size: 13px;
+                                            font-weight: cat == root.active-channel-category ? 700 : 500;
+                                            horizontal-stretch: 1;
+                                            overflow: elide;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+
+                                    cat-touch := TouchArea {
+                                        clicked => {
+                                            root.select-channel-category(cat);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Right Section: Channel Videos Content
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    padding-left: 24px;
+                    padding-right: 24px;
+                    padding-top: 18px;
+                    padding-bottom: 18px;
+                    spacing: 14px;
+
+                    // Channel Header Bar
+                    HorizontalLayout {
+                        spacing: 14px;
+                        alignment: center;
+
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 4px;
+
+                            Text {
+                                text: root.active-channel-category;
+                                color: #ffffff;
+                                font-size: 20px;
+                                font-weight: 700;
+                            }
+
+                            Text {
+                                text: "Telegram Channel Media Stream • " + root.channel-items.length + " loaded";
+                                color: #9e9e9e;
+                                font-size: 12px;
+                            }
+                        }
+
+                        // Search in channel
+                        LineEdit {
+                            width: 260px;
+                            text: root.channel-search-query;
+                            placeholder-text: "Search in channel...";
+                            edited(text) => { root.channel-search-query = text; }
+                            accepted(text) => {
+                                root.channel-search-query = text;
+                                root.search-channel-videos(text);
+                            }
+                        }
+
+                        TvSecondaryButton {
+                            text: "Search";
+                            custom-height: 34px;
+                            clicked => { root.search-channel-videos(root.channel-search-query); }
+                        }
+                    }
+
+                    // Video list in channel
+                    ListView {
+                        vertical-stretch: 1;
+
+                        for item in root.channel-items : VerticalLayout {
+                            padding-bottom: 10px;
+                            MovieCardItem {
+                                item: item;
+                                play => { root.play-item(item.id); }
+                                open-detail => { root.open-item-detail(item.id); }
+                            }
+                        }
+                    }
+
+                    // Bottom pagination / loading bar
+                    HorizontalLayout {
+                        spacing: 12px;
+                        alignment: center;
+
+                        if root.channel-loading : Text {
+                            text: "Loading channel videos from Telegram...";
+                            color: #e91e63;
+                            font-size: 13px;
+                            font-weight: 600;
+                            horizontal-stretch: 1;
+                            vertical-alignment: center;
+                        }
+
+                        if !root.channel-loading : Text {
+                            text: root.channel-items.length + " channel videos";
+                            color: #666666;
+                            font-size: 12px;
+                            horizontal-stretch: 1;
+                            vertical-alignment: center;
+                        }
+
+                        if root.channel-has-more : TvPrimaryButton {
+                            text: "⬇ Load More Telegram Videos";
+                            custom-height: 34px;
+                            clicked => { root.load-more-channel-videos(); }
+                        }
+                    }
+                }
+            }
+
+            // ==========================================
+            // 3. PLAYER SCREEN
             // ==========================================
             if root.active-screen == "player" : VerticalLayout {
                 spacing: 0px;
@@ -836,6 +1053,25 @@ export component MainWindow inherits Window {
                         image-fit: contain;
                         width: 100%;
                         height: 100%;
+                    }
+
+                    video-touch := TouchArea {
+                        width: 100%;
+                        height: 100%;
+                        clicked => {
+                            root.video-canvas-clicked();
+                        }
+                        scroll-event(event) => {
+                            root.mouse-scrolled(event.delta-y / 1px);
+                            return EventResult.accept;
+                        }
+                        pointer-event(event) => {
+                            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
+                                root.toggle-hud();
+                                return EventResult.accept;
+                            }
+                            EventResult.reject
+                        }
                     }
 
                     // Top OSD Header
@@ -1994,7 +2230,7 @@ export component MainWindow inherits Window {
                                 }
 
                                 studio-touch := TouchArea {
-                                    clicked => { root.select-studio(root.detail-studio); }
+                                    clicked => { root.open-studio-profile(root.detail-studio); }
                                 }
                             }
                         }
@@ -2099,7 +2335,56 @@ export component MainWindow inherits Window {
                                 }
 
                                 perf-touch := TouchArea {
-                                    clicked => { root.select-performer(performer); }
+                                    clicked => { root.open-performer-profile(performer); }
+                                }
+                            }
+                        }
+                    }
+
+                    // More Like This / Similar Titles
+                    if root.detail-similar-items.length > 0 : VerticalLayout {
+                        spacing: 6px;
+
+                        Text {
+                            text: "More Like This:";
+                            color: #9e9e9e;
+                            font-size: 12px;
+                            font-weight: 600;
+                        }
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            for sim in root.detail-similar-items : Rectangle {
+                                height: 32px;
+                                border-radius: 6px;
+                                background: sim-touch.has-hover ? #2a2a35 : #1a1a20;
+                                border-width: 1px;
+                                border-color: sim-touch.has-hover ? #e91e63 : #ffffff1f;
+
+                                HorizontalLayout {
+                                    padding-left: 10px;
+                                    padding-right: 10px;
+                                    spacing: 8px;
+                                    alignment: center;
+
+                                    Text {
+                                        text: "🎬";
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                    }
+
+                                    Text {
+                                        text: sim.title;
+                                        color: sim-touch.has-hover ? #ffffff : #e0e0e0;
+                                        font-size: 12px;
+                                        font-weight: 500;
+                                        overflow: elide;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                sim-touch := TouchArea {
+                                    clicked => { root.open-item-detail(sim.id); }
                                 }
                             }
                         }
@@ -2151,6 +2436,400 @@ export component MainWindow inherits Window {
         }
     }
 
+    // ── Performer Profile Dialog (Stage 7) ──────────────────────────────────
+    if root.performer-profile-visible : Rectangle {
+        z: 95;
+        background: #000000b0;
+
+        TouchArea {
+            // Absorb clicks on backdrop to close
+            clicked => { root.close-performer-profile(); }
+        }
+
+        Rectangle {
+            width: Math.min(root.width - 80px, 860px);
+            height: Math.min(root.height - 80px, 680px);
+            background: #14141cf8;
+            border-radius: 16px;
+            border-width: 1px;
+            border-color: #ff336640;
+            clip: true;
+
+            TouchArea {
+                // Absorb click inside dialog body
+            }
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 16px;
+
+                // Header with Performer info
+                HorizontalLayout {
+                    spacing: 20px;
+                    alignment: start;
+
+                    Rectangle {
+                        width: 96px;
+                        height: 96px;
+                        border-radius: 48px;
+                        background: #ff336622;
+                        border-width: 2px;
+                        border-color: #ff3366;
+
+                        Text {
+                            text: "★";
+                            font-size: 36px;
+                            color: #ff3366;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 6px;
+                        alignment: center;
+
+                        Text {
+                            text: root.performer-name;
+                            font-size: 24px;
+                            font-weight: 700;
+                            color: #ffffff;
+                        }
+
+                        HorizontalLayout {
+                            spacing: 12px;
+                            if root.performer-nationality != "" : Text {
+                                text: "🌍 " + root.performer-nationality;
+                                font-size: 13px;
+                                color: #ff99bb;
+                            }
+                            if root.performer-birth != "" : Text {
+                                text: "🎂 " + root.performer-birth;
+                                font-size: 13px;
+                                color: #888899;
+                            }
+                        }
+
+                        if root.performer-aliases != "" : Text {
+                            text: "AKA: " + root.performer-aliases;
+                            font-size: 12px;
+                            color: #aaaaaa;
+                        }
+                    }
+
+                    Rectangle { horizontal-stretch: 1; }
+
+                    TvSecondaryButton {
+                        text: "✕ Close";
+                        clicked => { root.close-performer-profile(); }
+                    }
+                }
+
+                // Biography snippet
+                if root.performer-bio != "" : Rectangle {
+                    background: #ffffff0a;
+                    border-radius: 8px;
+                    max-height: 100px;
+                    clip: true;
+
+                    VerticalLayout {
+                        padding: 12px;
+                        Text {
+                            text: root.performer-bio;
+                            font-size: 13px;
+                            color: #dddddd;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                // Filmography title
+                HorizontalLayout {
+                    Text {
+                        text: "Filmography / Videos (" + root.performer-items.length + ")";
+                        font-size: 16px;
+                        font-weight: 600;
+                        color: #ff99bb;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+
+                // Filmography list
+                ScrollView {
+                    vertical-stretch: 1;
+
+                    VerticalLayout {
+                        spacing: 8px;
+
+                        for item in root.performer-items : Rectangle {
+                            height: 64px;
+                            background: item-hover.has-hover ? #ff336622 : #ffffff08;
+                            border-radius: 8px;
+                            border-width: 1px;
+                            border-color: item-hover.has-hover ? #ff336666 : transparent;
+
+                            HorizontalLayout {
+                                padding-left: 12px;
+                                padding-right: 12px;
+                                spacing: 14px;
+                                alignment: center;
+
+                                Rectangle {
+                                    width: 80px;
+                                    height: 48px;
+                                    border-radius: 4px;
+                                    background: #00000066;
+                                    clip: true;
+
+                                    Text {
+                                        text: "▶";
+                                        font-size: 18px;
+                                        color: #ffffff88;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 4px;
+                                    alignment: center;
+
+                                    Text {
+                                        text: item.title;
+                                        font-size: 14px;
+                                        font-weight: 600;
+                                        color: #ffffff;
+                                        overflow: elide;
+                                    }
+
+                                    HorizontalLayout {
+                                        spacing: 10px;
+                                        if item.year != "" : Text {
+                                            text: item.year;
+                                            font-size: 12px;
+                                            color: #888899;
+                                        }
+                                        if item.duration != "" : Text {
+                                            text: item.duration;
+                                            font-size: 12px;
+                                            color: #ffcc00;
+                                        }
+                                        if item.studio != "" : Text {
+                                            text: item.studio;
+                                            font-size: 12px;
+                                            color: #ff99bb;
+                                            overflow: elide;
+                                        }
+                                    }
+                                }
+
+                                TvPrimaryButton {
+                                    text: "▶ Play";
+                                    clicked => {
+                                        root.close-performer-profile();
+                                        root.play-detail-item(item.id, false);
+                                    }
+                                }
+
+                                TvSecondaryButton {
+                                    text: "Details";
+                                    clicked => {
+                                        root.close-performer-profile();
+                                        root.open-item-detail(item.id);
+                                    }
+                                }
+                            }
+
+                            item-hover := TouchArea {
+                                clicked => {
+                                    root.close-performer-profile();
+                                    root.open-item-detail(item.id);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Studio Profile Dialog (Stage 7) ─────────────────────────────────────
+    if root.studio-profile-visible : Rectangle {
+        z: 95;
+        background: #000000b0;
+
+        TouchArea {
+            clicked => { root.close-studio-profile(); }
+        }
+
+        Rectangle {
+            width: Math.min(root.width - 80px, 860px);
+            height: Math.min(root.height - 80px, 680px);
+            background: #14141cf8;
+            border-radius: 16px;
+            border-width: 1px;
+            border-color: #ff663340;
+            clip: true;
+
+            TouchArea {}
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 16px;
+
+                // Header with Studio info
+                HorizontalLayout {
+                    spacing: 20px;
+                    alignment: start;
+
+                    Rectangle {
+                        width: 96px;
+                        height: 96px;
+                        border-radius: 12px;
+                        background: #ff663322;
+                        border-width: 2px;
+                        border-color: #ff6633;
+
+                        Text {
+                            text: "🏢";
+                            font-size: 36px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 6px;
+                        alignment: center;
+
+                        Text {
+                            text: root.studio-name;
+                            font-size: 24px;
+                            font-weight: 700;
+                            color: #ffffff;
+                        }
+
+                        Text {
+                            text: "Studio Catalog & Releases";
+                            font-size: 13px;
+                            color: #ffaa88;
+                        }
+                    }
+
+                    Rectangle { horizontal-stretch: 1; }
+
+                    TvSecondaryButton {
+                        text: "✕ Close";
+                        clicked => { root.close-studio-profile(); }
+                    }
+                }
+
+                // Studio catalog title
+                HorizontalLayout {
+                    Text {
+                        text: "Releases (" + root.studio-items.length + ")";
+                        font-size: 16px;
+                        font-weight: 600;
+                        color: #ffaa88;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+
+                // Studio items list
+                ScrollView {
+                    vertical-stretch: 1;
+
+                    VerticalLayout {
+                        spacing: 8px;
+
+                        for item in root.studio-items : Rectangle {
+                            height: 64px;
+                            background: studio-item-hover.has-hover ? #ff663322 : #ffffff08;
+                            border-radius: 8px;
+                            border-width: 1px;
+                            border-color: studio-item-hover.has-hover ? #ff663366 : transparent;
+
+                            HorizontalLayout {
+                                padding-left: 12px;
+                                padding-right: 12px;
+                                spacing: 14px;
+                                alignment: center;
+
+                                Rectangle {
+                                    width: 80px;
+                                    height: 48px;
+                                    border-radius: 4px;
+                                    background: #00000066;
+                                    clip: true;
+
+                                    Text {
+                                        text: "▶";
+                                        font-size: 18px;
+                                        color: #ffffff88;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 4px;
+                                    alignment: center;
+
+                                    Text {
+                                        text: item.title;
+                                        font-size: 14px;
+                                        font-weight: 600;
+                                        color: #ffffff;
+                                        overflow: elide;
+                                    }
+
+                                    HorizontalLayout {
+                                        spacing: 10px;
+                                        if item.year != "" : Text {
+                                            text: item.year;
+                                            font-size: 12px;
+                                            color: #888899;
+                                        }
+                                        if item.duration != "" : Text {
+                                            text: item.duration;
+                                            font-size: 12px;
+                                            color: #ffcc00;
+                                        }
+                                    }
+                                }
+
+                                TvPrimaryButton {
+                                    text: "▶ Play";
+                                    clicked => {
+                                        root.close-studio-profile();
+                                        root.play-detail-item(item.id, false);
+                                    }
+                                }
+
+                                TvSecondaryButton {
+                                    text: "Details";
+                                    clicked => {
+                                        root.close-studio-profile();
+                                        root.open-item-detail(item.id);
+                                    }
+                                }
+                            }
+
+                            studio-item-hover := TouchArea {
+                                clicked => {
+                                    root.close-studio-profile();
+                                    root.open-item-detail(item.id);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     keys := FocusScope {
         key-pressed(event) => {
             // Panic Exit: Ctrl+Shift+Q
@@ -2159,23 +2838,35 @@ export component MainWindow inherits Window {
                 return accept;
             }
 
-            // Quick navigation
+            // Quick navigation (Stage 9)
             if (event.text == "1") {
                 root.switch-screen("browse");
                 return accept;
             }
             if (event.text == "2") {
-                root.switch-screen("player");
+                root.switch-screen("channels");
                 return accept;
             }
             if (event.text == "3") {
+                root.switch-screen("player");
+                return accept;
+            }
+            if (event.text == "4") {
                 root.switch-screen("settings");
                 return accept;
             }
 
-            // Player controls
+            // Player controls (Stage 9)
             if (event.text == Key.Space) {
                 root.toggle-play();
+                return accept;
+            }
+            if (event.text == Key.UpArrow) {
+                root.adjust-volume(5.0);
+                return accept;
+            }
+            if (event.text == Key.DownArrow) {
+                root.adjust-volume(-5.0);
                 return accept;
             }
             if (event.text == Key.LeftArrow) {
@@ -2186,6 +2877,14 @@ export component MainWindow inherits Window {
                 root.seek-relative(root.seek-step-sec);
                 return accept;
             }
+            if (event.text == "[" || event.text == "{") {
+                root.seek-relative(-30.0);
+                return accept;
+            }
+            if (event.text == "]" || event.text == "}") {
+                root.seek-relative(30.0);
+                return accept;
+            }
             if (event.text == "f" || event.text == "F") {
                 root.toggle-fullscreen();
                 return accept;
@@ -2194,11 +2893,11 @@ export component MainWindow inherits Window {
                 root.toggle-hud();
                 return accept;
             }
-            if (event.text == "m" || event.text == "M") {
+            if (event.text == "m" || event.text == "M" || event.text == "0") {
                 root.toggle-mute();
                 return accept;
             }
-            if (event.text == "s" || event.text == "S") {
+            if (event.text == "s" || event.text == "S" || event.text == "," || event.text == "<") {
                 root.cycle-speed();
                 return accept;
             }
@@ -2215,6 +2914,15 @@ export component MainWindow inherits Window {
                 return accept;
             }
             if (event.text == Key.Escape) {
+                // Hierarchical dismiss
+                if (root.performer-profile-visible) {
+                    root.close-performer-profile();
+                    return accept;
+                }
+                if (root.studio-profile-visible) {
+                    root.close-studio-profile();
+                    return accept;
+                }
                 if (root.detail-visible) {
                     root.close-item-detail();
                     return accept;

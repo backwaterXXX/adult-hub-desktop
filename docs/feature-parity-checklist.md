@@ -35,6 +35,9 @@ Status key:
 | Resume from Detail | `DetailScreen.kt` | Direct Resume vs Play from Start | `VERIFIED` | Dynamic `Resume (mm:ss)` and `Play from Start` actions. |
 | Favorites Sync | `ItemDetailDialog.kt` | Favorite toggle (`❤️`) | `VERIFIED` | Local UI state + Jellyfin POST/DELETE `/Users/{id}/FavoriteItems/{id}`. |
 | Watched Sync | `ItemDetailDialog.kt` | Played toggle (`✓`) | `VERIFIED` | Local UI state + Jellyfin POST/DELETE `/Users/{id}/PlayedItems/{id}`. |
+| Performer Profiles | `PersonRepository.kt` | `PerformerProfileDialog` modal overlay | `VERIFIED` | Avatar, bio from resolver, nationality, birth, aliases, full filmography card list. |
+| Studio Profiles | `StudioRepository.kt` | `StudioProfileDialog` modal overlay | `VERIFIED` | Studio badge, release counter, and studio catalog releases list. |
+| Similar Items | `DetailScreen.kt` | "More Like This" recommendations | `VERIFIED` | Weighted ranking by studio (+5), performers (+4), genres (+3) in detail dialog. |
 | Performer drilldown | `PersonRepository.kt` | Performer chips + filter | `VERIFIED` | Click performer chip in detail to filter catalog. |
 | Studio drilldown | `StudioRepository.kt` | Studio badge + filter | `VERIFIED` | Click studio badge in detail to filter catalog. |
 | Categories & chips | `LibraryRepository.kt:genres` | Category chips top bar | `VERIFIED` | Latest, Resume, Channels, Favorites, Performers, Studios. |
@@ -46,24 +49,28 @@ Status key:
 
 | Android Feature | Android Reference | Desktop Equivalent | Status | Evidence / Notes |
 | --- | --- | --- | --- | --- |
-| Resolver categories | `ResolverApi.kt:12` | `ResolverClient::get_categories` | `VERIFIED` | Fetch channels/categories. |
+| Channels Screen | `ChannelsFragment.kt` | `ChannelsScreen` top-level tab | `VERIFIED` | Split-view: Left sidebar categories list + Right video stream. |
+| Resolver categories | `ResolverApi.kt:12` | `ResolverClient::get_categories` | `VERIFIED` | Dynamic channels & categories list with offline fallbacks. |
 | Category videos | `ResolverApi.kt:15` | `ResolverClient::get_category_videos` | `VERIFIED` | Paginated channel items. |
-| Telegram history | `ResolverApi.kt:23` | `ResolverClient::get_channel_history` | `VERIFIED` | Cursor pagination and local playback checkpointing. |
+| Telegram history & pagination | `ResolverApi.kt:23` | `ResolverClient::get_channel_history` | `VERIFIED` | Cursor pagination via `next_offset_id` + "Load More" action. |
+| Channel search | `SearchRepository.kt` | In-channel search input | `VERIFIED` | Instant live filtering within active channel. |
 | Resolver search | `ResolverApi.kt:30` | `ResolverClient::search` | `VERIFIED` | Search across telegram/web providers. |
 | Performer biography | `ResolverApi.kt:36` | `ResolverClient::get_performer_bio` | `VERIFIED` | Fallback bio provider. |
 
 ---
 
-## 4. Playback (Adult Content Tailored)
+## 4. Playback (Adult Content Tailored) & HTPC Navigation
 
 | Android Feature | Android Reference | Desktop Equivalent | Status | Evidence / Notes |
 | --- | --- | --- | --- | --- |
 | Embedded video | `PlayerActivity.kt` | libmpv OpenGL in Slint window | `VERIFIED` | Verified under Linux Xvfb and Windows 10/11 standalone. |
 | Play / Pause | `PlayerControls.kt` | Spacebar, Play/Pause button | `VERIFIED` | Responsive pause/resume toggling. |
-| Seeking | `PlayerControls.kt` | Seekbar, -10s, +10s, Arrow keys | `VERIFIED` | Absolute and relative seeking. |
-| Volume & Mute | `PlayerControls.kt` | Volume slider, Mute toggle, 'm' key | `VERIFIED` | Integrated with libmpv volume property. |
+| Seeking | `PlayerControls.kt` | Seekbar, -10s, +10s, Arrow keys, `[` / `]` | `VERIFIED` | Step seeking (10s/15s/30s) and rapid 30s seeking. |
+| Volume & Mute | `PlayerControls.kt` | Volume slider, Mute toggle, 'm' / '0', Up/Down | `VERIFIED` | Volume +/- 5% step, clamped [0.0, 100.0], '0'/'m' mute. |
+| Mouse Canvas Gestures | Desktop Enhancement | Double-click, wheel, right-click | `VERIFIED` | Double-click fullscreen, mouse wheel volume, right-click HUD stats. |
+| HTPC Remote Shortcuts | Android TV D-Pad | FocusScope keyboard bindings | `VERIFIED` | Arrows for seek & volume, 1-4 for quick screen switch, hierarchical Esc. |
 | Aspect ratio | `PlayerControls.kt` | Cycle aspect button (Auto, 16:9, etc.) | `VERIFIED` | Verified with `video-aspect-override`. |
-| Stats HUD | `PlayerControls.kt` | HUD overlay, 'i' key | `VERIFIED` | Resolution, codecs, fps, dropped frames. |
+| Stats HUD | `PlayerControls.kt` | HUD overlay, 'i' key, canvas right-click | `VERIFIED` | Resolution, codecs, fps, dropped frames. |
 | Subtitles & Audio tracks | `PlayerControls.kt` | **Omitted** | `ADAPTED` | Adult content player specification: strictly no subtitle or audio track UI clutter. |
 | Playback reporting | `PlaybackRepository.kt` | Jellyfin playback session reporting | `VERIFIED` | Start, Progress, Stop events with play method and position tracking. |
 | Panic Exit | Desktop Enhancement | Emergency panic shortcut | `VERIFIED` | Ctrl+Shift+Q immediately hides window, mutes audio, and exits. |

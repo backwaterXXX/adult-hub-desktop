@@ -56,21 +56,28 @@ Adult Hub Desktop - Player (Windows x64)
 Quick Start:
 1. Launch adult-hub-desktop.exe.
 2. Select a video from the catalog (Latest, Resume, Channels) or click "Sample" / enter URL / open local media.
-3. Player Keyboard Shortcuts:
+3. Player & Remote Keyboard Shortcuts (Stage 9):
    - Space: Play / Pause
+   - Up / Down Arrow: Adjust volume by +/- 5%
    - Left / Right Arrow: Seek backward / forward by configurable seek step (10s, 15s, 30s)
+   - [ / ]: Seek backward / forward by 30 seconds
    - f / F: Toggle Fullscreen
-   - Esc: Exit Fullscreen or return to Browse screen
-   - m: Toggle Mute
-   - i: Toggle Playback HUD & Statistics
-   - s: Cycle Playback Speed (1.0x, 1.25x, 1.5x, 2.0x)
-   - b: Cycle Buffer Profile (Standard, FastStart, Large, LowMemory)
-   - h: Toggle Hardware Decode (auto-safe with automatic software fallback)
-   - n: Play next random catalog item
+   - Esc: Dismiss modal dialogs in hierarchy (Performer -> Studio -> Detail -> Fullscreen exit)
+   - m / M / 0: Toggle Mute
+   - i / I: Toggle Playback HUD & Statistics (also right-click on video canvas)
+   - s / S / , / <: Cycle Playback Speed (1.0x, 1.25x, 1.5x, 2.0x)
+   - b / B: Cycle Buffer Profile (Standard, FastStart, Large, LowMemory)
+   - h / H: Toggle Hardware Decode (auto-safe with automatic software fallback)
+   - n / N: Play next random catalog item
+   - 1 / 2 / 3 / 4: Quick Navigation (1: Browse, 2: Channels, 3: Player, 4: Settings)
    - Ctrl + Shift + Q: Emergency Panic Exit (instantly hides window, mutes audio, checkpoints progress, exits)
+   - Video Canvas Mouse Gestures: Double-click toggles fullscreen, mouse wheel adjusts volume (+/- 5%), right-click toggles HUD stats
 
 Features & Capabilities:
 - Visual Parity with Android TV: Dark OLED theme, category navigation, responsive video cards.
+- Performer & Studio Profiles (Stage 7): Dedicated dialogs with biography, nationality, birth date, aliases, and filmography card lists; "More Like This" similar recommendations.
+- Hierarchical Channels Browser (Stage 8): Left sidebar category filter, Telegram cursor pagination (next_offset_id), in-channel search.
+- HTPC & Remote Navigation (Stage 9): Full keyboard shortcuts, canvas gestures, volume clamping, hierarchical Escape dismissal.
 - Jellyfin Session Coordination: Start, progress updates every 10s (with 500ms coalescing), and stop reporting.
 - Local Telegram Progress: Resume prompts for position >15s, watched badge upon >=90% playback.
 - Resolver pHash Integration: Background video matching enqueue and status tracking.
