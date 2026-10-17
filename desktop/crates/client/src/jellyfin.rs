@@ -55,6 +55,13 @@ impl JellyfinClient {
         }
     }
 
+    pub fn clean_url(base_url: &str) -> String {
+        match crate::policy::ServiceUrlPolicy::inspect(base_url, false) {
+            crate::policy::ServiceUrlValidation::Valid(u) => u.normalized,
+            _ => base_url.trim().trim_end_matches('/').to_string(),
+        }
+    }
+
     fn auth_header(&self, token: Option<&str>) -> String {
         let base = format!(
             "MediaBrowser Client=\"{}\", Device=\"{}\", DeviceId=\"{}\", Version=\"{}\"",
@@ -69,7 +76,8 @@ impl JellyfinClient {
     fn headers(&self, token: Option<&str>) -> HeaderMap {
         let mut map = HeaderMap::new();
         if let Ok(val) = HeaderValue::from_str(&self.auth_header(token)) {
-            map.insert("X-Emby-Authorization", val);
+            map.insert("X-Emby-Authorization", val.clone());
+            map.insert(reqwest::header::AUTHORIZATION, val);
         }
         if let Some(t) = token {
             if let Ok(val) = HeaderValue::from_str(t) {
@@ -80,7 +88,8 @@ impl JellyfinClient {
     }
 
     pub fn get_public_system_info(&self, base_url: &str) -> Result<ServerInfo> {
-        let url = format!("{}/System/Info/Public", base_url.trim_end_matches('/'));
+        let base = Self::clean_url(base_url);
+        let url = format!("{base}/System/Info/Public");
         let res: PublicSystemInfoDto = self
             .client
             .get(&url)
@@ -93,7 +102,7 @@ impl JellyfinClient {
             id: res.id.unwrap_or_default(),
             name: res.server_name.unwrap_or_else(|| "Jellyfin".into()),
             version: res.version.unwrap_or_default(),
-            url: base_url.trim_end_matches('/').to_string(),
+            url: base,
         })
     }
 
@@ -103,10 +112,8 @@ impl JellyfinClient {
         username: &str,
         password: &str,
     ) -> Result<AuthResult> {
-        let url = format!(
-            "{}/Users/AuthenticateByName",
-            base_url.trim_end_matches('/')
-        );
+        let base = Self::clean_url(base_url);
+        let url = format!("{base}/Users/AuthenticateByName");
         #[derive(Serialize)]
         struct AuthReq<'a> {
             #[serde(rename = "Username")]
@@ -144,7 +151,8 @@ impl JellyfinClient {
     }
 
     pub fn quick_connect_initiate(&self, base_url: &str) -> Result<QuickConnectInit> {
-        let url = format!("{}/QuickConnect/Initiate", base_url.trim_end_matches('/'));
+        let base = Self::clean_url(base_url);
+        let url = format!("{base}/QuickConnect/Initiate");
         #[derive(Deserialize)]
         struct InitDto {
             #[serde(rename = "Code")]
@@ -167,10 +175,8 @@ impl JellyfinClient {
     }
 
     pub fn quick_connect_poll(&self, base_url: &str, secret: &str) -> Result<QuickConnectStatus> {
-        let url = format!(
-            "{}/QuickConnect/Connect?secret={secret}",
-            base_url.trim_end_matches('/')
-        );
+        let base = Self::clean_url(base_url);
+        let url = format!("{base}/QuickConnect/Connect?secret={secret}");
         #[derive(Deserialize)]
         struct ConnectDto {
             #[serde(rename = "Authenticated")]
@@ -193,10 +199,8 @@ impl JellyfinClient {
     }
 
     pub fn quick_connect_authenticate(&self, base_url: &str, secret: &str) -> Result<AuthResult> {
-        let url = format!(
-            "{}/Users/AuthenticateWithQuickConnect",
-            base_url.trim_end_matches('/')
-        );
+        let base = Self::clean_url(base_url);
+        let url = format!("{base}/Users/AuthenticateWithQuickConnect");
         #[derive(Serialize)]
         struct QuickAuthReq<'a> {
             #[serde(rename = "Secret")]
@@ -232,7 +236,8 @@ impl JellyfinClient {
         user_id: &str,
         token: &str,
     ) -> Result<Vec<TvLibrary>> {
-        let url = format!("{}/Users/{user_id}/Views", base_url.trim_end_matches('/'));
+        let base = Self::clean_url(base_url);
+        let url = format!("{base}/Users/{user_id}/Views");
         let res: ItemsResponseDto = self
             .client
             .get(&url)
@@ -260,9 +265,9 @@ impl JellyfinClient {
         token: &str,
         limit: usize,
     ) -> Result<Vec<TvItem>> {
+        let base = Self::clean_url(base_url);
         let url = format!(
-            "{}/Users/{user_id}/Items/Resume?Limit={limit}&Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources",
-            base_url.trim_end_matches('/')
+            "{base}/Users/{user_id}/Items/Resume?Limit={limit}&Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources"
         );
         let res: ItemsResponseDto = self
             .client
@@ -287,9 +292,9 @@ impl JellyfinClient {
         parent_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<TvItem>> {
+        let base = Self::clean_url(base_url);
         let mut url = format!(
-            "{}/Users/{user_id}/Items/Latest?Limit={limit}&Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources",
-            base_url.trim_end_matches('/')
+            "{base}/Users/{user_id}/Items/Latest?Limit={limit}&Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources"
         );
         if let Some(pid) = parent_id {
             url.push_str(&format!("&ParentId={pid}"));
@@ -312,9 +317,9 @@ impl JellyfinClient {
         token: &str,
         query: &GetItemsQuery<'_>,
     ) -> Result<TvItemsPage> {
+        let base = Self::clean_url(base_url);
         let mut url = format!(
-            "{}/Users/{user_id}/Items?StartIndex={}&Limit={}&Recursive=true&IncludeItemTypes=Movie&Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources",
-            base_url.trim_end_matches('/'),
+            "{base}/Users/{user_id}/Items?StartIndex={}&Limit={}&Recursive=true&IncludeItemTypes=Movie&Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources",
             query.start_index,
             query.limit
         );
@@ -366,9 +371,9 @@ impl JellyfinClient {
         item_id: &str,
         limit: usize,
     ) -> Result<Vec<TvItem>> {
+        let base = Self::clean_url(base_url);
         let url = format!(
-            "{}/Items/{item_id}/Similar?Limit={limit}&Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources",
-            base_url.trim_end_matches('/')
+            "{base}/Items/{item_id}/Similar?Limit={limit}&Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources"
         );
         let res: ItemsResponseDto = self
             .client
@@ -392,26 +397,26 @@ impl JellyfinClient {
         max_width: u32,
         tag: Option<&str>,
     ) -> String {
+        let base = Self::clean_url(base_url);
         let tag_param = match tag {
             Some(t) if !t.trim().is_empty() => format!("&tag={t}"),
             _ => String::new(),
         };
         format!(
-            "{}/Items/{item_id}/Images/{image_type}?maxWidth={max_width}{tag_param}",
-            base_url.trim_end_matches('/')
+            "{base}/Items/{item_id}/Images/{image_type}?maxWidth={max_width}{tag_param}"
         )
     }
 
     pub fn stream_url(base_url: &str, item_id: &str) -> String {
-        format!(
-            "{}/Videos/{item_id}/stream?static=true",
-            base_url.trim_end_matches('/')
-        )
+        let base = Self::clean_url(base_url);
+        format!("{base}/Videos/{item_id}/stream?static=true")
     }
 
     pub fn stream_headers(&self, token: Option<&str>) -> Vec<String> {
         let mut headers = Vec::new();
-        headers.push(format!("X-Emby-Authorization: {}", self.auth_header(token)));
+        let auth = self.auth_header(token);
+        headers.push(format!("Authorization: {auth}"));
+        headers.push(format!("X-Emby-Authorization: {auth}"));
         if let Some(t) = token {
             if !t.is_empty() {
                 headers.push(format!("X-Emby-Token: {t}"));
@@ -429,7 +434,8 @@ impl JellyfinClient {
         if uuid::Uuid::parse_str(&info.item_id).is_err() {
             return Ok(());
         }
-        let url = format!("{}/Sessions/Playing", base_url.trim_end_matches('/'));
+        let base = Self::clean_url(base_url);
+        let url = format!("{base}/Sessions/Playing");
         self.client
             .post(&url)
             .headers(self.headers(Some(token)))
@@ -448,7 +454,8 @@ impl JellyfinClient {
         if uuid::Uuid::parse_str(&info.item_id).is_err() {
             return Ok(());
         }
-        let url = format!("{}/Sessions/Playing/Progress", base_url.trim_end_matches('/'));
+        let base = Self::clean_url(base_url);
+        let url = format!("{base}/Sessions/Playing/Progress");
         self.client
             .post(&url)
             .headers(self.headers(Some(token)))
@@ -467,7 +474,8 @@ impl JellyfinClient {
         if uuid::Uuid::parse_str(&info.item_id).is_err() {
             return Ok(());
         }
-        let url = format!("{}/Sessions/Playing/Stopped", base_url.trim_end_matches('/'));
+        let base = Self::clean_url(base_url);
+        let url = format!("{base}/Sessions/Playing/Stopped");
         self.client
             .post(&url)
             .headers(self.headers(Some(token)))
@@ -484,9 +492,9 @@ impl JellyfinClient {
         token: &str,
         item_id: &str,
     ) -> Result<TvItem> {
+        let base = Self::clean_url(base_url);
         let url = format!(
-            "{}/Users/{user_id}/Items/{item_id}?Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources",
-            base_url.trim_end_matches('/')
+            "{base}/Users/{user_id}/Items/{item_id}?Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources"
         );
         let res: BaseItemDto = self
             .client
@@ -509,10 +517,8 @@ impl JellyfinClient {
         if uuid::Uuid::parse_str(item_id).is_err() {
             return Ok(());
         }
-        let url = format!(
-            "{}/Users/{user_id}/FavoriteItems/{item_id}",
-            base_url.trim_end_matches('/')
-        );
+        let base = Self::clean_url(base_url);
+        let url = format!("{base}/Users/{user_id}/FavoriteItems/{item_id}");
         let req = if is_favorite {
             self.client.post(&url)
         } else {
@@ -880,5 +886,19 @@ mod tests {
         assert!(json.contains("\"ItemId\":\"a1b2c3d4-e5f6-7890-abcd-ef1234567890\""));
         assert!(json.contains("\"PositionTicks\":150000000"));
         assert!(json.contains("\"PlayMethod\":\"DirectPlay\""));
+    }
+
+    #[test]
+    fn connects_to_adult_ferges_eu_bare_host() {
+        let client = JellyfinClient::new("test-device");
+        // Test with bare host
+        let info = client.get_public_system_info("adult.ferges.eu").unwrap();
+        assert_eq!(info.name, "wtr");
+        assert_eq!(info.url, "https://adult.ferges.eu");
+
+        // Test quick connect initiate with bare host
+        let qc = client.quick_connect_initiate("adult.ferges.eu").unwrap();
+        assert!(!qc.code.is_empty());
+        assert!(!qc.secret.is_empty());
     }
 }

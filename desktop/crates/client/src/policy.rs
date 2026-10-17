@@ -19,7 +19,27 @@ pub struct ServiceUrlPolicy;
 impl ServiceUrlPolicy {
     pub fn inspect(raw_url: &str, allow_query: bool) -> ServiceUrlValidation {
         let trimmed = raw_url.trim();
-        let parsed = match Url::parse(trimmed) {
+        if trimmed.is_empty() {
+            return ServiceUrlValidation::Invalid("Server URL cannot be empty".into());
+        }
+
+        let candidate_url = if !trimmed.contains("://") {
+            let host_candidate = if trimmed.starts_with('[') {
+                trimmed.split(']').next().map(|s| &s[1..]).unwrap_or(trimmed)
+            } else {
+                trimmed.split(['/', ':']).next().unwrap_or(trimmed)
+            };
+            let scheme = if Self::is_local_network_host(host_candidate) {
+                "http"
+            } else {
+                "https"
+            };
+            format!("{scheme}://{trimmed}")
+        } else {
+            trimmed.to_string()
+        };
+
+        let parsed = match Url::parse(&candidate_url) {
             Ok(url) => url,
             Err(_) => return ServiceUrlValidation::Invalid("Enter a valid server URL".into()),
         };
@@ -199,6 +219,38 @@ mod tests {
                 assert!(reason.contains("fragment, or a query"));
             }
             ServiceUrlValidation::Valid(_) => panic!("Expected invalid query"),
+        }
+    }
+
+    #[test]
+    fn auto_prefixes_scheme_for_bare_hostnames_and_ips() {
+        // Public domain defaults to https://
+        match ServiceUrlPolicy::inspect("adult.ferges.eu", false) {
+            ServiceUrlValidation::Valid(url) => {
+                assert_eq!(url.normalized, "https://adult.ferges.eu");
+                assert_eq!(url.origin, "https://adult.ferges.eu:443");
+                assert!(!url.uses_cleartext);
+            }
+            ServiceUrlValidation::Invalid(err) => panic!("Expected valid: {err}"),
+        }
+
+        // Local IP defaults to http://
+        match ServiceUrlPolicy::inspect("192.168.1.111:8096", false) {
+            ServiceUrlValidation::Valid(url) => {
+                assert_eq!(url.normalized, "http://192.168.1.111:8096");
+                assert_eq!(url.origin, "http://192.168.1.111:8096");
+                assert!(url.uses_cleartext);
+            }
+            ServiceUrlValidation::Invalid(err) => panic!("Expected valid: {err}"),
+        }
+
+        // Localhost defaults to http://
+        match ServiceUrlPolicy::inspect("localhost:8096", false) {
+            ServiceUrlValidation::Valid(url) => {
+                assert_eq!(url.normalized, "http://localhost:8096");
+                assert!(url.uses_cleartext);
+            }
+            ServiceUrlValidation::Invalid(err) => panic!("Expected valid: {err}"),
         }
     }
 }

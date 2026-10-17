@@ -6,7 +6,8 @@ mod reporter;
 mod session;
 
 use adult_hub_client::{
-    GetItemsQuery, JellyfinClient, ResolverClient, ServiceUrlPolicy, ServiceUrlValidation, TvItem,
+    discover_servers, GetItemsQuery, JellyfinClient, ResolverClient, ServiceUrlPolicy,
+    ServiceUrlValidation, TvItem,
 };
 use adult_hub_player::{BufferProfile, PlaybackStats, Player, parse_header};
 use adult_hub_storage::{CredentialStore, LocalStore, Session, default_db_path};
@@ -182,6 +183,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     } else {
         set_catalog(&ui, sample_catalog_items());
+    }
+
+    // Background server discovery on startup
+    {
+        let weak = ui.as_weak();
+        std::thread::spawn(move || {
+            let servers = discover_servers(Duration::from_millis(2000));
+            if !servers.is_empty() {
+                slint::invoke_from_event_loop(move || {
+                    let Some(ui) = weak.upgrade() else { return };
+                    let items = servers
+                        .iter()
+                        .map(|s| DiscoveredServerItem {
+                            id: s.id.clone().into(),
+                            name: s.name.clone().into(),
+                            url: s.url.clone().into(),
+                        })
+                        .collect::<Vec<_>>();
+                    set_discovered_servers(&ui, items);
+                })
+                .ok();
+            }
+        });
     }
 
     let frame_pending = Arc::new(AtomicBool::new(false));
@@ -846,6 +870,8 @@ fn install_fullscreen(ui: &MainWindow) {
             if fullscreen.get() {
                 ui.window().set_fullscreen(false);
                 fullscreen.set(false);
+            } else if ui.get_active_screen() != "browse" {
+                ui.set_active_screen("browse".into());
             }
         });
     }
@@ -959,6 +985,11 @@ fn sample_channel_items() -> Vec<VideoCardData> {
 fn set_catalog(ui: &MainWindow, items: Vec<VideoCardData>) {
     let model = std::rc::Rc::new(slint::VecModel::from(items));
     ui.set_catalog_items(model.into());
+}
+
+fn set_discovered_servers(ui: &MainWindow, items: Vec<DiscoveredServerItem>) {
+    let model = std::rc::Rc::new(slint::VecModel::from(items));
+    ui.set_discovered_servers(model.into());
 }
 
 fn tv_item_to_card(item: &TvItem) -> VideoCardData {
@@ -1289,6 +1320,74 @@ fn install_stage2_handlers(
         });
     }
 
+    // 4b. Discovered Servers
+    {
+        let weak = ui.as_weak();
+        let jellyfin = jellyfin.clone();
+        ui.on_select_discovered_server(move |server_url| {
+            let Some(ui) = weak.upgrade() else { return };
+            ui.set_server_url_input(server_url.clone());
+            let server_url = server_url.trim().to_string();
+            let weak = weak.clone();
+            let jellyfin = jellyfin.clone();
+            std::thread::spawn(move || {
+                if let Ok(info) = jellyfin.get_public_system_info(&server_url) {
+                    slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak.upgrade() {
+                            ui.set_status(format!("Selected server: {} ({})", info.name, info.url).into());
+                            ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
+                        }
+                    })
+                    .ok();
+                }
+            });
+        });
+    }
+
+    let is_scanning = Arc::new(AtomicBool::new(false));
+    {
+        let weak = ui.as_weak();
+        let is_scanning = is_scanning.clone();
+        ui.on_scan_servers(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            if is_scanning.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            ui.set_is_scanning_servers(true);
+            ui.set_status("Scanning local network for Jellyfin servers...".into());
+            ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
+
+            let weak = weak.clone();
+            let is_scanning = is_scanning.clone();
+            std::thread::spawn(move || {
+                let servers = discover_servers(Duration::from_millis(2000));
+                is_scanning.store(false, Ordering::SeqCst);
+                slint::invoke_from_event_loop(move || {
+                    let Some(ui) = weak.upgrade() else { return };
+                    ui.set_is_scanning_servers(false);
+                    let count = servers.len();
+                    let items = servers
+                        .iter()
+                        .map(|s| DiscoveredServerItem {
+                            id: s.id.clone().into(),
+                            name: s.name.clone().into(),
+                            url: s.url.clone().into(),
+                        })
+                        .collect::<Vec<_>>();
+                    set_discovered_servers(&ui, items);
+                    if count > 0 {
+                        ui.set_status(format!("Discovered {count} server(s) on network").into());
+                        ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
+                    } else {
+                        ui.set_status("No local Jellyfin servers found on network".into());
+                        ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
+                    }
+                })
+                .ok();
+            });
+        });
+    }
+
     // 5. Search Catalog
     {
         let weak = ui.as_weak();
@@ -1607,6 +1706,51 @@ fn install_stage2_handlers(
                 &session_ctrl,
                 &current_item,
             );
+        });
+    }
+
+    // 8. Panic Exit (Emergency Hide)
+    {
+        let weak = ui.as_weak();
+        let player = player.clone();
+        ui.on_panic_exit(move || {
+            if let Some(ui) = weak.upgrade() {
+                let _ = ui.window().hide();
+            }
+            if let Some(player) = &player {
+                let _ = player.stop();
+                let _ = player.set_muted(true);
+            }
+            std::process::exit(0);
+        });
+    }
+
+    // 9. Clear Search History
+    {
+        let weak = ui.as_weak();
+        let local_store = local_store.clone();
+        ui.on_clear_search_history(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let _ = local_store.clear_search_history();
+            ui.set_status("Search history cleared".into());
+            ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
+        });
+    }
+
+    // 10. Clear Watch History & Progress
+    {
+        let weak = ui.as_weak();
+        let local_store = local_store.clone();
+        let cached_catalog = cached_catalog.clone();
+        ui.on_clear_progress_history(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let _ = local_store.clear_all_progress();
+            ui.set_status("Watch history & progress cleared".into());
+            ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
+            if ui.get_active_category() == "Resume" {
+                set_catalog(&ui, sample_catalog_items());
+                *cached_catalog.lock().unwrap() = sample_catalog_tv_items();
+            }
         });
     }
 }

@@ -412,6 +412,12 @@ impl LocalStore {
         Ok(())
     }
 
+    pub fn clear_all_progress(&self) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute("DELETE FROM local_progress", [])?;
+        Ok(())
+    }
+
     // Session persistence helpers
     pub fn save_session(&self, session: &Session) -> Result<()> {
         self.set_setting("session_server_url", &session.server_url)?;
@@ -702,5 +708,10 @@ mod tests {
 
         store.clear_telegram_progress("vid_101").unwrap();
         assert!(store.get_telegram_progress("vid_101").unwrap().is_none());
+
+        store.save_telegram_progress(&rec).unwrap();
+        assert!(!store.get_all_telegram_progress(10).unwrap().is_empty());
+        store.clear_all_progress().unwrap();
+        assert!(store.get_all_telegram_progress(10).unwrap().is_empty());
     }
 }

@@ -1,4 +1,4 @@
-import { Button, LineEdit, Slider, ListView, ScrollView } from "std-widgets.slint";
+import { LineEdit, Slider, ListView, ScrollView } from "std-widgets.slint";
 
 export struct VideoCardData {
     id: string,
@@ -9,46 +9,343 @@ export struct VideoCardData {
     provider: string,
 }
 
+export struct DiscoveredServerItem {
+    id: string,
+    name: string,
+    url: string,
+}
+
+// Android TV / Mobile Theme Colors:
+// NeonPink: #e91e63
+// OledBlack: #08080a
+// SurfaceDark: #121212
+// CardSurface: #1e1e1e
+// CardSurfaceFocused: #2a2a2a
+// TextPrimary: #e0e0e0
+// TextSecondary: #9e9e9e
+// TextMuted: #666666
+
+component TvPrimaryButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    in property <length> custom-height: 38px;
+    callback clicked();
+
+    height: root.custom-height;
+    border-radius: 8px;
+    background: !root.enabled ? #2a2a2a : (touch.pressed ? #c2185b : (touch.has-hover ? #ff4081 : #e91e63));
+    border-width: touch.has-hover ? 2px : 0px;
+    border-color: #ffffff;
+
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        alignment: center;
+        Text {
+            text: root.text;
+            color: #ffffff;
+            font-size: 13px;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+component TvSecondaryButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> active: false;
+    in property <bool> enabled: true;
+    in property <length> custom-height: 38px;
+    callback clicked();
+
+    height: root.custom-height;
+    border-radius: 8px;
+    background: root.active ? #e91e6333 : (touch.has-hover ? #2a2a2a : #1e1e1e);
+    border-width: root.active ? 2px : (touch.has-hover ? 1.5px : 1px);
+    border-color: root.active ? #e91e63 : (touch.has-hover ? #e91e6399 : #ffffff1f);
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        alignment: center;
+        Text {
+            text: root.text;
+            color: root.active ? #ffffff : (touch.has-hover ? #ffffff : #e0e0e0);
+            font-size: 13px;
+            font-weight: root.active ? 700 : 500;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+component TvChoiceChip inherits Rectangle {
+    in property <string> text;
+    in property <bool> selected: false;
+    callback clicked();
+
+    height: 34px;
+    border-radius: 17px;
+    background: root.selected ? #e91e63 : (touch.has-hover ? #2a2a2a : #1e1e1e);
+    border-width: 1px;
+    border-color: root.selected ? #e91e63 : (touch.has-hover ? #e91e6388 : #ffffff1f);
+
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        alignment: center;
+        Text {
+            text: root.text;
+            color: root.selected ? #ffffff : (touch.has-hover ? #ffffff : #9e9e9e);
+            font-size: 13px;
+            font-weight: root.selected ? 700 : 500;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
 component SeekBar inherits Rectangle {
     in property <float> value: 0;
     in property <float> maximum: 1;
     callback seek(float);
 
-    height: 10px;
-    border-radius: 5px;
-    background: #262633;
-    clip: true;
+    height: 8px;
+    border-radius: 4px;
+    background: #1e1e28;
+    clip: false;
 
+    // Played progress fill (NeonPink)
     Rectangle {
         x: 0;
         y: 0;
         height: 100%;
         width: root.maximum > 0 ? max(0px, min(root.width, root.width * root.value / root.maximum)) : 0px;
-        border-radius: 5px;
-        background: #d65368;
+        border-radius: 4px;
+        background: #e91e63;
     }
 
-    TouchArea {
+    // Scrub thumb
+    Rectangle {
+        x: root.maximum > 0 ? max(0px, min(root.width - 14px, (root.width * root.value / root.maximum) - 7px)) : 0px;
+        y: -4px;
+        width: 16px;
+        height: 16px;
+        border-radius: 8px;
+        background: #ffffff;
+        border-width: 2px;
+        border-color: #e91e63;
+        visible: touch.has-hover || touch.pressed;
+    }
+
+    touch := TouchArea {
         clicked => {
             root.seek(root.maximum * (self.mouse-x / root.width));
         }
         moved => {
-            root.seek(root.maximum * (self.mouse-x / root.width));
+            if (self.pressed) {
+                root.seek(root.maximum * (self.mouse-x / root.width));
+            }
         }
+    }
+}
+
+component MovieCardItem inherits Rectangle {
+    in property <VideoCardData> item;
+    callback play();
+
+    height: 104px;
+    border-radius: 10px;
+    background: touch.has-hover ? #2a2a2a : #1e1e1e;
+    border-width: touch.has-hover ? 2px : 1px;
+    border-color: touch.has-hover ? #e91e63 : #ffffff1f;
+    clip: true;
+
+    HorizontalLayout {
+        padding: 8px;
+        spacing: 16px;
+
+        // 16:9 Thumbnail preview container
+        Rectangle {
+            width: 156px;
+            height: 88px;
+            border-radius: 6px;
+            background: #121212;
+            clip: true;
+
+            // Subtle gradient background
+            Rectangle {
+                width: 100%;
+                height: 100%;
+                background: @linear-gradient(135deg, #24242d 0%, #121212 100%);
+            }
+
+            // Center play icon glyph
+            Text {
+                text: "▶";
+                color: touch.has-hover ? #e91e63 : #ffffff55;
+                font-size: 26px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            // Top-left provider badge
+            Rectangle {
+                x: 6px;
+                y: 6px;
+                height: 18px;
+                border-radius: 4px;
+                background: #000000b3;
+                border-width: 1px;
+                border-color: root.item.provider == "telegram" ? #29b6f6 : (root.item.provider == "local" ? #8bc34a : #e91e63);
+
+                HorizontalLayout {
+                    padding-left: 5px;
+                    padding-right: 5px;
+                    Text {
+                        text: root.item.provider == "telegram" ? "TG" : (root.item.provider == "local" ? "LOCAL" : "JF");
+                        color: root.item.provider == "telegram" ? #29b6f6 : (root.item.provider == "local" ? #8bc34a : #e91e63);
+                        font-size: 9px;
+                        font-weight: 800;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            // Top-right WATCHED badge
+            if root.item.is_played : Rectangle {
+                x: parent.width - self.width - 6px;
+                y: 6px;
+                height: 18px;
+                border-radius: 4px;
+                background: #000000c7;
+                border-width: 1px;
+                border-color: #e91e63;
+
+                HorizontalLayout {
+                    padding-left: 5px;
+                    padding-right: 5px;
+                    Text {
+                        text: "WATCHED";
+                        color: #e91e63;
+                        font-size: 9px;
+                        font-weight: 800;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            // Bottom-right Duration badge
+            if root.item.duration != "" : Rectangle {
+                x: parent.width - self.width - 6px;
+                y: parent.height - self.height - 6px;
+                height: 18px;
+                border-radius: 4px;
+                background: #1a1a1acc;
+
+                HorizontalLayout {
+                    padding-left: 5px;
+                    padding-right: 5px;
+                    Text {
+                        text: root.item.duration;
+                        color: #e0e0e0;
+                        font-size: 10px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        // Details column
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 6px;
+
+            Text {
+                text: root.item.title;
+                color: touch.has-hover ? #ffffff : #e0e0e0;
+                font-size: 15px;
+                font-weight: 600;
+                overflow: elide;
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+
+                if root.item.year != "" : Text {
+                    text: root.item.year;
+                    color: #9e9e9e;
+                    font-size: 12px;
+                }
+
+                if root.item.year != "" : Text {
+                    text: "•";
+                    color: #666666;
+                    font-size: 12px;
+                }
+
+                Text {
+                    text: root.item.provider == "telegram" ? "Telegram Video" : (root.item.provider == "local" ? "Local Video" : "Jellyfin Video");
+                    color: #9e9e9e;
+                    font-size: 12px;
+                }
+            }
+        }
+
+        // Circular play button
+        HorizontalLayout {
+            alignment: center;
+            padding-right: 8px;
+
+            Rectangle {
+                width: 44px;
+                height: 44px;
+                border-radius: 22px;
+                background: touch.has-hover ? #e91e63 : #2a2a2a;
+                border-width: 1px;
+                border-color: touch.has-hover ? #ffffff : #ffffff22;
+
+                Text {
+                    text: "▶";
+                    color: #ffffff;
+                    font-size: 16px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+
+    touch := TouchArea {
+        clicked => { root.play(); }
     }
 }
 
 export component MainWindow inherits Window {
     title: "Adult Hub Desktop";
-    preferred-width: 1120px;
-    preferred-height: 720px;
-    min-width: 760px;
-    min-height: 480px;
-    background: #0b0b10;
+    preferred-width: 1180px;
+    preferred-height: 760px;
+    min-width: 800px;
+    min-height: 520px;
+    background: #08080a;
     default-font-family: "Segoe UI";
     forward-focus: keys;
 
-    // View state: "browse", "player", "login"
+    // View state: "browse", "player", "settings" / "login"
     in-out property <string> active-screen: "browse";
 
     // Player state
@@ -60,7 +357,7 @@ export component MainWindow inherits Window {
     in-out property <bool> muted: false;
     in-out property <string> hud-text: "";
     in-out property <string> status: "Ready";
-    in-out property <color> status-color: #9aa0b4;
+    in-out property <color> status-color: #9e9e9e;
     in-out property <string> url-text: "";
     in-out property <float> volume: 100;
     in-out property <string> aspect-label: "Aspect: Auto";
@@ -82,9 +379,9 @@ export component MainWindow inherits Window {
     in-out property <[VideoCardData]> catalog-items: [];
     in-out property <string> search-query: "";
     in-out property <string> active-category: "Latest";
-    in-out property <string> current-library: "All Movies";
+    in-out property <string> current-library: "All Videos";
 
-    // Auth state
+    // Auth & Settings state
     in-out property <string> server-url-input: "http://localhost:8096";
     in-out property <string> username-input: "";
     in-out property <string> password-input: "";
@@ -107,7 +404,7 @@ export component MainWindow inherits Window {
     callback toggle-fullscreen();
     callback escape-pressed();
 
-    // Stage 2 Callbacks
+    // Catalog & Auth Callbacks
     callback perform-login(string, string, string);
     callback perform-logout();
     callback start-quick-connect();
@@ -116,7 +413,7 @@ export component MainWindow inherits Window {
     callback filter-category(string);
     callback play-item(string);
 
-    // Stage 3 Callbacks
+    // Stage 3 Playback Callbacks
     callback cycle-speed();
     callback cycle-buffer-profile();
     callback toggle-hwdec();
@@ -125,94 +422,222 @@ export component MainWindow inherits Window {
     callback accept-resume();
     callback reject-resume();
 
+    // Stage 4 Desktop & Settings Callbacks
+    callback panic-exit();
+    callback clear-search-history();
+    callback clear-progress-history();
+
+    // Local Server Discovery
+    in-out property <[DiscoveredServerItem]> discovered-servers: [];
+    in-out property <bool> is-scanning-servers: false;
+    callback scan-servers();
+    callback select-discovered-server(string);
+
     VerticalLayout {
         spacing: 0px;
 
-        // Top Header & Navigation Bar
+        // Top Navigation Header (matching Android TV HomeTopBar)
         Rectangle {
-            height: 56px;
-            background: #14141c;
+            height: 64px;
+            background: #0d0d12;
+            Rectangle {
+                y: parent.height - 1px;
+                height: 1px;
+                width: 100%;
+                background: #ffffff14;
+            }
 
             HorizontalLayout {
-                padding-left: 18px;
-                padding-right: 18px;
-                spacing: 12px;
+                padding-left: 24px;
+                padding-right: 24px;
+                spacing: 16px;
                 alignment: center;
 
-                Text {
-                    text: "Adult Hub";
-                    color: #d65368;
-                    font-size: 18px;
-                    font-weight: 700;
-                    vertical-alignment: center;
+                // Logo Brand: ADULT HUB in NeonPink
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: center;
+
+                    Text {
+                        text: "ADULT HUB";
+                        color: #e91e63;
+                        font-size: 20px;
+                        font-weight: 800;
+                        letter-spacing: 3px;
+                        vertical-alignment: center;
+                    }
+
+                    // Library / Platform Badge Pill
+                    Rectangle {
+                        height: 24px;
+                        border-radius: 12px;
+                        background: #1e1e1e;
+                        border-width: 1px;
+                        border-color: #2a2a2a;
+
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            Text {
+                                text: root.is-logged-in ? root.logged-in-user : "DESKTOP";
+                                color: #9e9e9e;
+                                font-size: 11px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
                 }
 
-                Text {
-                    text: "Desktop";
-                    color: #f2f2f7;
-                    font-size: 18px;
-                    font-weight: 500;
-                    vertical-alignment: center;
-                }
+                Rectangle { width: 16px; }
 
-                Rectangle { width: 14px; }
-
-                Button {
+                // Navigation Tabs
+                TvChoiceChip {
                     text: "Browse";
-                    primary: root.active-screen == "browse";
+                    selected: root.active-screen == "browse";
                     clicked => { root.switch-screen("browse"); }
                 }
 
-                Button {
+                TvChoiceChip {
                     text: "Player";
-                    primary: root.active-screen == "player";
+                    selected: root.active-screen == "player";
                     clicked => { root.switch-screen("player"); }
                 }
 
-                Button {
-                    text: root.is-logged-in ? root.logged-in-user : "Login";
-                    primary: root.active-screen == "login";
-                    clicked => { root.switch-screen("login"); }
+                TvChoiceChip {
+                    text: root.is-logged-in ? "Settings" : "Connect";
+                    selected: root.active-screen == "login" || root.active-screen == "settings";
+                    clicked => { root.switch-screen("settings"); }
                 }
 
                 Rectangle { horizontal-stretch: 1; }
 
-                if root.active-screen == "player" : Button {
+                // Top Actions (Play Random / Surprise Me, Stats, Mute, Fullscreen)
+                TvPrimaryButton {
+                    text: "Surprise Me";
+                    custom-height: 36px;
+                    clicked => { root.play-random(); }
+                }
+
+                if root.active-screen == "player" : TvSecondaryButton {
                     text: root.hud-visible ? "Hide Stats" : "Stats";
+                    active: root.hud-visible;
+                    custom-height: 36px;
                     clicked => { root.toggle-hud(); }
                 }
 
-                Button {
+                TvSecondaryButton {
                     text: root.muted ? "Unmute" : "Mute";
+                    custom-height: 36px;
                     clicked => { root.toggle-mute(); }
                 }
 
-                Button {
+                TvSecondaryButton {
                     text: "Fullscreen";
+                    custom-height: 36px;
                     clicked => { root.toggle-fullscreen(); }
                 }
             }
         }
 
-        // Main Content Area (Browse / Player / Login)
+        // Main Screen Switcher
         Rectangle {
             vertical-stretch: 1;
-            background: #09090d;
+            background: #08080a;
 
+            // ==========================================
             // 1. BROWSE SCREEN
+            // ==========================================
             if root.active-screen == "browse" : VerticalLayout {
-                padding: 16px;
-                spacing: 14px;
+                padding: 20px;
+                spacing: 16px;
 
-                // Search & Filter controls
+                // Offline / Guest banner
+                if !root.is-logged-in : Rectangle {
+                    background: #141418;
+                    border-radius: 8px;
+                    border-width: 1px;
+                    border-color: #ffffff14;
+                    height: 44px;
+
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        spacing: 12px;
+                        alignment: center;
+
+                        Text {
+                            text: "🔒 Offline Mode — Connect your Jellyfin server to access your complete adult library.";
+                            color: #9e9e9e;
+                            font-size: 13px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+
+                        TvPrimaryButton {
+                            text: "Connect Server";
+                            custom-height: 28px;
+                            clicked => { root.switch-screen("settings"); }
+                        }
+                    }
+                }
+
+                // Category Filter Chips & Controls Row
                 HorizontalLayout {
                     spacing: 10px;
-                    height: 38px;
+                    height: 36px;
 
+                    TvChoiceChip {
+                        text: "Latest";
+                        selected: root.active-category == "Latest";
+                        clicked => {
+                            root.active-category = "Latest";
+                            root.filter-category("Latest");
+                        }
+                    }
+
+                    TvChoiceChip {
+                        text: "Resume";
+                        selected: root.active-category == "Resume";
+                        clicked => {
+                            root.active-category = "Resume";
+                            root.filter-category("Resume");
+                        }
+                    }
+
+                    TvChoiceChip {
+                        text: "Channels";
+                        selected: root.active-category == "Channels";
+                        clicked => {
+                            root.active-category = "Channels";
+                            root.filter-category("Channels");
+                        }
+                    }
+
+                    TvChoiceChip {
+                        text: "Sample";
+                        selected: root.active-category == "Sample";
+                        clicked => {
+                            root.active-category = "Sample";
+                            root.load-sample();
+                        }
+                    }
+
+                    Rectangle { width: 10px; }
+
+                    TvSecondaryButton {
+                        text: "Open File...";
+                        custom-height: 34px;
+                        clicked => { root.open-file(); }
+                    }
+
+                    Rectangle { horizontal-stretch: 1; }
+
+                    // Search input
                     LineEdit {
-                        horizontal-stretch: 1;
+                        width: 280px;
                         text: root.search-query;
-                        placeholder-text: "Search adult content or channels...";
+                        placeholder-text: "Search videos or channels...";
                         edited(text) => { root.search-query = text; }
                         accepted(text) => {
                             root.search-query = text;
@@ -220,128 +645,60 @@ export component MainWindow inherits Window {
                         }
                     }
 
-                    Button {
+                    TvSecondaryButton {
                         text: "Search";
+                        custom-height: 34px;
                         clicked => { root.search-catalog(root.search-query); }
                     }
-
-                    Rectangle { width: 10px; }
-
-                    Button {
-                        text: "Latest";
-                        primary: root.active-category == "Latest";
-                        clicked => {
-                            root.active-category = "Latest";
-                            root.filter-category("Latest");
-                        }
-                    }
-
-                    Button {
-                        text: "Resume";
-                        primary: root.active-category == "Resume";
-                        clicked => {
-                            root.active-category = "Resume";
-                            root.filter-category("Resume");
-                        }
-                    }
-
-                    Button {
-                        text: "Channels";
-                        primary: root.active-category == "Channels";
-                        clicked => {
-                            root.active-category = "Channels";
-                            root.filter-category("Channels");
-                        }
-                    }
-
-                    Button {
-                        text: "Sample";
-                        clicked => { root.load-sample(); }
-                    }
-
-                    Button {
-                        text: "Open File...";
-                        clicked => { root.open-file(); }
-                    }
                 }
 
-                // Catalog Item List
+                // Video Catalog Cards
                 ListView {
                     vertical-stretch: 1;
-                    for item in root.catalog-items: Rectangle {
-                        height: 52px;
-                        background: #14141e;
-                        border-radius: 6px;
-                        border-width: 1px;
-                        border-color: #232334;
 
-                        HorizontalLayout {
-                            padding-left: 16px;
-                            padding-right: 16px;
-                            spacing: 14px;
-                            alignment: center;
-
-                            Text {
-                                text: item.provider == "telegram" ? "TG" : "JF";
-                                color: item.provider == "telegram" ? #4aa3df : #d65368;
-                                font-weight: 700;
-                                font-size: 13px;
-                                vertical-alignment: center;
-                                width: 28px;
-                            }
-
-                            Text {
-                                text: item.title;
-                                color: #f2f2f7;
-                                font-size: 14px;
-                                font-weight: 500;
-                                horizontal-stretch: 1;
-                                vertical-alignment: center;
-                                overflow: elide;
-                            }
-
-                            if item.year != "" : Text {
-                                text: item.year;
-                                color: #8d90a8;
-                                font-size: 12px;
-                                vertical-alignment: center;
-                            }
-
-                            Text {
-                                text: item.duration;
-                                color: #d65368;
-                                font-size: 12px;
-                                font-weight: 600;
-                                vertical-alignment: center;
-                                width: 65px;
-                                horizontal-alignment: right;
-                            }
-
-                            Button {
-                                text: "Play";
-                                clicked => { root.play-item(item.id); }
-                            }
+                    for item in root.catalog-items: VerticalLayout {
+                        padding-bottom: 10px;
+                        MovieCardItem {
+                            item: item;
+                            play => { root.play-item(item.id); }
                         }
                     }
                 }
 
-                // Status Footer
-                Text {
-                    text: root.status;
-                    color: root.status-color;
-                    font-size: 13px;
+                // Status & Counter Bar
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: center;
+
+                    Text {
+                        text: root.status;
+                        color: root.status-color;
+                        font-size: 13px;
+                        font-weight: 500;
+                        horizontal-stretch: 1;
+                    }
+
+                    Text {
+                        text: root.catalog-items.length + " items";
+                        color: #666666;
+                        font-size: 12px;
+                    }
                 }
             }
 
+            // ==========================================
             // 2. PLAYER SCREEN
+            // ==========================================
             if root.active-screen == "player" : VerticalLayout {
                 spacing: 0px;
 
+                // Video Canvas with OSD Overlays
                 Rectangle {
                     vertical-stretch: 1;
                     background: #000000;
                     clip: true;
 
+                    // Embedded mpv OpenGL render target
                     Image {
                         source: root.video-image;
                         image-fit: contain;
@@ -349,32 +706,77 @@ export component MainWindow inherits Window {
                         height: 100%;
                     }
 
-                    Text {
-                        x: 16px;
-                        y: 12px;
-                        text: root.status;
-                        color: root.status-color;
-                        font-size: 13px;
+                    // Top OSD Header
+                    Rectangle {
+                        x: 0;
+                        y: 0;
+                        width: 100%;
+                        height: 52px;
+                        background: @linear-gradient(180deg, #000000cc 0%, #00000000 100%);
+
+                        HorizontalLayout {
+                            padding-left: 20px;
+                            padding-right: 20px;
+                            alignment: center;
+                            spacing: 14px;
+
+                            TvSecondaryButton {
+                                text: "← Browse";
+                                custom-height: 32px;
+                                clicked => { root.switch-screen("browse"); }
+                            }
+
+                            Text {
+                                text: root.status;
+                                color: #ffffff;
+                                font-size: 14px;
+                                font-weight: 600;
+                                horizontal-stretch: 1;
+                                overflow: elide;
+                                vertical-alignment: center;
+                            }
+
+                            // Decoder Mode Badge
+                            Rectangle {
+                                height: 24px;
+                                border-radius: 12px;
+                                background: #1e1e1ecc;
+                                border-width: 1px;
+                                border-color: root.hwdec-active ? #e91e63 : #666666;
+
+                                HorizontalLayout {
+                                    padding-left: 10px;
+                                    padding-right: 10px;
+                                    Text {
+                                        text: root.hwdec-active ? "HW DECODE" : "SW DECODE";
+                                        color: root.hwdec-active ? #e91e63 : #9e9e9e;
+                                        font-size: 10px;
+                                        font-weight: 700;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
                     }
 
-                    Rectangle {
-                        visible: root.hud-visible;
-                        x: parent.width - self.width - 16px;
-                        y: 12px;
-                        width: 430px;
-                        height: hud-label.preferred-height + 20px;
-                        background: #000000d9;
-                        border-radius: 6px;
-                        border-width: 1px;
-                        border-color: #333346;
+                    // Floating Stats HUD
+                    if root.hud-visible : Rectangle {
+                        x: parent.width - self.width - 20px;
+                        y: 64px;
+                        width: 440px;
+                        height: hud-label.preferred-height + 24px;
+                        background: #08080af0;
+                        border-radius: 8px;
+                        border-width: 1.5px;
+                        border-color: #e91e63;
 
                         VerticalLayout {
-                            padding: 10px;
+                            padding: 12px;
 
                             hud-label := Text {
                                 width: 100%;
                                 text: root.hud-text;
-                                color: #d7d9e6;
+                                color: #e0e0e0;
                                 font-size: 12px;
                                 font-family: "Consolas";
                                 wrap: word-wrap;
@@ -382,70 +784,77 @@ export component MainWindow inherits Window {
                         }
                     }
 
+                    // Floating Resume Prompt Banner
                     if root.resume-prompt-visible : Rectangle {
                         x: (parent.width - self.width) / 2;
                         y: parent.height - self.height - 24px;
                         width: 480px;
-                        height: 56px;
-                        background: #14141ee6;
-                        border-radius: 8px;
-                        border-width: 1px;
-                        border-color: #d65368;
+                        height: 58px;
+                        background: #08080af5;
+                        border-radius: 10px;
+                        border-width: 2px;
+                        border-color: #e91e63;
 
                         HorizontalLayout {
-                            padding-left: 18px;
-                            padding-right: 18px;
-                            spacing: 12px;
+                            padding-left: 20px;
+                            padding-right: 20px;
+                            spacing: 14px;
                             alignment: center;
 
                             Text {
                                 text: "Resume from " + root.resume-prompt-time + "?";
-                                color: #f2f2f7;
-                                font-size: 14px;
+                                color: #ffffff;
+                                font-size: 15px;
                                 font-weight: 600;
                                 vertical-alignment: center;
                                 horizontal-stretch: 1;
                             }
 
-                            Button {
+                            TvPrimaryButton {
                                 text: "Resume";
-                                primary: true;
+                                custom-height: 36px;
                                 clicked => { root.accept-resume(); }
                             }
 
-                            Button {
+                            TvSecondaryButton {
                                 text: "Restart";
+                                custom-height: 36px;
                                 clicked => { root.reject-resume(); }
                             }
                         }
                     }
                 }
 
+                // Bottom Player Controls Panel
                 Rectangle {
-                    height: 180px;
-                    background: #111118;
-                    border-width: 1px;
-                    border-color: #232331;
+                    height: 172px;
+                    background: #0e0e14;
+
+                    Rectangle {
+                        y: 0px;
+                        height: 1px;
+                        width: 100%;
+                        background: #ffffff14;
+                    }
 
                     VerticalLayout {
-                        padding: 14px;
-                        spacing: 10px;
+                        padding-left: 20px;
+                        padding-right: 20px;
+                        padding-top: 14px;
+                        padding-bottom: 14px;
+                        spacing: 12px;
 
+                        // Row 1: Time, SeekBar, Duration & Quick Seekers
                         HorizontalLayout {
-                            spacing: 10px;
+                            spacing: 12px;
                             alignment: center;
-
-                            Button {
-                                text: root.playing ? "Pause" : "Play";
-                                min-width: 74px;
-                                clicked => { root.toggle-play(); }
-                            }
 
                             Text {
                                 text: root.position-text;
-                                color: #c9ccdb;
-                                font-size: 12px;
-                                width: 52px;
+                                color: #ffffff;
+                                font-size: 13px;
+                                font-weight: 600;
+                                width: 54px;
                                 horizontal-alignment: right;
                                 vertical-alignment: center;
                             }
@@ -459,56 +868,81 @@ export component MainWindow inherits Window {
 
                             Text {
                                 text: root.duration-text;
-                                color: #8d90a8;
-                                font-size: 12px;
-                                width: 52px;
+                                color: #9e9e9e;
+                                font-size: 13px;
+                                font-weight: 500;
+                                width: 54px;
                                 vertical-alignment: center;
                             }
 
-                            Button {
-                                text: "-10 s";
+                            TvSecondaryButton {
+                                text: "-10s";
+                                custom-height: 30px;
                                 clicked => { root.seek-relative(-10); }
                             }
 
-                            Button {
-                                text: "+10 s";
+                            TvSecondaryButton {
+                                text: "+10s";
+                                custom-height: 30px;
                                 clicked => { root.seek-relative(10); }
                             }
                         }
 
+                        // Row 2: Play/Pause, Speed, Buffer, HW Decode, Autoplay, Random, Aspect & Volume
                         HorizontalLayout {
                             spacing: 10px;
                             alignment: center;
 
-                            LineEdit {
-                                horizontal-stretch: 1;
-                                text: root.url-text;
-                                placeholder-text: "Media URL or file path";
-                                edited(text) => { root.url-text = text; }
-                                accepted(text) => {
-                                    root.url-text = text;
-                                    root.load-url(text);
-                                    keys.focus();
-                                }
+                            TvPrimaryButton {
+                                text: root.playing ? "Pause" : "Play";
+                                custom-height: 36px;
+                                clicked => { root.toggle-play(); }
                             }
 
-                            Button {
-                                text: "Load";
-                                clicked => {
-                                    root.load-url(root.url-text);
-                                    keys.focus();
-                                }
+                            TvSecondaryButton {
+                                text: "Speed: " + root.speed-label;
+                                active: root.speed-label != "1.0x";
+                                custom-height: 36px;
+                                clicked => { root.cycle-speed(); }
                             }
 
-                            Button {
+                            TvSecondaryButton {
+                                text: root.buffer-profile-label;
+                                custom-height: 36px;
+                                clicked => { root.cycle-buffer-profile(); }
+                            }
+
+                            TvSecondaryButton {
+                                text: root.hwdec-active ? "HW: ON" : "HW: OFF";
+                                active: root.hwdec-active;
+                                custom-height: 36px;
+                                clicked => { root.toggle-hwdec(); }
+                            }
+
+                            TvSecondaryButton {
+                                text: root.autoplay-active ? "Autoplay: ON" : "Autoplay: OFF";
+                                active: root.autoplay-active;
+                                custom-height: 36px;
+                                clicked => { root.toggle-autoplay(); }
+                            }
+
+                            TvSecondaryButton {
+                                text: "Random Next";
+                                custom-height: 36px;
+                                clicked => { root.play-random(); }
+                            }
+
+                            TvSecondaryButton {
                                 text: root.aspect-label;
-                                min-width: 120px;
+                                custom-height: 36px;
                                 clicked => { root.cycle-aspect(); }
                             }
 
+                            Rectangle { horizontal-stretch: 1; }
+
                             Text {
                                 text: "Vol";
-                                color: #8d90a8;
+                                color: #9e9e9e;
                                 font-size: 12px;
                                 vertical-alignment: center;
                             }
@@ -522,70 +956,101 @@ export component MainWindow inherits Window {
                             }
                         }
 
+                        // Row 3: Direct URL / Path Load Input
                         HorizontalLayout {
                             spacing: 10px;
                             alignment: center;
 
-                            Button {
-                                text: "Speed: " + root.speed-label;
-                                clicked => { root.cycle-speed(); }
+                            LineEdit {
+                                horizontal-stretch: 1;
+                                text: root.url-text;
+                                placeholder-text: "Direct media URL or local video file path...";
+                                edited(text) => { root.url-text = text; }
+                                accepted(text) => {
+                                    root.url-text = text;
+                                    root.load-url(text);
+                                    keys.focus();
+                                }
                             }
 
-                            Button {
-                                text: root.buffer-profile-label;
-                                clicked => { root.cycle-buffer-profile(); }
-                            }
-
-                            Button {
-                                text: root.hwdec-active ? "HW Decode: ON" : "HW Decode: OFF";
-                                clicked => { root.toggle-hwdec(); }
-                            }
-
-                            Button {
-                                text: root.autoplay-active ? "Autoplay: ON" : "Autoplay: OFF";
-                                primary: root.autoplay-active;
-                                clicked => { root.toggle-autoplay(); }
-                            }
-
-                            Button {
-                                text: "Random Next";
-                                clicked => { root.play-random(); }
-                            }
-
-                            Rectangle { horizontal-stretch: 1; }
-
-                            Button {
-                                text: "Browse";
-                                clicked => { root.switch-screen("browse"); }
+                            TvSecondaryButton {
+                                text: "Load";
+                                custom-height: 34px;
+                                clicked => {
+                                    root.load-url(root.url-text);
+                                    keys.focus();
+                                }
                             }
                         }
                     }
                 }
             }
 
-            // 3. LOGIN & SERVER CONNECTION SCREEN
-            if root.active-screen == "login" : VerticalLayout {
-                alignment: center;
-                padding: 30px;
+            // ==========================================
+            // 3. SETTINGS & SERVER SCREEN
+            // ==========================================
+            if root.active-screen == "login" || root.active-screen == "settings" : ScrollView {
+                VerticalLayout {
+                    padding: 28px;
+                    spacing: 20px;
+                    alignment: start;
 
-                HorizontalLayout {
-                    alignment: center;
+                    // Header
+                    HorizontalLayout {
+                        alignment: center;
+                        Text {
+                            text: "Settings & Server Connection";
+                            color: #e0e0e0;
+                            font-size: 22px;
+                            font-weight: 700;
+                            horizontal-stretch: 1;
+                        }
 
-                    Rectangle {
-                        width: 480px;
-                        background: #14141e;
-                        border-radius: 12px;
+                        Text {
+                            text: "Adult Hub Desktop v0.1.0";
+                            color: #e91e63;
+                            font-size: 13px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    // Status notification banner
+                    if root.status != "" && root.status != "Ready" : Rectangle {
+                        height: 42px;
+                        border-radius: 8px;
+                        background: #121212;
                         border-width: 1px;
-                        border-color: #2b2b3d;
+                        border-color: root.status-color;
+
+                        HorizontalLayout {
+                            padding-left: 16px;
+                            padding-right: 16px;
+                            Text {
+                                text: "✓ " + root.status;
+                                color: root.status-color;
+                                font-size: 13px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    // Card 1: Server Connection
+                    Rectangle {
+                        border-radius: 12px;
+                        background: #1e1e1e;
+                        border-width: 1px;
+                        border-color: #ffffff14;
 
                         VerticalLayout {
-                            padding: 28px;
-                            spacing: 18px;
+                            padding: 22px;
+                            spacing: 16px;
 
                             Text {
-                                text: root.is-logged-in ? "Current Session" : "Server Connection";
-                                color: #f2f2f7;
-                                font-size: 20px;
+                                text: "Jellyfin Server";
+                                color: #e91e63;
+                                font-size: 16px;
                                 font-weight: 700;
                             }
 
@@ -593,8 +1058,8 @@ export component MainWindow inherits Window {
                                 spacing: 12px;
 
                                 Text {
-                                    text: "Server Address (HTTP LAN / HTTPS):";
-                                    color: #a0a3b8;
+                                    text: "Server Address (HTTP LAN or HTTPS):";
+                                    color: #9e9e9e;
                                     font-size: 13px;
                                 }
 
@@ -604,38 +1069,108 @@ export component MainWindow inherits Window {
                                     edited(text) => { root.server-url-input = text; }
                                 }
 
-                                Text {
-                                    text: "Username:";
-                                    color: #a0a3b8;
-                                    font-size: 13px;
-                                }
+                                // Discovered Servers (Android TV style)
+                                VerticalLayout {
+                                    spacing: 8px;
 
-                                LineEdit {
-                                    text: root.username-input;
-                                    placeholder-text: "Username";
-                                    edited(text) => { root.username-input = text; }
-                                }
+                                    HorizontalLayout {
+                                        alignment: space-between;
+                                        Text {
+                                            text: "Discovered Servers:";
+                                            color: #e0e0e0;
+                                            font-size: 13px;
+                                            font-weight: 600;
+                                            vertical-alignment: center;
+                                        }
 
-                                Text {
-                                    text: "Password:";
-                                    color: #a0a3b8;
-                                    font-size: 13px;
-                                }
+                                        TvSecondaryButton {
+                                            text: root.is-scanning-servers ? "Scanning..." : "Scan LAN";
+                                            custom-height: 28px;
+                                            clicked => { root.scan-servers(); }
+                                        }
+                                    }
 
-                                LineEdit {
-                                    text: root.password-input;
-                                    placeholder-text: "Password";
-                                    input-type: password;
-                                    edited(text) => { root.password-input = text; }
+                                    if root.discovered-servers.length > 0 : HorizontalLayout {
+                                        spacing: 8px;
+                                        for s in root.discovered-servers : Rectangle {
+                                            background: s-touch.has-hover ? #2e2e34 : #1c1c22;
+                                            border-radius: 6px;
+                                            border-width: 1px;
+                                            border-color: s-touch.has-hover ? #e91e63 : #ffffff22;
+                                            height: 32px;
+
+                                            s-touch := TouchArea {
+                                                clicked => {
+                                                    root.server-url-input = s.url;
+                                                    root.select-discovered-server(s.url);
+                                                }
+                                            }
+
+                                            HorizontalLayout {
+                                                padding-left: 10px;
+                                                padding-right: 10px;
+                                                spacing: 6px;
+                                                alignment: center;
+
+                                                Text {
+                                                    text: "🖥️ " + s.name;
+                                                    color: #ffffff;
+                                                    font-size: 12px;
+                                                    font-weight: 600;
+                                                    vertical-alignment: center;
+                                                }
+
+                                                Text {
+                                                    text: "(" + s.url + ")";
+                                                    color: #9e9e9e;
+                                                    font-size: 11px;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    if root.discovered-servers.length == 0 : Text {
+                                        text: root.is-scanning-servers ? "Scanning local network for Jellyfin servers..." : "No local servers discovered. Enter address manually or click Scan LAN.";
+                                        color: #757575;
+                                        font-size: 12px;
+                                    }
                                 }
 
                                 HorizontalLayout {
-                                    spacing: 12px;
+                                    spacing: 14px;
 
-                                    Button {
+                                    VerticalLayout {
                                         horizontal-stretch: 1;
-                                        text: "Login";
-                                        primary: true;
+                                        spacing: 6px;
+                                        Text { text: "Username:"; color: #9e9e9e; font-size: 13px; }
+                                        LineEdit {
+                                            text: root.username-input;
+                                            placeholder-text: "Username";
+                                            edited(text) => { root.username-input = text; }
+                                        }
+                                    }
+
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        spacing: 6px;
+                                        Text { text: "Password:"; color: #9e9e9e; font-size: 13px; }
+                                        LineEdit {
+                                            text: root.password-input;
+                                            placeholder-text: "Password";
+                                            input-type: password;
+                                            edited(text) => { root.password-input = text; }
+                                        }
+                                    }
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 14px;
+                                    padding-top: 4px;
+
+                                    TvPrimaryButton {
+                                        text: "Sign In";
+                                        horizontal-stretch: 1;
                                         clicked => {
                                             root.perform-login(
                                                 root.server-url-input,
@@ -645,32 +1180,38 @@ export component MainWindow inherits Window {
                                         }
                                     }
 
-                                    Button {
-                                        horizontal-stretch: 1;
+                                    TvSecondaryButton {
                                         text: "Quick Connect";
+                                        horizontal-stretch: 1;
                                         clicked => { root.start-quick-connect(); }
                                     }
                                 }
 
                                 if root.quick-connect-code != "" : Rectangle {
-                                    background: #202030;
+                                    background: #121212;
                                     border-radius: 8px;
-                                    height: 50px;
+                                    border-width: 1px;
+                                    border-color: #e91e63;
+                                    height: 52px;
 
                                     HorizontalLayout {
                                         alignment: center;
-                                        spacing: 10px;
+                                        spacing: 16px;
+                                        padding-left: 16px;
+                                        padding-right: 16px;
 
                                         Text {
-                                            text: "Code: " + root.quick-connect-code;
-                                            color: #d65368;
+                                            text: "Authorize code: " + root.quick-connect-code;
+                                            color: #e91e63;
                                             font-size: 18px;
-                                            font-weight: 700;
+                                            font-weight: 800;
                                             vertical-alignment: center;
+                                            horizontal-stretch: 1;
                                         }
 
-                                        Button {
+                                        TvSecondaryButton {
                                             text: "Cancel";
+                                            custom-height: 32px;
                                             clicked => { root.cancel-quick-connect(); }
                                         }
                                     }
@@ -680,30 +1221,162 @@ export component MainWindow inherits Window {
                             if root.is-logged-in : VerticalLayout {
                                 spacing: 14px;
 
-                                Text {
-                                    text: "Logged in as: " + root.logged-in-user;
-                                    color: #8cc8a0;
-                                    font-size: 16px;
-                                    font-weight: 600;
+                                HorizontalLayout {
+                                    alignment: center;
+                                    spacing: 16px;
+
+                                    Rectangle {
+                                        width: 50px;
+                                        height: 50px;
+                                        border-radius: 25px;
+                                        background: #e91e6333;
+                                        border-width: 2px;
+                                        border-color: #e91e63;
+
+                                        Text {
+                                            text: "👤";
+                                            font-size: 22px;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        spacing: 4px;
+
+                                        Text {
+                                            text: root.logged-in-user;
+                                            color: #ffffff;
+                                            font-size: 18px;
+                                            font-weight: 700;
+                                        }
+
+                                        Text {
+                                            text: "Connected to " + root.server-url-input;
+                                            color: #9e9e9e;
+                                            font-size: 13px;
+                                        }
+                                    }
+
+                                    TvSecondaryButton {
+                                        text: "Log Out";
+                                        clicked => { root.perform-logout(); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Card 2: Playback & Engine Preferences
+                    Rectangle {
+                        border-radius: 12px;
+                        background: #1e1e1e;
+                        border-width: 1px;
+                        border-color: #ffffff14;
+
+                        VerticalLayout {
+                            padding: 22px;
+                            spacing: 16px;
+
+                            Text {
+                                text: "Playback & Engine";
+                                color: #e91e63;
+                                font-size: 16px;
+                                font-weight: 700;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 14px;
+
+                                TvSecondaryButton {
+                                    text: root.buffer-profile-label;
+                                    horizontal-stretch: 1;
+                                    clicked => { root.cycle-buffer-profile(); }
                                 }
 
-                                Text {
-                                    text: "Server: " + root.server-url-input;
-                                    color: #a0a3b8;
-                                    font-size: 13px;
+                                TvSecondaryButton {
+                                    text: root.hwdec-active ? "Hardware Decode: ON" : "Hardware Decode: OFF";
+                                    active: root.hwdec-active;
+                                    horizontal-stretch: 1;
+                                    clicked => { root.toggle-hwdec(); }
                                 }
 
-                                Button {
-                                    text: "Log Out";
-                                    clicked => { root.perform-logout(); }
+                                TvSecondaryButton {
+                                    text: root.autoplay-active ? "Autoplay: ON" : "Autoplay: OFF";
+                                    active: root.autoplay-active;
+                                    horizontal-stretch: 1;
+                                    clicked => { root.toggle-autoplay(); }
                                 }
+                            }
+                        }
+                    }
+
+                    // Card 3: Privacy & Data Management
+                    Rectangle {
+                        border-radius: 12px;
+                        background: #1e1e1e;
+                        border-width: 1px;
+                        border-color: #ffffff14;
+
+                        VerticalLayout {
+                            padding: 22px;
+                            spacing: 16px;
+
+                            Text {
+                                text: "Data & Privacy";
+                                color: #e91e63;
+                                font-size: 16px;
+                                font-weight: 700;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 14px;
+
+                                TvSecondaryButton {
+                                    text: "Clear Search History";
+                                    horizontal-stretch: 1;
+                                    clicked => { root.clear-search-history(); }
+                                }
+
+                                TvSecondaryButton {
+                                    text: "Clear Watch History & Progress";
+                                    horizontal-stretch: 1;
+                                    clicked => { root.clear-progress-history(); }
+                                }
+                            }
+                        }
+                    }
+
+                    // Card 4: Emergency Panic Exit
+                    Rectangle {
+                        border-radius: 12px;
+                        background: #1e1e1e;
+                        border-width: 1px;
+                        border-color: #ffffff14;
+
+                        VerticalLayout {
+                            padding: 22px;
+                            spacing: 12px;
+
+                            Text {
+                                text: "Panic Exit (Emergency Hide)";
+                                color: #e91e63;
+                                font-size: 16px;
+                                font-weight: 700;
                             }
 
                             Text {
-                                text: root.status;
-                                color: root.status-color;
+                                text: "Press Ctrl+Shift+Q anywhere in the application to immediately hide windows, silence audio, and terminate the process.";
+                                color: #9e9e9e;
                                 font-size: 13px;
-                                wrap: word-wrap;
+                            }
+
+                            HorizontalLayout {
+                                TvPrimaryButton {
+                                    text: "Panic Exit Now (Ctrl+Shift+Q)";
+                                    clicked => { root.panic-exit(); }
+                                }
                             }
                         }
                     }
@@ -714,6 +1387,27 @@ export component MainWindow inherits Window {
 
     keys := FocusScope {
         key-pressed(event) => {
+            // Panic Exit: Ctrl+Shift+Q
+            if (event.modifiers.control && event.modifiers.shift && (event.text == "q" || event.text == "Q")) {
+                root.panic-exit();
+                return accept;
+            }
+
+            // Quick navigation
+            if (event.text == "1") {
+                root.switch-screen("browse");
+                return accept;
+            }
+            if (event.text == "2") {
+                root.switch-screen("player");
+                return accept;
+            }
+            if (event.text == "3") {
+                root.switch-screen("settings");
+                return accept;
+            }
+
+            // Player controls
             if (event.text == Key.Space) {
                 root.toggle-play();
                 return accept;
