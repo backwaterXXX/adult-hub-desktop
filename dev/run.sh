@@ -24,7 +24,6 @@ fi
 docker_args=(
     --rm
     --interactive
-    --tty
     --volume "${ROOT_DIR}:/work"
     --volume ah-desktop-cargo:/home/dev/.cargo
     --workdir /work
@@ -33,11 +32,17 @@ docker_args=(
     --env RUST_BACKTRACE=1
 )
 
-# Reuse host X11 display when present.
-if [[ -n "${DISPLAY:-}" && -d /tmp/.X11-unix ]]; then
+if [[ -t 0 && -t 1 ]]; then
+    docker_args+=(--tty)
+fi
+
+# Reuse the host X11 display when it is a local socket display. TCP-forwarded
+# displays (for example MobaXterm) require an X cookie the container does not
+# have; use the Xvfb fallback documented in dev/README.md instead.
+if [[ -n "${DISPLAY:-}" && "${DISPLAY}" =~ ^:[0-9]+(\.[0-9]+)?$ && -d /tmp/.X11-unix ]]; then
     docker_args+=(--volume /tmp/.X11-unix:/tmp/.X11-unix:ro --env "DISPLAY=${DISPLAY}")
     if [[ -f "${XAUTHORITY:-$HOME/.Xauthority}" ]]; then
-        docker_args+=(--volume "${XAUTHORITY:-$HOME/.Xauthority}:/tmp/.Xauthority:ro" --env XAUTHORITY=/tmp/.Xauthority)
+        docker_args+=(--volume "${XAUTHORITY:-$HOME/.Xauthority}:/home/dev/.Xauthority:ro" --env XAUTHORITY=/home/dev/.Xauthority)
     fi
 fi
 

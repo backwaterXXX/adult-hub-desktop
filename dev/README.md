@@ -44,9 +44,24 @@ dev/run.sh cargo --version    # single command
 `dev/run.sh` mounts:
 
 - the repository at `/work`,
-- `/tmp/.X11-unix` and the current `DISPLAY` for X11 window tests,
+- the local X11 socket and cookie when `DISPLAY` is a `:N` socket display,
 - `/dev/dri` for VA-API hardware decoding,
 - a named volume `ah-desktop-cargo` for the Cargo registry cache.
+
+### GUI checks without a physical display
+
+Automated window checks can use the Xvfb server included in the image:
+
+```sh
+dev/run.sh bash -lc 'Xvfb :99 -screen 0 1600x900x24 & sleep 2; DISPLAY=:99 <app>'
+```
+
+This path uses Mesa llvmpipe: it verifies that a window, an OpenGL context and
+the libmpv render API work, but it cannot provide hardware decode or
+tone-mapping evidence.
+
+TCP-forwarded displays (MobaXterm, VNC gateways) are not passed through: the
+container has no matching X cookie. Run those checks from the desktop session.
 
 ## Platform limits
 
