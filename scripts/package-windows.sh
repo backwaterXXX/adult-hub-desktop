@@ -22,7 +22,7 @@ if [[ ! -f "${EXE_PATH}" ]]; then
 fi
 
 echo "==> Stripping debug symbols..."
-"${ROOT_DIR}/dev/run.sh" x86_64-w64-mingw32-strip "${EXE_PATH}"
+"${ROOT_DIR}/dev/run.sh" x86_64-w64-mingw32-strip "desktop/target/${TARGET}/release/adult-hub-desktop.exe"
 
 mkdir -p "${CACHE_DIR}"
 if [[ ! -f "${CACHE_DIR}/libmpv-2.dll" ]]; then

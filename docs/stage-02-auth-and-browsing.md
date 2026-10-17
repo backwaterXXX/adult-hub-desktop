@@ -1,6 +1,6 @@
 # Stage 2 — Authentication and Browsing
 
-Status: not started. Depends on Stage 1 acceptance.
+Status: completed. Evidence documented in [stage-02-evidence.md](stage-02-evidence.md).
 
 ## Objective
 
@@ -47,12 +47,12 @@ Check each discovery flow against the Android baseline, including filters, rando
 
 ## Acceptance checklist
 
-- [ ] Feature parity checklist covers the complete Android baseline.
-- [ ] Manual login, Quick Connect, restore/logout and library selection work.
-- [ ] All discovery screens and user actions have working application/API flows.
-- [ ] Resolver channels and Telegram pagination preserve identifiers and ordering.
-- [ ] Stale requests and account changes cannot display the wrong account's content.
-- [ ] Local storage, migration and secure-store failure scenarios pass.
-- [ ] No backend code, scripts or production databases were modified.
+- [x] Feature parity checklist covers the complete Android baseline (`docs/feature-parity-checklist.md`).
+- [x] Manual login, Quick Connect, restore/logout and library selection work.
+- [x] All discovery screens and user actions have working application/API flows.
+- [x] Resolver channels and Telegram pagination preserve identifiers and ordering.
+- [x] Stale requests and account changes cannot display the wrong account's content.
+- [x] Local storage, migration and secure-store failure scenarios pass.
+- [x] No backend code, scripts or production databases were modified.
 
 Next: [Stage 3](stage-03-playback-parity.md).

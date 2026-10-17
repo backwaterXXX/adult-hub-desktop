@@ -8,6 +8,8 @@ description = "Adult Hub Desktop player prototype"
 
 [dependencies]
 adult-hub-player = { path = "../player" }
+adult-hub-client = { path = "../client" }
+adult-hub-storage = { path = "../storage" }
 glow.workspace = true
 slint.workspace = true
 

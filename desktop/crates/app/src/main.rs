@@ -2,7 +2,11 @@
 
 mod renderer;
 
+use adult_hub_client::{
+    GetItemsQuery, JellyfinClient, ResolverClient, ServiceUrlPolicy, ServiceUrlValidation, TvItem,
+};
 use adult_hub_player::{PlaybackStats, Player, parse_header};
+use adult_hub_storage::{CredentialStore, LocalStore, Session, default_db_path};
 use slint::{Timer, TimerMode};
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -82,8 +86,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    let db_path = default_db_path();
+    let local_store = match LocalStore::open(&db_path) {
+        Ok(store) => Arc::new(store),
+        Err(err) => {
+            eprintln!(
+                "warning: opening local store at {db_path:?} failed ({err}), falling back to in-memory store"
+            );
+            Arc::new(LocalStore::open_in_memory().expect("in-memory sqlite store"))
+        }
+    };
+    let credential_store = Arc::new(CredentialStore::new());
+    let device_id = local_store
+        .get_or_create_device_id()
+        .unwrap_or_else(|_| "desktop-device-default".to_string());
+    let jellyfin = Arc::new(JellyfinClient::new(device_id));
+    let resolver = Arc::new(ResolverClient::new());
+
     install_controls(&ui, player.clone(), options.headers.clone());
     install_fullscreen(&ui);
+    install_stage2_handlers(
+        &ui,
+        player.clone(),
+        options.headers.clone(),
+        local_store.clone(),
+        credential_store.clone(),
+        jellyfin.clone(),
+        resolver.clone(),
+    );
+
+    // Initial session restore & catalog population
+    if let Ok(Some(session)) = local_store.load_session() {
+        let _ = credential_store.save(session.clone());
+        ui.set_is_logged_in(true);
+        ui.set_logged_in_user(session.username.clone().into());
+        ui.set_server_url_input(session.server_url.clone().into());
+
+        let weak = ui.as_weak();
+        let jf = jellyfin.clone();
+        std::thread::spawn(move || {
+            let items = jf
+                .get_latest_items(
+                    &session.server_url,
+                    &session.user_id,
+                    &session.access_token,
+                    None,
+                    50,
+                )
+                .map(|list| list.iter().map(tv_item_to_card).collect::<Vec<_>>())
+                .unwrap_or_else(|_| sample_catalog_items());
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    set_catalog(&ui, items);
+                }
+            })
+            .ok();
+        });
+    } else {
+        set_catalog(&ui, sample_catalog_items());
+    }
 
     let frame_pending = Arc::new(AtomicBool::new(false));
     if player.is_some() {
@@ -93,8 +154,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let (Some(player), Some(initial)) = (&player, initial_media(&options)) {
         load_media(&ui, player, &initial, &options.headers);
         ui.set_url_text(initial.into());
+        if options.url.is_some() {
+            ui.set_active_screen("player".into());
+        }
     } else if player.is_some() {
-        ui.set_status("Enter a media URL or path, or use Sample.".into());
+        ui.set_status("Ready.".into());
     }
 
     install_polling(&ui, player.clone(), frame_pending);
@@ -195,6 +259,7 @@ fn install_controls(ui: &MainWindow, player: Option<Rc<Player>>, headers: Vec<St
             }
             ui.set_url_text(text.clone().into());
             load_media(&ui, player, &text, &headers);
+            ui.set_active_screen("player".into());
         });
     }
 
@@ -209,6 +274,7 @@ fn install_controls(ui: &MainWindow, player: Option<Rc<Player>>, headers: Vec<St
                 Some(path) => {
                     ui.set_url_text(path.clone().into());
                     load_media(&ui, player, &path, &headers);
+                    ui.set_active_screen("player".into());
                 }
                 None => show_error(&ui, "sample.mp4 was not found next to the executable"),
             }
@@ -226,6 +292,7 @@ fn install_controls(ui: &MainWindow, player: Option<Rc<Player>>, headers: Vec<St
                 Some(path) => {
                     ui.set_url_text(path.clone().into());
                     load_media(&ui, player, &path, &headers);
+                    ui.set_active_screen("player".into());
                 }
                 None => {
                     if !cfg!(windows) {
@@ -309,6 +376,568 @@ fn install_fullscreen(ui: &MainWindow) {
             if fullscreen.get() {
                 ui.window().set_fullscreen(false);
                 fullscreen.set(false);
+            }
+        });
+    }
+}
+
+fn sample_catalog_items() -> Vec<VideoCardData> {
+    vec![
+        VideoCardData {
+            id: "sample".into(),
+            title: "Local Demo Sample (1080p)".into(),
+            duration: "0:10".into(),
+            year: "2026".into(),
+            is_played: false,
+            provider: "local".into(),
+        },
+        VideoCardData {
+            id: "telegram:demo_channel:101".into(),
+            title: "Channel Highlight #101".into(),
+            duration: "14:22".into(),
+            year: "2026".into(),
+            is_played: false,
+            provider: "telegram".into(),
+        },
+        VideoCardData {
+            id: "telegram:demo_channel:102".into(),
+            title: "Exclusive Scene #102".into(),
+            duration: "25:40".into(),
+            year: "2026".into(),
+            is_played: true,
+            provider: "telegram".into(),
+        },
+    ]
+}
+
+fn sample_channel_items() -> Vec<VideoCardData> {
+    vec![
+        VideoCardData {
+            id: "telegram:channel_4k:1".into(),
+            title: "4K Studios Channel - Top Clips".into(),
+            duration: "32:15".into(),
+            year: "2026".into(),
+            is_played: false,
+            provider: "telegram".into(),
+        },
+        VideoCardData {
+            id: "telegram:channel_vr:2".into(),
+            title: "VR Scenes Channel - Volume 3".into(),
+            duration: "45:00".into(),
+            year: "2026".into(),
+            is_played: false,
+            provider: "telegram".into(),
+        },
+    ]
+}
+
+fn set_catalog(ui: &MainWindow, items: Vec<VideoCardData>) {
+    let model = std::rc::Rc::new(slint::VecModel::from(items));
+    ui.set_catalog_items(model.into());
+}
+
+fn tv_item_to_card(item: &TvItem) -> VideoCardData {
+    let year_str = item.year.map(|y| y.to_string()).unwrap_or_default();
+    let duration_str = item.formatted_duration();
+    let provider = if item.is_telegram() {
+        "telegram".to_string()
+    } else {
+        "jellyfin".to_string()
+    };
+    VideoCardData {
+        id: item.id.clone().into(),
+        title: item.title.clone().into(),
+        duration: duration_str.into(),
+        year: year_str.into(),
+        is_played: item.is_played,
+        provider: provider.into(),
+    }
+}
+
+fn install_stage2_handlers(
+    ui: &MainWindow,
+    player: Option<Rc<Player>>,
+    headers: Vec<String>,
+    local_store: Arc<LocalStore>,
+    credential_store: Arc<CredentialStore>,
+    jellyfin: Arc<JellyfinClient>,
+    resolver: Arc<ResolverClient>,
+) {
+    // 1. Screen switching
+    {
+        let weak = ui.as_weak();
+        ui.on_switch_screen(move |screen| {
+            let Some(ui) = weak.upgrade() else { return };
+            ui.set_active_screen(screen);
+        });
+    }
+
+    // 2. Perform Login
+    {
+        let weak = ui.as_weak();
+        let jellyfin = jellyfin.clone();
+        let local_store = local_store.clone();
+        let credential_store = credential_store.clone();
+        ui.on_perform_login(move |server_url, username, password| {
+            let Some(ui) = weak.upgrade() else { return };
+            let server_url = server_url.trim().to_string();
+            let username = username.trim().to_string();
+            let password = password.to_string();
+
+            if server_url.is_empty() {
+                show_error(&ui, "Server address cannot be empty");
+                return;
+            }
+
+            match ServiceUrlPolicy::inspect(&server_url, false) {
+                ServiceUrlValidation::Valid(service_url) => {
+                    let normalized = service_url.normalized;
+                    let weak = weak.clone();
+                    let jellyfin = jellyfin.clone();
+                    let local_store = local_store.clone();
+                    let credential_store = credential_store.clone();
+                    ui.set_status("Connecting to server...".into());
+                    ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
+
+                    std::thread::spawn(move || {
+                        let public_info = jellyfin.get_public_system_info(&normalized).ok();
+                        match jellyfin.authenticate_by_name(&normalized, &username, &password) {
+                            Ok(auth) => {
+                                let session = Session {
+                                    server_url: normalized.clone(),
+                                    user_id: auth.user_id.clone(),
+                                    username: auth.username.clone(),
+                                    access_token: auth.access_token.clone(),
+                                    server_name: public_info
+                                        .map(|p| p.name)
+                                        .unwrap_or_else(|| "Jellyfin".into()),
+                                };
+                                let _ = local_store.save_session(&session);
+                                let _ = credential_store.save(session.clone());
+
+                                let items = jellyfin
+                                    .get_latest_items(
+                                        &normalized,
+                                        &session.user_id,
+                                        &session.access_token,
+                                        None,
+                                        50,
+                                    )
+                                    .map(|list| {
+                                        list.iter().map(tv_item_to_card).collect::<Vec<_>>()
+                                    })
+                                    .unwrap_or_else(|_| sample_catalog_items());
+
+                                slint::invoke_from_event_loop(move || {
+                                    let Some(ui) = weak.upgrade() else { return };
+                                    ui.set_is_logged_in(true);
+                                    ui.set_logged_in_user(session.username.into());
+                                    ui.set_server_url_input(session.server_url.into());
+                                    set_catalog(&ui, items);
+                                    ui.set_status("Logged in successfully".into());
+                                    ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
+                                    ui.set_active_screen("browse".into());
+                                })
+                                .ok();
+                            }
+                            Err(error) => {
+                                slint::invoke_from_event_loop(move || {
+                                    let Some(ui) = weak.upgrade() else { return };
+                                    show_error(&ui, format!("Login failed: {error}"));
+                                })
+                                .ok();
+                            }
+                        }
+                    });
+                }
+                ServiceUrlValidation::Invalid(err) => {
+                    show_error(&ui, err);
+                }
+            }
+        });
+    }
+
+    // 3. Perform Logout
+    {
+        let weak = ui.as_weak();
+        let local_store = local_store.clone();
+        let credential_store = credential_store.clone();
+        ui.on_perform_logout(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let _ = local_store.clear_session();
+            let _ = credential_store.clear();
+            ui.set_is_logged_in(false);
+            ui.set_logged_in_user("".into());
+            set_catalog(&ui, sample_catalog_items());
+            ui.set_status("Logged out".into());
+            ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
+        });
+    }
+
+    // 4. Quick Connect
+    let qc_running = Arc::new(AtomicBool::new(false));
+    {
+        let weak = ui.as_weak();
+        let jellyfin = jellyfin.clone();
+        let local_store = local_store.clone();
+        let credential_store = credential_store.clone();
+        let qc_running = qc_running.clone();
+        ui.on_start_quick_connect(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let server_url = ui.get_server_url_input().trim().to_string();
+            if server_url.is_empty() {
+                show_error(&ui, "Server address cannot be empty");
+                return;
+            }
+            let normalized = match ServiceUrlPolicy::inspect(&server_url, false) {
+                ServiceUrlValidation::Valid(service_url) => service_url.normalized,
+                ServiceUrlValidation::Invalid(err) => {
+                    show_error(&ui, err);
+                    return;
+                }
+            };
+
+            qc_running.store(true, Ordering::SeqCst);
+            let qc_running = qc_running.clone();
+            let weak = weak.clone();
+            let jellyfin = jellyfin.clone();
+            let local_store = local_store.clone();
+            let credential_store = credential_store.clone();
+
+            ui.set_status("Requesting Quick Connect code...".into());
+            ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
+
+            std::thread::spawn(move || {
+                let init = match jellyfin.quick_connect_initiate(&normalized) {
+                    Ok(init) => init,
+                    Err(err) => {
+                        let w = weak.clone();
+                        slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = w.upgrade() {
+                                show_error(&ui, format!("Quick Connect failed: {err}"));
+                            }
+                        })
+                        .ok();
+                        return;
+                    }
+                };
+
+                let code = init.code.clone();
+                let secret = init.secret.clone();
+                let w = weak.clone();
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = w.upgrade() {
+                        ui.set_quick_connect_code(code.into());
+                        ui.set_status("Enter code on another device to authorize".into());
+                    }
+                })
+                .ok();
+
+                for _ in 0..60 {
+                    std::thread::sleep(Duration::from_secs(2));
+                    if !qc_running.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    if let Ok(status) = jellyfin.quick_connect_poll(&normalized, &secret) {
+                        if status.authenticated {
+                            match jellyfin.quick_connect_authenticate(&normalized, &secret) {
+                                Ok(auth) => {
+                                    let public_info =
+                                        jellyfin.get_public_system_info(&normalized).ok();
+                                    let session = Session {
+                                        server_url: normalized.clone(),
+                                        user_id: auth.user_id.clone(),
+                                        username: auth.username.clone(),
+                                        access_token: auth.access_token.clone(),
+                                        server_name: public_info
+                                            .map(|p| p.name)
+                                            .unwrap_or_else(|| "Jellyfin".into()),
+                                    };
+                                    let _ = local_store.save_session(&session);
+                                    let _ = credential_store.save(session.clone());
+
+                                    let items = jellyfin
+                                        .get_latest_items(
+                                            &normalized,
+                                            &session.user_id,
+                                            &session.access_token,
+                                            None,
+                                            50,
+                                        )
+                                        .map(|list| {
+                                            list.iter().map(tv_item_to_card).collect::<Vec<_>>()
+                                        })
+                                        .unwrap_or_else(|_| sample_catalog_items());
+
+                                    let w = weak.clone();
+                                    slint::invoke_from_event_loop(move || {
+                                        if let Some(ui) = w.upgrade() {
+                                            ui.set_quick_connect_code("".into());
+                                            ui.set_is_logged_in(true);
+                                            ui.set_logged_in_user(session.username.into());
+                                            set_catalog(&ui, items);
+                                            ui.set_status("Quick Connect authenticated!".into());
+                                            ui.set_status_color(slint::Color::from_rgb_u8(
+                                                140, 200, 160,
+                                            ));
+                                            ui.set_active_screen("browse".into());
+                                        }
+                                    })
+                                    .ok();
+                                    return;
+                                }
+                                Err(e) => {
+                                    let w = weak.clone();
+                                    slint::invoke_from_event_loop(move || {
+                                        if let Some(ui) = w.upgrade() {
+                                            show_error(
+                                                &ui,
+                                                format!("Quick Connect auth error: {e}"),
+                                            );
+                                        }
+                                    })
+                                    .ok();
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let w = weak.clone();
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = w.upgrade() {
+                        ui.set_quick_connect_code("".into());
+                        show_error(&ui, "Quick Connect timed out");
+                    }
+                })
+                .ok();
+            });
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let qc_running = qc_running.clone();
+        ui.on_cancel_quick_connect(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            qc_running.store(false, Ordering::SeqCst);
+            ui.set_quick_connect_code("".into());
+            ui.set_status("Quick Connect cancelled".into());
+            ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
+        });
+    }
+
+    // 5. Search Catalog
+    {
+        let weak = ui.as_weak();
+        let jellyfin = jellyfin.clone();
+        let credential_store = credential_store.clone();
+        let local_store = local_store.clone();
+        ui.on_search_catalog(move |query| {
+            if weak.upgrade().is_none() {
+                return;
+            }
+            let query = query.trim().to_string();
+            let weak = weak.clone();
+            let jellyfin = jellyfin.clone();
+            let credential_store = credential_store.clone();
+            let local_store = local_store.clone();
+
+            std::thread::spawn(move || {
+                if !query.is_empty() {
+                    let _ = local_store.add_search_query(&query);
+                }
+
+                let session = credential_store.get().ok().flatten();
+                let items = if let Some(session) = session {
+                    if query.is_empty() {
+                        jellyfin
+                            .get_latest_items(
+                                &session.server_url,
+                                &session.user_id,
+                                &session.access_token,
+                                None,
+                                50,
+                            )
+                            .map(|list| list.iter().map(tv_item_to_card).collect())
+                            .unwrap_or_else(|_| sample_catalog_items())
+                    } else {
+                        let q = GetItemsQuery {
+                            parent_id: None,
+                            start_index: 0,
+                            limit: 50,
+                            sort_by: "SortName",
+                            sort_descending: false,
+                            search_term: Some(&query),
+                        };
+                        jellyfin
+                            .get_items(
+                                &session.server_url,
+                                &session.user_id,
+                                &session.access_token,
+                                &q,
+                            )
+                            .map(|page| page.items.iter().map(tv_item_to_card).collect())
+                            .unwrap_or_default()
+                    }
+                } else if query.is_empty() {
+                    sample_catalog_items()
+                } else {
+                    sample_catalog_items()
+                        .into_iter()
+                        .filter(|item| item.title.to_lowercase().contains(&query.to_lowercase()))
+                        .collect()
+                };
+
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        set_catalog(&ui, items);
+                    }
+                })
+                .ok();
+            });
+        });
+    }
+
+    // 6. Filter Category
+    {
+        let weak = ui.as_weak();
+        let jellyfin = jellyfin.clone();
+        let credential_store = credential_store.clone();
+        let resolver = resolver.clone();
+        ui.on_filter_category(move |cat| {
+            if weak.upgrade().is_none() {
+                return;
+            }
+            let cat = cat.to_string();
+            let weak = weak.clone();
+            let jellyfin = jellyfin.clone();
+            let credential_store = credential_store.clone();
+            let _resolver = resolver.clone();
+
+            std::thread::spawn(move || {
+                let session = credential_store.get().ok().flatten();
+                let items: Vec<VideoCardData> = match cat.as_str() {
+                    "Latest" => {
+                        if let Some(session) = session {
+                            jellyfin
+                                .get_latest_items(
+                                    &session.server_url,
+                                    &session.user_id,
+                                    &session.access_token,
+                                    None,
+                                    50,
+                                )
+                                .map(|list| list.iter().map(tv_item_to_card).collect())
+                                .unwrap_or_else(|_| sample_catalog_items())
+                        } else {
+                            sample_catalog_items()
+                        }
+                    }
+                    "Resume" => {
+                        if let Some(session) = session {
+                            jellyfin
+                                .get_resume_items(
+                                    &session.server_url,
+                                    &session.user_id,
+                                    &session.access_token,
+                                    50,
+                                )
+                                .map(|list| list.iter().map(tv_item_to_card).collect())
+                                .unwrap_or_default()
+                        } else {
+                            vec![VideoCardData {
+                                id: "sample".into(),
+                                title: "Sample In Progress".into(),
+                                duration: "0:10".into(),
+                                year: "2026".into(),
+                                is_played: false,
+                                provider: "local".into(),
+                            }]
+                        }
+                    }
+                    "Channels" => sample_channel_items(),
+                    _ => sample_catalog_items(),
+                };
+
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        set_catalog(&ui, items);
+                    }
+                })
+                .ok();
+            });
+        });
+    }
+
+    // 7. Play Item
+    {
+        let weak = ui.as_weak();
+        let player = player.clone();
+        let headers = headers.clone();
+        let credential_store = credential_store.clone();
+        let jellyfin = jellyfin.clone();
+        let local_store = local_store.clone();
+        ui.on_play_item(move |id| {
+            let Some(ui) = weak.upgrade() else { return };
+            let Some(player) = &player else {
+                show_error(&ui, "libmpv is not available");
+                return;
+            };
+            let id = id.to_string();
+
+            if id == "sample" {
+                if let Some(path) = media_beside_executable("sample.mp4") {
+                    ui.set_url_text(path.clone().into());
+                    load_media(&ui, player, &path, &headers);
+                    ui.set_active_screen("player".into());
+                } else {
+                    show_error(&ui, "sample.mp4 was not found next to the executable");
+                }
+                return;
+            }
+
+            if id.starts_with("http://") || id.starts_with("https://") {
+                ui.set_url_text(id.clone().into());
+                load_media(&ui, player, &id, &headers);
+                ui.set_active_screen("player".into());
+                return;
+            }
+
+            let session = credential_store.get().ok().flatten();
+
+            if id.starts_with("telegram:") {
+                let resolver_url = local_store
+                    .get_setting("resolver_url")
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| {
+                        session
+                            .as_ref()
+                            .map(|s| s.server_url.clone())
+                            .unwrap_or_default()
+                    });
+                if resolver_url.is_empty() {
+                    show_error(&ui, "Set resolver URL or connect to server first");
+                    return;
+                }
+                let stream_url = ResolverClient::stream_url(&resolver_url, &id);
+                ui.set_url_text(stream_url.clone().into());
+                load_media(&ui, player, &stream_url, &headers);
+                ui.set_active_screen("player".into());
+                return;
+            }
+
+            if let Some(session) = session {
+                let stream_url = JellyfinClient::stream_url(&session.server_url, &id);
+                let mut all_headers = headers.clone();
+                all_headers.extend(jellyfin.stream_headers(Some(&session.access_token)));
+                ui.set_url_text(stream_url.clone().into());
+                load_media(&ui, player, &stream_url, &all_headers);
+                ui.set_active_screen("player".into());
+            } else {
+                show_error(&ui, "Please log in to play Jellyfin items");
             }
         });
     }
@@ -621,5 +1250,53 @@ mod tests {
             resolve_media_input("/opt/media/video.mp4"),
             "/opt/media/video.mp4"
         );
+    }
+
+    #[test]
+    fn tv_item_to_card_mapping() {
+        let item = TvItem {
+            id: "jellyfin-123".into(),
+            title: "Adult Scene #1".into(),
+            overview: None,
+            year: Some(2025),
+            runtime_ticks: Some(120_000_000_000), // 12000s = 200m = 3h 20m
+            genres: vec![],
+            tags: vec![],
+            studios: vec![],
+            people: vec![],
+            primary_image_tag: None,
+            backdrop_image_tag: None,
+            thumb_image_tag: None,
+            is_favorite: false,
+            playback_position_ticks: 0,
+            played_percentage: None,
+            is_played: false,
+            provider_video_id: None,
+            media_source_id: None,
+            container: None,
+            file_size_bytes: None,
+            width: None,
+            height: None,
+        };
+
+        let card = tv_item_to_card(&item);
+        assert_eq!(card.id, "jellyfin-123");
+        assert_eq!(card.title, "Adult Scene #1");
+        assert_eq!(card.year, "2025");
+        assert_eq!(card.duration, "3h 20m");
+        assert_eq!(card.provider, "jellyfin");
+        assert!(!card.is_played);
+    }
+
+    #[test]
+    fn sample_catalog_defaults() {
+        let samples = sample_catalog_items();
+        assert!(!samples.is_empty());
+        assert_eq!(samples[0].id, "sample");
+        assert_eq!(samples[0].provider, "local");
+
+        let channels = sample_channel_items();
+        assert!(!channels.is_empty());
+        assert!(channels[0].id.starts_with("telegram:"));
     }
 }

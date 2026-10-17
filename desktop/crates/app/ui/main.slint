@@ -1,4 +1,13 @@
-import { Button, LineEdit, Slider } from "std-widgets.slint";
+import { Button, LineEdit, Slider, ListView, ScrollView } from "std-widgets.slint";
+
+export struct VideoCardData {
+    id: string,
+    title: string,
+    duration: string,
+    year: string,
+    is_played: bool,
+    provider: string,
+}
 
 component SeekBar inherits Rectangle {
     in property <float> value: 0;
@@ -30,7 +39,7 @@ component SeekBar inherits Rectangle {
 }
 
 export component MainWindow inherits Window {
-    title: "Adult Hub Desktop - Player Prototype";
+    title: "Adult Hub Desktop";
     preferred-width: 1120px;
     preferred-height: 720px;
     min-width: 760px;
@@ -39,6 +48,10 @@ export component MainWindow inherits Window {
     default-font-family: "Segoe UI";
     forward-focus: keys;
 
+    // View state: "browse", "player", "login"
+    in-out property <string> active-screen: "browse";
+
+    // Player state
     in-out property <image> video-image;
     in-out property <float> position: 0;
     in-out property <float> duration: 0;
@@ -46,7 +59,7 @@ export component MainWindow inherits Window {
     in-out property <bool> hud-visible: false;
     in-out property <bool> muted: false;
     in-out property <string> hud-text: "";
-    in-out property <string> status: "Starting...";
+    in-out property <string> status: "Ready";
     in-out property <color> status-color: #9aa0b4;
     in-out property <string> url-text: "";
     in-out property <float> volume: 100;
@@ -56,6 +69,22 @@ export component MainWindow inherits Window {
     in-out property <int> texture-width: 640;
     in-out property <int> texture-height: 360;
 
+    // Browsing & Catalog state
+    in-out property <[VideoCardData]> catalog-items: [];
+    in-out property <string> search-query: "";
+    in-out property <string> active-category: "Latest";
+    in-out property <string> current-library: "All Movies";
+
+    // Auth state
+    in-out property <string> server-url-input: "http://localhost:8096";
+    in-out property <string> username-input: "";
+    in-out property <string> password-input: "";
+    in-out property <string> quick-connect-code: "";
+    in-out property <string> logged-in-user: "";
+    in-out property <bool> is-logged-in: false;
+
+    // Callbacks
+    callback switch-screen(string);
     callback toggle-play();
     callback seek-to(float);
     callback seek-relative(float);
@@ -69,48 +98,69 @@ export component MainWindow inherits Window {
     callback toggle-fullscreen();
     callback escape-pressed();
 
+    // Stage 2 Callbacks
+    callback perform-login(string, string, string);
+    callback perform-logout();
+    callback start-quick-connect();
+    callback cancel-quick-connect();
+    callback search-catalog(string);
+    callback filter-category(string);
+    callback play-item(string);
+
     VerticalLayout {
         spacing: 0px;
 
+        // Top Header & Navigation Bar
         Rectangle {
-            height: 54px;
+            height: 56px;
             background: #14141c;
 
             HorizontalLayout {
                 padding-left: 18px;
                 padding-right: 18px;
-                spacing: 10px;
+                spacing: 12px;
                 alignment: center;
 
                 Text {
-                    text: "Adult Hub Desktop";
-                    color: #f2f2f7;
-                    font-size: 17px;
-                    font-weight: 600;
+                    text: "Adult Hub";
+                    color: #d65368;
+                    font-size: 18px;
+                    font-weight: 700;
                     vertical-alignment: center;
                 }
 
                 Text {
-                    text: "Player prototype";
-                    color: #8d90a8;
-                    font-size: 12px;
+                    text: "Desktop";
+                    color: #f2f2f7;
+                    font-size: 18px;
+                    font-weight: 500;
                     vertical-alignment: center;
+                }
+
+                Rectangle { width: 14px; }
+
+                Button {
+                    text: "Browse";
+                    primary: root.active-screen == "browse";
+                    clicked => { root.switch-screen("browse"); }
+                }
+
+                Button {
+                    text: "Player";
+                    primary: root.active-screen == "player";
+                    clicked => { root.switch-screen("player"); }
+                }
+
+                Button {
+                    text: root.is-logged-in ? root.logged-in-user : "Login";
+                    primary: root.active-screen == "login";
+                    clicked => { root.switch-screen("login"); }
                 }
 
                 Rectangle { horizontal-stretch: 1; }
 
-                Button {
-                    text: "Open file...";
-                    clicked => { root.open-file(); }
-                }
-
-                Button {
-                    text: "Sample";
-                    clicked => { root.load-sample(); }
-                }
-
-                Button {
-                    text: root.hud-visible ? "Hide stats" : "Stats";
+                if root.active-screen == "player" : Button {
+                    text: root.hud-visible ? "Hide Stats" : "Stats";
                     clicked => { root.toggle-hud(); }
                 }
 
@@ -126,150 +176,442 @@ export component MainWindow inherits Window {
             }
         }
 
+        // Main Content Area (Browse / Player / Login)
         Rectangle {
             vertical-stretch: 1;
-            background: #000000;
-            clip: true;
+            background: #09090d;
 
-            Image {
-                source: root.video-image;
-                image-fit: contain;
-                width: 100%;
-                height: 100%;
-            }
+            // 1. BROWSE SCREEN
+            if root.active-screen == "browse" : VerticalLayout {
+                padding: 16px;
+                spacing: 14px;
 
-            Text {
-                x: 16px;
-                y: 12px;
-                text: root.status;
-                color: root.status-color;
-                font-size: 13px;
-            }
-
-            Rectangle {
-                visible: root.hud-visible;
-                x: parent.width - self.width - 16px;
-                y: 12px;
-                width: 430px;
-                height: hud-label.preferred-height + 20px;
-                background: #000000d9;
-                border-radius: 6px;
-                border-width: 1px;
-                border-color: #333346;
-
-                VerticalLayout {
-                    padding: 10px;
-
-                    hud-label := Text {
-                        width: 100%;
-                        text: root.hud-text;
-                        color: #d7d9e6;
-                        font-size: 12px;
-                        font-family: "Consolas";
-                        wrap: word-wrap;
-                    }
-                }
-            }
-        }
-
-        Rectangle {
-            height: 136px;
-            background: #111118;
-            border-width: 1px;
-            border-color: #232331;
-
-            VerticalLayout {
-                padding: 14px;
-                spacing: 10px;
-
+                // Search & Filter controls
                 HorizontalLayout {
                     spacing: 10px;
-                    alignment: center;
-
-                    Button {
-                        text: root.playing ? "Pause" : "Play";
-                        min-width: 74px;
-                        clicked => { root.toggle-play(); }
-                    }
-
-                    Text {
-                        text: root.position-text;
-                        color: #c9ccdb;
-                        font-size: 12px;
-                        width: 52px;
-                        horizontal-alignment: right;
-                        vertical-alignment: center;
-                    }
-
-                    SeekBar {
-                        horizontal-stretch: 1;
-                        value: root.position;
-                        maximum: max(0.001, root.duration);
-                        seek(value) => { root.seek-to(value); }
-                    }
-
-                    Text {
-                        text: root.duration-text;
-                        color: #8d90a8;
-                        font-size: 12px;
-                        width: 52px;
-                        vertical-alignment: center;
-                    }
-
-                    Button {
-                        text: "-10 s";
-                        clicked => { root.seek-relative(-10); }
-                    }
-
-                    Button {
-                        text: "+10 s";
-                        clicked => { root.seek-relative(10); }
-                    }
-                }
-
-                HorizontalLayout {
-                    spacing: 10px;
-                    alignment: center;
+                    height: 38px;
 
                     LineEdit {
                         horizontal-stretch: 1;
-                        text: root.url-text;
-                        placeholder-text: "Media URL or file path";
-                        edited(text) => { root.url-text = text; }
+                        text: root.search-query;
+                        placeholder-text: "Search adult content or channels...";
+                        edited(text) => { root.search-query = text; }
                         accepted(text) => {
-                            root.url-text = text;
-                            root.load-url(text);
-                            keys.focus();
+                            root.search-query = text;
+                            root.search-catalog(text);
                         }
                     }
 
                     Button {
-                        text: "Load";
+                        text: "Search";
+                        clicked => { root.search-catalog(root.search-query); }
+                    }
+
+                    Rectangle { width: 10px; }
+
+                    Button {
+                        text: "Latest";
+                        primary: root.active-category == "Latest";
                         clicked => {
-                            root.load-url(root.url-text);
-                            keys.focus();
+                            root.active-category = "Latest";
+                            root.filter-category("Latest");
                         }
                     }
 
                     Button {
-                        text: root.aspect-label;
-                        min-width: 120px;
-                        clicked => { root.cycle-aspect(); }
+                        text: "Resume";
+                        primary: root.active-category == "Resume";
+                        clicked => {
+                            root.active-category = "Resume";
+                            root.filter-category("Resume");
+                        }
+                    }
+
+                    Button {
+                        text: "Channels";
+                        primary: root.active-category == "Channels";
+                        clicked => {
+                            root.active-category = "Channels";
+                            root.filter-category("Channels");
+                        }
+                    }
+
+                    Button {
+                        text: "Sample";
+                        clicked => { root.load-sample(); }
+                    }
+
+                    Button {
+                        text: "Open File...";
+                        clicked => { root.open-file(); }
+                    }
+                }
+
+                // Catalog Item List
+                ListView {
+                    vertical-stretch: 1;
+                    for item in root.catalog-items: Rectangle {
+                        height: 52px;
+                        background: #14141e;
+                        border-radius: 6px;
+                        border-width: 1px;
+                        border-color: #232334;
+
+                        HorizontalLayout {
+                            padding-left: 16px;
+                            padding-right: 16px;
+                            spacing: 14px;
+                            alignment: center;
+
+                            Text {
+                                text: item.provider == "telegram" ? "TG" : "JF";
+                                color: item.provider == "telegram" ? #4aa3df : #d65368;
+                                font-weight: 700;
+                                font-size: 13px;
+                                vertical-alignment: center;
+                                width: 28px;
+                            }
+
+                            Text {
+                                text: item.title;
+                                color: #f2f2f7;
+                                font-size: 14px;
+                                font-weight: 500;
+                                horizontal-stretch: 1;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+
+                            if item.year != "" : Text {
+                                text: item.year;
+                                color: #8d90a8;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                            }
+
+                            Text {
+                                text: item.duration;
+                                color: #d65368;
+                                font-size: 12px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                                width: 65px;
+                                horizontal-alignment: right;
+                            }
+
+                            Button {
+                                text: "Play";
+                                clicked => { root.play-item(item.id); }
+                            }
+                        }
+                    }
+                }
+
+                // Status Footer
+                Text {
+                    text: root.status;
+                    color: root.status-color;
+                    font-size: 13px;
+                }
+            }
+
+            // 2. PLAYER SCREEN
+            if root.active-screen == "player" : VerticalLayout {
+                spacing: 0px;
+
+                Rectangle {
+                    vertical-stretch: 1;
+                    background: #000000;
+                    clip: true;
+
+                    Image {
+                        source: root.video-image;
+                        image-fit: contain;
+                        width: 100%;
+                        height: 100%;
                     }
 
                     Text {
-                        text: "Vol";
-                        color: #8d90a8;
-                        font-size: 12px;
-                        vertical-alignment: center;
+                        x: 16px;
+                        y: 12px;
+                        text: root.status;
+                        color: root.status-color;
+                        font-size: 13px;
                     }
 
-                    Slider {
-                        width: 110px;
-                        minimum: 0;
-                        maximum: 130;
-                        value: root.volume;
-                        changed(value) => { root.set-volume(value); }
+                    Rectangle {
+                        visible: root.hud-visible;
+                        x: parent.width - self.width - 16px;
+                        y: 12px;
+                        width: 430px;
+                        height: hud-label.preferred-height + 20px;
+                        background: #000000d9;
+                        border-radius: 6px;
+                        border-width: 1px;
+                        border-color: #333346;
+
+                        VerticalLayout {
+                            padding: 10px;
+
+                            hud-label := Text {
+                                width: 100%;
+                                text: root.hud-text;
+                                color: #d7d9e6;
+                                font-size: 12px;
+                                font-family: "Consolas";
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 136px;
+                    background: #111118;
+                    border-width: 1px;
+                    border-color: #232331;
+
+                    VerticalLayout {
+                        padding: 14px;
+                        spacing: 10px;
+
+                        HorizontalLayout {
+                            spacing: 10px;
+                            alignment: center;
+
+                            Button {
+                                text: root.playing ? "Pause" : "Play";
+                                min-width: 74px;
+                                clicked => { root.toggle-play(); }
+                            }
+
+                            Text {
+                                text: root.position-text;
+                                color: #c9ccdb;
+                                font-size: 12px;
+                                width: 52px;
+                                horizontal-alignment: right;
+                                vertical-alignment: center;
+                            }
+
+                            SeekBar {
+                                horizontal-stretch: 1;
+                                value: root.position;
+                                maximum: max(0.001, root.duration);
+                                seek(value) => { root.seek-to(value); }
+                            }
+
+                            Text {
+                                text: root.duration-text;
+                                color: #8d90a8;
+                                font-size: 12px;
+                                width: 52px;
+                                vertical-alignment: center;
+                            }
+
+                            Button {
+                                text: "-10 s";
+                                clicked => { root.seek-relative(-10); }
+                            }
+
+                            Button {
+                                text: "+10 s";
+                                clicked => { root.seek-relative(10); }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 10px;
+                            alignment: center;
+
+                            LineEdit {
+                                horizontal-stretch: 1;
+                                text: root.url-text;
+                                placeholder-text: "Media URL or file path";
+                                edited(text) => { root.url-text = text; }
+                                accepted(text) => {
+                                    root.url-text = text;
+                                    root.load-url(text);
+                                    keys.focus();
+                                }
+                            }
+
+                            Button {
+                                text: "Load";
+                                clicked => {
+                                    root.load-url(root.url-text);
+                                    keys.focus();
+                                }
+                            }
+
+                            Button {
+                                text: root.aspect-label;
+                                min-width: 120px;
+                                clicked => { root.cycle-aspect(); }
+                            }
+
+                            Text {
+                                text: "Vol";
+                                color: #8d90a8;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                            }
+
+                            Slider {
+                                width: 110px;
+                                minimum: 0;
+                                maximum: 130;
+                                value: root.volume;
+                                changed(value) => { root.set-volume(value); }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 3. LOGIN & SERVER CONNECTION SCREEN
+            if root.active-screen == "login" : VerticalLayout {
+                alignment: center;
+                padding: 30px;
+
+                HorizontalLayout {
+                    alignment: center;
+
+                    Rectangle {
+                        width: 480px;
+                        background: #14141e;
+                        border-radius: 12px;
+                        border-width: 1px;
+                        border-color: #2b2b3d;
+
+                        VerticalLayout {
+                            padding: 28px;
+                            spacing: 18px;
+
+                            Text {
+                                text: root.is-logged-in ? "Current Session" : "Server Connection";
+                                color: #f2f2f7;
+                                font-size: 20px;
+                                font-weight: 700;
+                            }
+
+                            if !root.is-logged-in : VerticalLayout {
+                                spacing: 12px;
+
+                                Text {
+                                    text: "Server Address (HTTP LAN / HTTPS):";
+                                    color: #a0a3b8;
+                                    font-size: 13px;
+                                }
+
+                                LineEdit {
+                                    text: root.server-url-input;
+                                    placeholder-text: "http://192.168.1.100:8096 or https://...";
+                                    edited(text) => { root.server-url-input = text; }
+                                }
+
+                                Text {
+                                    text: "Username:";
+                                    color: #a0a3b8;
+                                    font-size: 13px;
+                                }
+
+                                LineEdit {
+                                    text: root.username-input;
+                                    placeholder-text: "Username";
+                                    edited(text) => { root.username-input = text; }
+                                }
+
+                                Text {
+                                    text: "Password:";
+                                    color: #a0a3b8;
+                                    font-size: 13px;
+                                }
+
+                                LineEdit {
+                                    text: root.password-input;
+                                    placeholder-text: "Password";
+                                    input-type: password;
+                                    edited(text) => { root.password-input = text; }
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 12px;
+
+                                    Button {
+                                        horizontal-stretch: 1;
+                                        text: "Login";
+                                        primary: true;
+                                        clicked => {
+                                            root.perform-login(
+                                                root.server-url-input,
+                                                root.username-input,
+                                                root.password-input
+                                            );
+                                        }
+                                    }
+
+                                    Button {
+                                        horizontal-stretch: 1;
+                                        text: "Quick Connect";
+                                        clicked => { root.start-quick-connect(); }
+                                    }
+                                }
+
+                                if root.quick-connect-code != "" : Rectangle {
+                                    background: #202030;
+                                    border-radius: 8px;
+                                    height: 50px;
+
+                                    HorizontalLayout {
+                                        alignment: center;
+                                        spacing: 10px;
+
+                                        Text {
+                                            text: "Code: " + root.quick-connect-code;
+                                            color: #d65368;
+                                            font-size: 18px;
+                                            font-weight: 700;
+                                            vertical-alignment: center;
+                                        }
+
+                                        Button {
+                                            text: "Cancel";
+                                            clicked => { root.cancel-quick-connect(); }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if root.is-logged-in : VerticalLayout {
+                                spacing: 14px;
+
+                                Text {
+                                    text: "Logged in as: " + root.logged-in-user;
+                                    color: #8cc8a0;
+                                    font-size: 16px;
+                                    font-weight: 600;
+                                }
+
+                                Text {
+                                    text: "Server: " + root.server-url-input;
+                                    color: #a0a3b8;
+                                    font-size: 13px;
+                                }
+
+                                Button {
+                                    text: "Log Out";
+                                    clicked => { root.perform-logout(); }
+                                }
+                            }
+
+                            Text {
+                                text: root.status;
+                                color: root.status-color;
+                                font-size: 13px;
+                                wrap: word-wrap;
+                            }
+                        }
                     }
                 }
             }
