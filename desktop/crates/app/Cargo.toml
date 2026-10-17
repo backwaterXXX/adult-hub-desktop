@@ -1,0 +1,18 @@
+[package]
+name = "adult-hub-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Adult Hub Desktop player prototype"
+
+[dependencies]
+adult-hub-player = { path = "../player" }
+glow.workspace = true
+slint.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+rfd = { version = "0.17", default-features = false }
+
+[build-dependencies]
+slint-build.workspace = true

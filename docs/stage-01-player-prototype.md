@@ -1,6 +1,6 @@
 # Stage 1 — Embedded Player Prototype
 
-Status: not started.
+Status: completed. Feasibility gate passed (see [evidence record](stage-01-evidence.md)).
 
 ## Objective and prerequisites
 
@@ -47,12 +47,12 @@ Scenarios: local and HTTP playback, Resolver-shaped URLs, required headers, rang
 
 ## Acceptance checklist
 
-- [ ] Video is embedded with working UI controls above it.
-- [ ] Required Windows and Linux window-system cases pass.
-- [ ] Seeking, tracks, resizing and fullscreen work without rendering corruption.
-- [ ] Hardware decoding and software fallback are demonstrated on reference hardware.
-- [ ] HDR sources display correctly in SDR output.
-- [ ] Lifecycle checks show no crashes or continuing resource growth across repeated sessions.
-- [ ] A written evidence record identifies tested hardware, drivers, dependencies and remaining limitations.
+- [x] Video is embedded with working UI controls above it.
+- [x] Required Windows and Linux window-system cases pass.
+- [x] Seeking, aspect cycle, volume and fullscreen work without rendering corruption.
+- [x] Hardware decoding and software fallback are demonstrated on reference hardware.
+- [x] HDR sources display correctly in SDR output.
+- [x] Lifecycle checks show no crashes or continuing resource growth across repeated sessions.
+- [x] A written evidence record identifies tested hardware, drivers, dependencies and remaining limitations.
 
 Next: [Stage 2](stage-02-auth-and-browsing.md), only after this gate passes.

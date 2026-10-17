@@ -1,0 +1,312 @@
+import { Button, LineEdit, Slider } from "std-widgets.slint";
+
+component SeekBar inherits Rectangle {
+    in property <float> value: 0;
+    in property <float> maximum: 1;
+    callback seek(float);
+
+    height: 10px;
+    border-radius: 5px;
+    background: #262633;
+    clip: true;
+
+    Rectangle {
+        x: 0;
+        y: 0;
+        height: 100%;
+        width: root.maximum > 0 ? max(0px, min(root.width, root.width * root.value / root.maximum)) : 0px;
+        border-radius: 5px;
+        background: #d65368;
+    }
+
+    TouchArea {
+        clicked => {
+            root.seek(root.maximum * (self.mouse-x / root.width));
+        }
+        moved => {
+            root.seek(root.maximum * (self.mouse-x / root.width));
+        }
+    }
+}
+
+export component MainWindow inherits Window {
+    title: "Adult Hub Desktop - Player Prototype";
+    preferred-width: 1120px;
+    preferred-height: 720px;
+    min-width: 760px;
+    min-height: 480px;
+    background: #0b0b10;
+    default-font-family: "Segoe UI";
+    forward-focus: keys;
+
+    in-out property <image> video-image;
+    in-out property <float> position: 0;
+    in-out property <float> duration: 0;
+    in-out property <bool> playing: false;
+    in-out property <bool> hud-visible: false;
+    in-out property <bool> muted: false;
+    in-out property <string> hud-text: "";
+    in-out property <string> status: "Starting...";
+    in-out property <color> status-color: #9aa0b4;
+    in-out property <string> url-text: "";
+    in-out property <float> volume: 100;
+    in-out property <string> aspect-label: "Aspect: Auto";
+    in-out property <string> position-text: "0:00";
+    in-out property <string> duration-text: "0:00";
+    in-out property <int> texture-width: 640;
+    in-out property <int> texture-height: 360;
+
+    callback toggle-play();
+    callback seek-to(float);
+    callback seek-relative(float);
+    callback set-volume(float);
+    callback load-url(string);
+    callback open-file();
+    callback load-sample();
+    callback cycle-aspect();
+    callback toggle-hud();
+    callback toggle-mute();
+    callback toggle-fullscreen();
+    callback escape-pressed();
+
+    VerticalLayout {
+        spacing: 0px;
+
+        Rectangle {
+            height: 54px;
+            background: #14141c;
+
+            HorizontalLayout {
+                padding-left: 18px;
+                padding-right: 18px;
+                spacing: 10px;
+                alignment: center;
+
+                Text {
+                    text: "Adult Hub Desktop";
+                    color: #f2f2f7;
+                    font-size: 17px;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                }
+
+                Text {
+                    text: "Player prototype";
+                    color: #8d90a8;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+
+                Rectangle { horizontal-stretch: 1; }
+
+                Button {
+                    text: "Open file...";
+                    clicked => { root.open-file(); }
+                }
+
+                Button {
+                    text: "Sample";
+                    clicked => { root.load-sample(); }
+                }
+
+                Button {
+                    text: root.hud-visible ? "Hide stats" : "Stats";
+                    clicked => { root.toggle-hud(); }
+                }
+
+                Button {
+                    text: root.muted ? "Unmute" : "Mute";
+                    clicked => { root.toggle-mute(); }
+                }
+
+                Button {
+                    text: "Fullscreen";
+                    clicked => { root.toggle-fullscreen(); }
+                }
+            }
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+            background: #000000;
+            clip: true;
+
+            Image {
+                source: root.video-image;
+                image-fit: contain;
+                width: 100%;
+                height: 100%;
+            }
+
+            Text {
+                x: 16px;
+                y: 12px;
+                text: root.status;
+                color: root.status-color;
+                font-size: 13px;
+            }
+
+            Rectangle {
+                visible: root.hud-visible;
+                x: parent.width - self.width - 16px;
+                y: 12px;
+                width: 430px;
+                height: hud-label.preferred-height + 20px;
+                background: #000000d9;
+                border-radius: 6px;
+                border-width: 1px;
+                border-color: #333346;
+
+                VerticalLayout {
+                    padding: 10px;
+
+                    hud-label := Text {
+                        width: 100%;
+                        text: root.hud-text;
+                        color: #d7d9e6;
+                        font-size: 12px;
+                        font-family: "Consolas";
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            height: 136px;
+            background: #111118;
+            border-width: 1px;
+            border-color: #232331;
+
+            VerticalLayout {
+                padding: 14px;
+                spacing: 10px;
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: center;
+
+                    Button {
+                        text: root.playing ? "Pause" : "Play";
+                        min-width: 74px;
+                        clicked => { root.toggle-play(); }
+                    }
+
+                    Text {
+                        text: root.position-text;
+                        color: #c9ccdb;
+                        font-size: 12px;
+                        width: 52px;
+                        horizontal-alignment: right;
+                        vertical-alignment: center;
+                    }
+
+                    SeekBar {
+                        horizontal-stretch: 1;
+                        value: root.position;
+                        maximum: max(0.001, root.duration);
+                        seek(value) => { root.seek-to(value); }
+                    }
+
+                    Text {
+                        text: root.duration-text;
+                        color: #8d90a8;
+                        font-size: 12px;
+                        width: 52px;
+                        vertical-alignment: center;
+                    }
+
+                    Button {
+                        text: "-10 s";
+                        clicked => { root.seek-relative(-10); }
+                    }
+
+                    Button {
+                        text: "+10 s";
+                        clicked => { root.seek-relative(10); }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: center;
+
+                    LineEdit {
+                        horizontal-stretch: 1;
+                        text: root.url-text;
+                        placeholder-text: "Media URL or file path";
+                        edited(text) => { root.url-text = text; }
+                        accepted(text) => {
+                            root.url-text = text;
+                            root.load-url(text);
+                            keys.focus();
+                        }
+                    }
+
+                    Button {
+                        text: "Load";
+                        clicked => {
+                            root.load-url(root.url-text);
+                            keys.focus();
+                        }
+                    }
+
+                    Button {
+                        text: root.aspect-label;
+                        min-width: 120px;
+                        clicked => { root.cycle-aspect(); }
+                    }
+
+                    Text {
+                        text: "Vol";
+                        color: #8d90a8;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+
+                    Slider {
+                        width: 110px;
+                        minimum: 0;
+                        maximum: 130;
+                        value: root.volume;
+                        changed(value) => { root.set-volume(value); }
+                    }
+                }
+            }
+        }
+    }
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Space) {
+                root.toggle-play();
+                return accept;
+            }
+            if (event.text == Key.LeftArrow) {
+                root.seek-relative(-5);
+                return accept;
+            }
+            if (event.text == Key.RightArrow) {
+                root.seek-relative(5);
+                return accept;
+            }
+            if (event.text == "f") {
+                root.toggle-fullscreen();
+                return accept;
+            }
+            if (event.text == "i") {
+                root.toggle-hud();
+                return accept;
+            }
+            if (event.text == "m") {
+                root.toggle-mute();
+                return accept;
+            }
+            if (event.text == Key.Escape) {
+                root.escape-pressed();
+                return accept;
+            }
+            reject
+        }
+    }
+}

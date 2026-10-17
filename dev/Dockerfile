@@ -49,6 +49,8 @@ RUN apt-get update \
         libdbus-1-dev \
         patchelf \
         fakeroot \
+        p7zip-full \
+        mingw-w64 \
         file \
         desktop-file-utils \
         ca-certificates \
@@ -72,6 +74,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf \
     && chmod -R a+rX "${RUSTUP_HOME}" "${CARGO_HOME}" \
     && rustc --version \
     && cargo --version \
+    && rustup target add x86_64-pc-windows-gnu \
     && rustup component add rustfmt clippy
 
 # Match the host developer's uid/gid when building with:

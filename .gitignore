@@ -16,6 +16,10 @@ build/
 *.log
 *.tmp
 .cache/
+core
+core.*
+*.mp4
+*.mkv
 
 # OS files
 .DS_Store
