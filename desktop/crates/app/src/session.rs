@@ -115,6 +115,7 @@ impl PlaybackSessionController {
         item: &TvItem,
         server_url: Option<&str>,
         resolver_url: Option<&str>,
+        access_token: Option<&str>,
     ) -> Result<(String, PlayMethod), String> {
         if item.id == "sample" {
             return Ok(("sample.mp4".into(), PlayMethod::DirectPlay));
@@ -144,7 +145,11 @@ impl PlaybackSessionController {
         if server.is_empty() {
             return Err("Server URL is required to play Jellyfin content".into());
         }
-        let url = format!("{server}/Videos/{}/stream?static=true", item.id);
+        let token_part = match access_token {
+            Some(t) if !t.is_empty() => format!("&api_key={t}"),
+            _ => String::new(),
+        };
+        let url = format!("{server}/Videos/{}/stream?static=true{token_part}", item.id);
         Ok((url, PlayMethod::DirectPlay))
     }
 }
@@ -243,11 +248,12 @@ mod tests {
             &jf_item,
             Some("http://jf.local:8096"),
             None,
+            Some("my-token"),
         )
         .unwrap();
         assert_eq!(
             url,
-            "http://jf.local:8096/Videos/a1b2c3d4-e5f6-7890-abcd-ef1234567890/stream?static=true"
+            "http://jf.local:8096/Videos/a1b2c3d4-e5f6-7890-abcd-ef1234567890/stream?static=true&api_key=my-token"
         );
         assert_eq!(method, PlayMethod::DirectPlay);
 
@@ -257,6 +263,7 @@ mod tests {
             &tg_item,
             None,
             Some("http://resolver.local:8080"),
+            None,
         )
         .unwrap();
         assert_eq!(

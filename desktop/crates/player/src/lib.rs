@@ -252,6 +252,13 @@ impl Player {
             ("tone-mapping", "auto"),
             ("target-colorspace-hint", "no"),
             ("target-trc", "srgb"),
+            ("cache", "yes"),
+            ("demuxer-max-bytes", "64M"),
+            ("demuxer-max-back-bytes", "32M"),
+            ("demuxer-readahead-secs", "20"),
+            ("vd-lavc-threads", "0"),
+            ("hr-seek", "yes"),
+            ("video-sync", "audio"),
         ] {
             if let Err(error) = unsafe { set_option_raw(&api, handle, name, value) } {
                 unsafe { (api.mpv_terminate_destroy)(handle) };

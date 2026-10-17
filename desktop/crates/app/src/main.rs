@@ -285,7 +285,7 @@ fn start_item_playback(
     headers: &[String],
     credential_store: &Arc<CredentialStore>,
     local_store: &Arc<LocalStore>,
-    jellyfin: &Arc<JellyfinClient>,
+    _jellyfin: &Arc<JellyfinClient>,
     reporter: &Arc<PlaybackReporter>,
     session_ctrl: &Arc<PlaybackSessionController>,
     current_item: &Arc<Mutex<Option<TvItem>>>,
@@ -312,6 +312,7 @@ fn start_item_playback(
         &item,
         session.as_ref().map(|s| s.server_url.as_str()),
         resolver_url.as_deref(),
+        session.as_ref().map(|s| s.access_token.as_str()),
     ) {
         Ok(res) => res,
         Err(err) => {
@@ -323,7 +324,9 @@ fn start_item_playback(
     let mut stream_headers = headers.to_vec();
     if !item.is_telegram() {
         if let Some(sess) = &session {
-            stream_headers.extend(jellyfin.stream_headers(Some(&sess.access_token)));
+            if !sess.access_token.is_empty() {
+                stream_headers.push(format!("X-Emby-Token: {}", sess.access_token));
+            }
         }
     }
 
@@ -1763,8 +1766,8 @@ fn install_renderer(
     let ui_weak = ui.as_weak();
     let frame_pending = frame_pending.clone();
     let flip_y = std::env::var("ADULT_HUB_FLIP_Y")
-        .map(|value| value != "0")
-        .unwrap_or(true);
+        .map(|value| value == "1" || value == "true")
+        .unwrap_or(false);
     let mut renderer: Option<renderer::Renderer> = None;
 
     ui.window()
@@ -1781,8 +1784,16 @@ fn install_renderer(
                 match renderer::Renderer::new(Rc::clone(&player), get_proc_address, flip_y) {
                     Ok(mut created) => {
                         let pending = frame_pending.clone();
+                        let w = ui_weak.clone();
                         created.set_update_callback(move || {
-                            pending.store(true, Ordering::Release);
+                            if !pending.swap(true, Ordering::SeqCst) {
+                                let w = w.clone();
+                                let _ = slint::invoke_from_event_loop(move || {
+                                    if let Some(ui) = w.upgrade() {
+                                        ui.window().request_redraw();
+                                    }
+                                });
+                            }
                         });
                         renderer = Some(created);
                     }
@@ -1794,6 +1805,7 @@ fn install_renderer(
                 }
             }
             slint::RenderingState::BeforeRendering => {
+                frame_pending.store(false, Ordering::SeqCst);
                 let Some(renderer) = renderer.as_mut() else {
                     return;
                 };
@@ -1843,7 +1855,7 @@ fn install_polling(
     let ls = local_store.clone();
     let jf = jellyfin.clone();
 
-    timer.start(TimerMode::Repeated, Duration::from_millis(33), move || {
+    timer.start(TimerMode::Repeated, Duration::from_millis(100), move || {
         let Some(ui) = ui_weak.upgrade() else { return };
         if frame_pending.swap(false, Ordering::AcqRel) {
             ui.window().request_redraw();
@@ -1875,7 +1887,7 @@ fn install_polling(
         }
 
         if let Some(position) = player.position()
-            && (position - ui.get_position() as f64).abs() > 0.02
+            && (position - ui.get_position() as f64).abs() > 0.05
         {
             ui.set_position(position as f32);
             ui.set_position_text(format_time(position).into());
@@ -1895,12 +1907,12 @@ fn install_polling(
         }
 
         tick = tick.wrapping_add(1);
-        if ui.get_hud_visible() && tick % 15 == 0 {
+        if ui.get_hud_visible() && tick % 5 == 0 {
             ui.set_hud_text(stats_text(&player.stats()).into());
         }
 
-        // Periodic progress checkpoint and reporting every ~10 seconds (~300 ticks)
-        if tick % 300 == 0 && !idle {
+        // Periodic progress checkpoint and reporting every ~10 seconds (~100 ticks at 100ms)
+        if tick % 100 == 0 && !idle {
             let pos_ms = (player.position().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
             let dur_ms = (player.duration().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
             rep.tick_periodic(pos_ms, paused);
