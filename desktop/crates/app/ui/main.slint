@@ -7,6 +7,8 @@ export struct VideoCardData {
     year: string,
     is_played: bool,
     provider: string,
+    is_favorite: bool,
+    studio: string,
 }
 
 export struct DiscoveredServerItem {
@@ -165,6 +167,7 @@ component SeekBar inherits Rectangle {
 component MovieCardItem inherits Rectangle {
     in property <VideoCardData> item;
     callback play();
+    callback open-detail();
 
     height: 104px;
     border-radius: 10px;
@@ -172,6 +175,10 @@ component MovieCardItem inherits Rectangle {
     border-width: touch.has-hover ? 2px : 1px;
     border-color: touch.has-hover ? #e91e63 : #ffffff1f;
     clip: true;
+
+    touch := TouchArea {
+        clicked => { root.open-detail(); }
+    }
 
     HorizontalLayout {
         padding: 8px;
@@ -224,25 +231,44 @@ component MovieCardItem inherits Rectangle {
                 }
             }
 
-            // Top-right WATCHED badge
-            if root.item.is_played : Rectangle {
+            // Top-right status badges
+            HorizontalLayout {
                 x: parent.width - self.width - 6px;
                 y: 6px;
-                height: 18px;
-                border-radius: 4px;
-                background: #000000c7;
-                border-width: 1px;
-                border-color: #e91e63;
+                spacing: 4px;
 
-                HorizontalLayout {
-                    padding-left: 5px;
-                    padding-right: 5px;
-                    Text {
-                        text: "WATCHED";
-                        color: #e91e63;
-                        font-size: 9px;
-                        font-weight: 800;
-                        vertical-alignment: center;
+                if root.item.is_favorite : Rectangle {
+                    height: 18px;
+                    border-radius: 4px;
+                    background: #e91e63e6;
+                    HorizontalLayout {
+                        padding-left: 4px;
+                        padding-right: 4px;
+                        Text {
+                            text: "❤️";
+                            font-size: 10px;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                if root.item.is_played : Rectangle {
+                    height: 18px;
+                    border-radius: 4px;
+                    background: #000000c7;
+                    border-width: 1px;
+                    border-color: #e91e63;
+
+                    HorizontalLayout {
+                        padding-left: 5px;
+                        padding-right: 5px;
+                        Text {
+                            text: "WATCHED";
+                            color: #e91e63;
+                            font-size: 9px;
+                            font-weight: 800;
+                            vertical-alignment: center;
+                        }
                     }
                 }
             }
@@ -303,6 +329,13 @@ component MovieCardItem inherits Rectangle {
                     color: #9e9e9e;
                     font-size: 12px;
                 }
+
+                if root.item.studio != "" : Text {
+                    text: "• " + root.item.studio;
+                    color: #ff80ab;
+                    font-size: 12px;
+                    font-weight: 600;
+                }
             }
         }
 
@@ -315,9 +348,9 @@ component MovieCardItem inherits Rectangle {
                 width: 44px;
                 height: 44px;
                 border-radius: 22px;
-                background: touch.has-hover ? #e91e63 : #2a2a2a;
+                background: play-touch.has-hover ? #e91e63 : #2a2a2a;
                 border-width: 1px;
-                border-color: touch.has-hover ? #ffffff : #ffffff22;
+                border-color: play-touch.has-hover ? #ffffff : #ffffff22;
 
                 Text {
                     text: "▶";
@@ -326,12 +359,12 @@ component MovieCardItem inherits Rectangle {
                     horizontal-alignment: center;
                     vertical-alignment: center;
                 }
+
+                play-touch := TouchArea {
+                    clicked => { root.play(); }
+                }
             }
         }
-    }
-
-    touch := TouchArea {
-        clicked => { root.play(); }
     }
 }
 
@@ -477,6 +510,31 @@ export component MainWindow inherits Window {
     callback check-for-updates();
     callback start-update-download();
     callback install-update();
+
+    // Stage 6 Item Detail & Discovery State
+    in-out property <bool> detail-visible: false;
+    in-out property <string> detail-id: "";
+    in-out property <string> detail-title: "";
+    in-out property <string> detail-overview: "";
+    in-out property <string> detail-year: "";
+    in-out property <string> detail-duration: "";
+    in-out property <string> detail-studio: "";
+    in-out property <string> detail-genres: "";
+    in-out property <string> detail-provider: "";
+    in-out property <string> detail-resolution: "";
+    in-out property <bool> detail-is-favorite: false;
+    in-out property <bool> detail-is-played: false;
+    in-out property <string> detail-resume-text: "";
+    in-out property <bool> detail-can-resume: false;
+    in-out property <[string]> detail-performers: [];
+
+    callback open-item-detail(string);
+    callback close-item-detail();
+    callback toggle-detail-favorite(string);
+    callback toggle-detail-played(string);
+    callback play-detail-item(string, bool);
+    callback select-performer(string);
+    callback select-studio(string);
 
 
     VerticalLayout {
@@ -652,11 +710,38 @@ export component MainWindow inherits Window {
                     }
 
                     TvChoiceChip {
+                        text: "Favorites";
+                        selected: root.active-category == "Favorites";
+                        clicked => {
+                            root.active-category = "Favorites";
+                            root.filter-category("Favorites");
+                        }
+                    }
+
+                    TvChoiceChip {
                         text: "Channels";
                         selected: root.active-category == "Channels";
                         clicked => {
                             root.active-category = "Channels";
                             root.filter-category("Channels");
+                        }
+                    }
+
+                    TvChoiceChip {
+                        text: "Performers";
+                        selected: root.active-category == "Performers";
+                        clicked => {
+                            root.active-category = "Performers";
+                            root.filter-category("Performers");
+                        }
+                    }
+
+                    TvChoiceChip {
+                        text: "Studios";
+                        selected: root.active-category == "Studios";
+                        clicked => {
+                            root.active-category = "Studios";
+                            root.filter-category("Studios");
                         }
                     }
 
@@ -683,7 +768,7 @@ export component MainWindow inherits Window {
                     LineEdit {
                         width: 280px;
                         text: root.search-query;
-                        placeholder-text: "Search videos or channels...";
+                        placeholder-text: "Search videos, cast, channels...";
                         edited(text) => { root.search-query = text; }
                         accepted(text) => {
                             root.search-query = text;
@@ -707,6 +792,7 @@ export component MainWindow inherits Window {
                         MovieCardItem {
                             item: item;
                             play => { root.play-item(item.id); }
+                            open-detail => { root.open-item-detail(item.id); }
                         }
                     }
                 }
@@ -1817,6 +1903,254 @@ export component MainWindow inherits Window {
         }
     }
 
+    // Stage 6 Item Detail Modal Dialog (Parity with Android TV DetailScreen)
+    if root.detail-visible : Rectangle {
+        x: 0px;
+        y: 0px;
+        width: 100%;
+        height: 100%;
+        background: #000000e6;
+
+        // Scrim click handler to dismiss when clicking outside dialog
+        TouchArea {
+            clicked => { root.close-item-detail(); }
+        }
+
+        // Dialog Container
+        Rectangle {
+            width: min(780px, root.width - 48px);
+            height: min(540px, root.height - 48px);
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: 12px;
+            background: #141418;
+            border-width: 1px;
+            border-color: #e91e6388;
+            clip: true;
+
+            // Consume clicks inside the dialog so they don't trigger the scrim click
+            TouchArea {}
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 16px;
+
+                // Header Row: Title, Year/Duration/Resolution/Studio Badge & Close Button
+                HorizontalLayout {
+                    spacing: 16px;
+                    alignment: center;
+
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 6px;
+
+                        Text {
+                            text: root.detail-title;
+                            color: #ffffff;
+                            font-size: 20px;
+                            font-weight: 700;
+                            wrap: word-wrap;
+                        }
+
+                        HorizontalLayout {
+                            spacing: 8px;
+
+                            if root.detail-year != "" : Text {
+                                text: root.detail-year;
+                                color: #9e9e9e;
+                                font-size: 13px;
+                            }
+
+                            if root.detail-duration != "" : Text {
+                                text: "•  " + root.detail-duration;
+                                color: #9e9e9e;
+                                font-size: 13px;
+                            }
+
+                            if root.detail-resolution != "" : Text {
+                                text: "•  " + root.detail-resolution;
+                                color: #9e9e9e;
+                                font-size: 13px;
+                            }
+
+                            if root.detail-studio != "" : Rectangle {
+                                height: 22px;
+                                border-radius: 4px;
+                                background: studio-touch.has-hover ? #e91e6333 : #1e1e24;
+                                border-width: 1px;
+                                border-color: studio-touch.has-hover ? #e91e63 : #ffffff22;
+
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    alignment: center;
+                                    Text {
+                                        text: root.detail-studio;
+                                        color: studio-touch.has-hover ? #ffffff : #ff80ab;
+                                        font-size: 11px;
+                                        font-weight: 700;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                studio-touch := TouchArea {
+                                    clicked => { root.select-studio(root.detail-studio); }
+                                }
+                            }
+                        }
+                    }
+
+                    // Close Button
+                    Rectangle {
+                        width: 32px;
+                        height: 32px;
+                        border-radius: 16px;
+                        background: close-touch.has-hover ? #e91e63 : #24242d;
+
+                        Text {
+                            text: "✕";
+                            color: #ffffff;
+                            font-size: 14px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+
+                        close-touch := TouchArea {
+                            clicked => { root.close-item-detail(); }
+                        }
+                    }
+                }
+
+                // Divider line
+                Rectangle {
+                    height: 1px;
+                    background: #ffffff14;
+                }
+
+                // Middle Section: Genres, Synopsis / Overview, Performers
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    vertical-stretch: 1;
+                    spacing: 12px;
+
+                    if root.detail-genres != "" : HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: "Genres: ";
+                            color: #9e9e9e;
+                            font-size: 12px;
+                            font-weight: 600;
+                        }
+                        Text {
+                            text: root.detail-genres;
+                            color: #e0e0e0;
+                            font-size: 12px;
+                        }
+                    }
+
+                    // Synopsis / Overview
+                    Flickable {
+                        vertical-stretch: 1;
+                        interactive: true;
+
+                        Text {
+                            width: parent.width;
+                            text: root.detail-overview != "" ? root.detail-overview : "No synopsis available.";
+                            color: #cccccc;
+                            font-size: 13px;
+                            wrap: word-wrap;
+                        }
+                    }
+
+                    // Cast / Performers Pills
+                    if root.detail-performers.length > 0 : VerticalLayout {
+                        spacing: 6px;
+
+                        Text {
+                            text: "Performers / Cast:";
+                            color: #9e9e9e;
+                            font-size: 12px;
+                            font-weight: 600;
+                        }
+
+                        HorizontalLayout {
+                            spacing: 8px;
+
+                            for performer in root.detail-performers : Rectangle {
+                                height: 28px;
+                                border-radius: 14px;
+                                background: perf-touch.has-hover ? #e91e6333 : #1e1e24;
+                                border-width: 1px;
+                                border-color: perf-touch.has-hover ? #e91e63 : #ffffff22;
+
+                                HorizontalLayout {
+                                    padding-left: 12px;
+                                    padding-right: 12px;
+                                    alignment: center;
+
+                                    Text {
+                                        text: performer;
+                                        color: perf-touch.has-hover ? #ffffff : #ff80ab;
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                perf-touch := TouchArea {
+                                    clicked => { root.select-performer(performer); }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Divider line
+                Rectangle {
+                    height: 1px;
+                    background: #ffffff14;
+                }
+
+                // Bottom Action Buttons Row
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: start;
+
+                    TvPrimaryButton {
+                        text: root.detail-can-resume ? "▶ Play from Start" : "▶ Play";
+                        clicked => { root.play-detail-item(root.detail-id, false); }
+                    }
+
+                    if root.detail-can-resume : TvSecondaryButton {
+                        text: "Resume (" + root.detail-resume-text + ")";
+                        active: true;
+                        clicked => { root.play-detail-item(root.detail-id, true); }
+                    }
+
+                    TvSecondaryButton {
+                        text: root.detail-is-favorite ? "❤️ Favorited" : "🤍 Favorite";
+                        active: root.detail-is-favorite;
+                        clicked => { root.toggle-detail-favorite(root.detail-id); }
+                    }
+
+                    TvSecondaryButton {
+                        text: root.detail-is-played ? "✓ Played" : "Mark Watched";
+                        active: root.detail-is-played;
+                        clicked => { root.toggle-detail-played(root.detail-id); }
+                    }
+
+                    Rectangle { horizontal-stretch: 1; }
+
+                    TvSecondaryButton {
+                        text: "Close";
+                        clicked => { root.close-item-detail(); }
+                    }
+                }
+            }
+        }
+    }
+
     keys := FocusScope {
         key-pressed(event) => {
             // Panic Exit: Ctrl+Shift+Q
@@ -1881,6 +2215,10 @@ export component MainWindow inherits Window {
                 return accept;
             }
             if (event.text == Key.Escape) {
+                if (root.detail-visible) {
+                    root.close-item-detail();
+                    return accept;
+                }
                 root.escape-pressed();
                 return accept;
             }

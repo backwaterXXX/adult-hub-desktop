@@ -37,6 +37,10 @@ pub struct GetItemsQuery<'a> {
     pub sort_by: &'a str,
     pub sort_descending: bool,
     pub search_term: Option<&'a str>,
+    pub person: Option<&'a str>,
+    pub studio: Option<&'a str>,
+    pub genre: Option<&'a str>,
+    pub is_favorite: Option<bool>,
 }
 
 impl JellyfinClient {
@@ -341,6 +345,24 @@ impl JellyfinClient {
                 url.push_str(&format!("&SearchTerm={}", urlencoding(term.trim())));
             }
         }
+        if let Some(person) = query.person {
+            if !person.trim().is_empty() {
+                url.push_str(&format!("&Person={}", urlencoding(person.trim())));
+            }
+        }
+        if let Some(studio) = query.studio {
+            if !studio.trim().is_empty() {
+                url.push_str(&format!("&Studios={}", urlencoding(studio.trim())));
+            }
+        }
+        if let Some(genre) = query.genre {
+            if !genre.trim().is_empty() {
+                url.push_str(&format!("&Genres={}", urlencoding(genre.trim())));
+            }
+        }
+        if let Some(fav) = query.is_favorite {
+            url.push_str(&format!("&IsFavorite={fav}"));
+        }
 
         let res: ItemsResponseDto = self
             .client
@@ -520,6 +542,30 @@ impl JellyfinClient {
         let base = Self::clean_url(base_url);
         let url = format!("{base}/Users/{user_id}/FavoriteItems/{item_id}");
         let req = if is_favorite {
+            self.client.post(&url)
+        } else {
+            self.client.delete(&url)
+        };
+        req.headers(self.headers(Some(token)))
+            .send()?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    pub fn toggle_played(
+        &self,
+        base_url: &str,
+        user_id: &str,
+        token: &str,
+        item_id: &str,
+        is_played: bool,
+    ) -> Result<()> {
+        if uuid::Uuid::parse_str(item_id).is_err() {
+            return Ok(());
+        }
+        let base = Self::clean_url(base_url);
+        let url = format!("{base}/Users/{user_id}/PlayedItems/{item_id}");
+        let req = if is_played {
             self.client.post(&url)
         } else {
             self.client.delete(&url)

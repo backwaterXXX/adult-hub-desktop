@@ -11,7 +11,7 @@ mod updater;
 
 use adult_hub_client::{
     discover_servers, GetItemsQuery, JellyfinClient, ResolverClient, ServiceUrlPolicy,
-    ServiceUrlValidation, TvItem,
+    ServiceUrlValidation, TvItem, TvPersonRole,
 };
 use adult_hub_player::{BufferProfile, PlaybackStats, Player, parse_header};
 use adult_hub_storage::{CredentialStore, LocalStore, Session, default_db_path};
@@ -232,6 +232,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         local_store.clone(),
     );
 
+    install_stage6_handlers(
+        &ui,
+        player.clone(),
+        options.headers.clone(),
+        local_store.clone(),
+        credential_store.clone(),
+        jellyfin.clone(),
+        reporter.clone(),
+        session_ctrl.clone(),
+        current_playing_item.clone(),
+        cached_catalog.clone(),
+        phash_coord.clone(),
+    );
+
     // Initial session restore & catalog population
     if let Ok(Some(session)) = local_store.load_session() {
         let _ = credential_store.save(session.clone());
@@ -380,11 +394,41 @@ fn start_item_playback(
     headers: &[String],
     credential_store: &Arc<CredentialStore>,
     local_store: &Arc<LocalStore>,
+    jellyfin: &Arc<JellyfinClient>,
+    reporter: &Arc<PlaybackReporter>,
+    session_ctrl: &Arc<PlaybackSessionController>,
+    current_item: &Arc<Mutex<Option<TvItem>>>,
+    phash_coord: &Arc<phash::PhashCoordinator>,
+) {
+    start_item_playback_with_resume(
+        ui,
+        player,
+        item,
+        headers,
+        credential_store,
+        local_store,
+        jellyfin,
+        reporter,
+        session_ctrl,
+        current_item,
+        phash_coord,
+        None,
+    );
+}
+
+fn start_item_playback_with_resume(
+    ui: &MainWindow,
+    player: &Player,
+    item: TvItem,
+    headers: &[String],
+    credential_store: &Arc<CredentialStore>,
+    local_store: &Arc<LocalStore>,
     _jellyfin: &Arc<JellyfinClient>,
     reporter: &Arc<PlaybackReporter>,
     session_ctrl: &Arc<PlaybackSessionController>,
     current_item: &Arc<Mutex<Option<TvItem>>>,
     phash_coord: &Arc<phash::PhashCoordinator>,
+    resume_choice: Option<bool>,
 ) {
     let _req_id = session_ctrl.next_request_id();
 
@@ -432,23 +476,44 @@ fn start_item_playback(
     let mut start_pos_secs = 0.0;
     ui.set_resume_prompt_visible(false);
 
-    if item.is_telegram() {
+    let calculated_resume_ms = if item.is_telegram() {
         let prov_id = item
             .provider_video_id
             .as_deref()
             .or_else(|| item.id.strip_prefix("telegram:"))
             .unwrap_or(&item.id);
-        if let Some(resume_ms) = session_ctrl.get_telegram_resume_position(prov_id) {
-            if PlaybackSessionController::should_prompt_resume(resume_ms, duration_ms) {
-                ui.set_resume_prompt_position((resume_ms as f32) / 1000.0);
-                ui.set_resume_prompt_time(format_time(resume_ms as f64 / 1000.0).into());
-                ui.set_resume_prompt_visible(true);
+        session_ctrl.get_telegram_resume_position(prov_id)
+    } else if item.playback_position_ticks > 0 {
+        Some((item.playback_position_ticks / 10_000) as u64)
+    } else {
+        local_store.get_progress("local", &item.id).ok().flatten().and_then(|(pos, _)| {
+            if pos > 0 { Some(pos) } else { None }
+        })
+    };
+
+    match resume_choice {
+        Some(true) => {
+            if let Some(resume_ms) = calculated_resume_ms {
+                start_pos_secs = resume_ms as f64 / 1000.0;
             }
         }
-    } else {
-        let resume_ms = (item.playback_position_ticks / 10_000).max(0) as u64;
-        if PlaybackSessionController::should_prompt_resume(resume_ms, duration_ms) {
-            start_pos_secs = resume_ms as f64 / 1000.0;
+        Some(false) => {
+            start_pos_secs = 0.0;
+        }
+        None => {
+            if item.is_telegram() {
+                if let Some(resume_ms) = calculated_resume_ms {
+                    if PlaybackSessionController::should_prompt_resume(resume_ms, duration_ms) {
+                        ui.set_resume_prompt_position((resume_ms as f32) / 1000.0);
+                        ui.set_resume_prompt_time(format_time(resume_ms as f64 / 1000.0).into());
+                        ui.set_resume_prompt_visible(true);
+                    }
+                }
+            } else if let Some(resume_ms) = calculated_resume_ms {
+                if PlaybackSessionController::should_prompt_resume(resume_ms, duration_ms) {
+                    start_pos_secs = resume_ms as f64 / 1000.0;
+                }
+            }
         }
     }
 
@@ -999,6 +1064,16 @@ fn install_fullscreen(ui: &MainWindow) {
     }
 }
 
+fn make_sample_person(name: &str) -> TvPersonRole {
+    TvPersonRole {
+        id: name.to_lowercase().replace(' ', "_"),
+        name: name.to_string(),
+        role: Some("Actor".to_string()),
+        person_type: Some("Actor".to_string()),
+        primary_image_tag: None,
+    }
+}
+
 fn sample_catalog_tv_items() -> Vec<TvItem> {
     vec![
         TvItem {
@@ -1033,8 +1108,8 @@ fn sample_catalog_tv_items() -> Vec<TvItem> {
             runtime_ticks: Some(8_620_000_000), // 14m 22s = 862s
             genres: vec!["Channel".into()],
             tags: vec![],
-            studios: vec!["Channel Studios".into()],
-            people: vec![],
+            studios: vec!["Neon Pulse".into()],
+            people: vec![make_sample_person("Eva Green"), make_sample_person("Mia Ray")],
             primary_image_tag: None,
             backdrop_image_tag: None,
             thumb_image_tag: None,
@@ -1057,8 +1132,8 @@ fn sample_catalog_tv_items() -> Vec<TvItem> {
             runtime_ticks: Some(15_400_000_000), // 25m 40s
             genres: vec!["Exclusive".into()],
             tags: vec![],
-            studios: vec!["Channel Studios".into()],
-            people: vec![],
+            studios: vec!["4K Studios".into()],
+            people: vec![make_sample_person("Lexi Luna")],
             primary_image_tag: None,
             backdrop_image_tag: None,
             thumb_image_tag: None,
@@ -1093,6 +1168,8 @@ fn sample_channel_items() -> Vec<VideoCardData> {
             year: "2026".into(),
             is_played: false,
             provider: "telegram".into(),
+            is_favorite: false,
+            studio: "4K Studios".into(),
         },
         VideoCardData {
             id: "telegram:channel_vr:2".into(),
@@ -1101,6 +1178,8 @@ fn sample_channel_items() -> Vec<VideoCardData> {
             year: "2026".into(),
             is_played: false,
             provider: "telegram".into(),
+            is_favorite: false,
+            studio: "VR Scenes".into(),
         },
     ]
 }
@@ -1132,6 +1211,8 @@ fn tv_item_to_card(item: &TvItem) -> VideoCardData {
         year: year_str.into(),
         is_played: item.is_played,
         provider: provider.into(),
+        is_favorite: item.is_favorite,
+        studio: item.studios.first().cloned().unwrap_or_default().into(),
     }
 }
 
@@ -1596,6 +1677,7 @@ fn install_stage2_handlers(
                             sort_by: "SortName",
                             sort_descending: false,
                             search_term: Some(&query),
+                            ..Default::default()
                         };
                         jellyfin
                             .get_items(
@@ -1749,6 +1831,43 @@ fn install_stage2_handlers(
                     "Channels" => sample_catalog_tv_items()
                         .into_iter()
                         .filter(|i| i.is_telegram())
+                        .collect(),
+                    "Favorites" => {
+                        if let Some(session) = &session {
+                            let q = GetItemsQuery {
+                                is_favorite: Some(true),
+                                sort_by: "SortName",
+                                limit: 50,
+                                ..Default::default()
+                            };
+                            jellyfin
+                                .get_items(
+                                    &session.server_url,
+                                    &session.user_id,
+                                    &session.access_token,
+                                    &q,
+                                )
+                                .map(|page| page.items)
+                                .unwrap_or_else(|_| {
+                                    sample_catalog_tv_items()
+                                        .into_iter()
+                                        .filter(|i| i.is_favorite)
+                                        .collect()
+                                })
+                        } else {
+                            sample_catalog_tv_items()
+                                .into_iter()
+                                .filter(|i| i.is_favorite)
+                                .collect()
+                        }
+                    }
+                    "Performers" => sample_catalog_tv_items()
+                        .into_iter()
+                        .filter(|i| !i.people.is_empty())
+                        .collect(),
+                    "Studios" => sample_catalog_tv_items()
+                        .into_iter()
+                        .filter(|i| !i.studios.is_empty())
                         .collect(),
                     _ => sample_catalog_tv_items(),
                 };
@@ -2571,6 +2690,423 @@ fn install_stage5_handlers(
     }
 }
 
+fn install_stage6_handlers(
+    ui: &MainWindow,
+    player: Option<Rc<Player>>,
+    headers: Vec<String>,
+    local_store: Arc<LocalStore>,
+    credential_store: Arc<CredentialStore>,
+    jellyfin: Arc<JellyfinClient>,
+    reporter: Arc<PlaybackReporter>,
+    session_ctrl: Arc<PlaybackSessionController>,
+    current_item: Arc<Mutex<Option<TvItem>>>,
+    cached_catalog: Arc<Mutex<Vec<TvItem>>>,
+    phash_coord: Arc<phash::PhashCoordinator>,
+) {
+    // 1. Open Item Detail Modal
+    {
+        let weak = ui.as_weak();
+        let cached_catalog = cached_catalog.clone();
+        let local_store = local_store.clone();
+        let session_ctrl = session_ctrl.clone();
+        ui.on_open_item_detail(move |id| {
+            let Some(ui) = weak.upgrade() else { return };
+            let id = id.to_string();
+            let target_item = cached_catalog
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|i| i.id == id)
+                .cloned()
+                .unwrap_or_else(|| {
+                    if id == "sample" {
+                        sample_catalog_tv_items()[0].clone()
+                    } else {
+                        TvItem {
+                            id: id.clone(),
+                            title: id.clone(),
+                            overview: None,
+                            year: None,
+                            runtime_ticks: None,
+                            genres: vec![],
+                            tags: vec![],
+                            studios: vec![],
+                            people: vec![],
+                            primary_image_tag: None,
+                            backdrop_image_tag: None,
+                            thumb_image_tag: None,
+                            is_favorite: false,
+                            playback_position_ticks: 0,
+                            played_percentage: None,
+                            is_played: false,
+                            provider_video_id: None,
+                            media_source_id: None,
+                            container: None,
+                            file_size_bytes: None,
+                            width: None,
+                            height: None,
+                        }
+                    }
+                });
+
+            let year_str = target_item.year.map(|y| y.to_string()).unwrap_or_default();
+            let duration_str = target_item.formatted_duration();
+            let resolution_str = match (target_item.width, target_item.height) {
+                (Some(w), Some(h)) => format!("{w}x{h}"),
+                _ => String::new(),
+            };
+            let studio_str = target_item.studios.first().cloned().unwrap_or_default();
+            let genres_str = target_item.genres.join(", ");
+            let overview_str = target_item.overview.clone().unwrap_or_default();
+
+            // Calculate resume information
+            let duration_ms = target_item.runtime_ticks.map(|t| (t / 10_000) as u64).unwrap_or(0);
+            let resume_ms = if target_item.is_telegram() {
+                let prov_id = target_item
+                    .provider_video_id
+                    .as_deref()
+                    .or_else(|| target_item.id.strip_prefix("telegram:"))
+                    .unwrap_or(&target_item.id);
+                session_ctrl.get_telegram_resume_position(prov_id)
+            } else if target_item.playback_position_ticks > 0 {
+                Some((target_item.playback_position_ticks / 10_000) as u64)
+            } else {
+                local_store.get_progress("local", &target_item.id).ok().flatten().and_then(|(pos, _)| {
+                    if pos > 0 { Some(pos) } else { None }
+                })
+            };
+
+            let can_resume = resume_ms.map_or(false, |ms| {
+                PlaybackSessionController::should_prompt_resume(ms, duration_ms)
+            });
+            let resume_text = if can_resume {
+                format_time(resume_ms.unwrap_or(0) as f64 / 1000.0)
+            } else {
+                String::new()
+            };
+
+            let performers = target_item
+                .people
+                .iter()
+                .map(|p| p.name.clone().into())
+                .collect::<Vec<slint::SharedString>>();
+
+            ui.set_detail_id(target_item.id.into());
+            ui.set_detail_title(target_item.title.into());
+            ui.set_detail_overview(overview_str.into());
+            ui.set_detail_year(year_str.into());
+            ui.set_detail_duration(duration_str.into());
+            ui.set_detail_studio(studio_str.into());
+            ui.set_detail_genres(genres_str.into());
+            ui.set_detail_resolution(resolution_str.into());
+            ui.set_detail_is_favorite(target_item.is_favorite);
+            ui.set_detail_is_played(target_item.is_played);
+            ui.set_detail_can_resume(can_resume);
+            ui.set_detail_resume_text(resume_text.into());
+            let perf_model = std::rc::Rc::new(slint::VecModel::from(performers));
+            ui.set_detail_performers(perf_model.into());
+            ui.set_detail_visible(true);
+        });
+    }
+
+    // 2. Close Item Detail Modal
+    {
+        let weak = ui.as_weak();
+        ui.on_close_item_detail(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_detail_visible(false);
+            }
+        });
+    }
+
+    // 3. Toggle Detail Favorite
+    {
+        let weak = ui.as_weak();
+        let cached_catalog = cached_catalog.clone();
+        let credential_store = credential_store.clone();
+        let jellyfin = jellyfin.clone();
+        ui.on_toggle_detail_favorite(move |id| {
+            let Some(ui) = weak.upgrade() else { return };
+            let id = id.to_string();
+            let new_fav = !ui.get_detail_is_favorite();
+            ui.set_detail_is_favorite(new_fav);
+
+            let mut list = cached_catalog.lock().unwrap();
+            if let Some(item) = list.iter_mut().find(|i| i.id == id) {
+                item.is_favorite = new_fav;
+            }
+            let cards = list.iter().map(tv_item_to_card).collect::<Vec<_>>();
+            drop(list);
+            set_catalog(&ui, cards);
+
+            let session = credential_store.get().ok().flatten();
+            if let Some(sess) = session {
+                let jf = jellyfin.clone();
+                let item_id = id.clone();
+                std::thread::spawn(move || {
+                    let _ = jf.toggle_favorite(
+                        &sess.server_url,
+                        &sess.user_id,
+                        &sess.access_token,
+                        &item_id,
+                        new_fav,
+                    );
+                });
+            }
+        });
+    }
+
+    // 4. Toggle Detail Played
+    {
+        let weak = ui.as_weak();
+        let cached_catalog = cached_catalog.clone();
+        let credential_store = credential_store.clone();
+        let jellyfin = jellyfin.clone();
+        let local_store = local_store.clone();
+        ui.on_toggle_detail_played(move |id| {
+            let Some(ui) = weak.upgrade() else { return };
+            let id = id.to_string();
+            let new_played = !ui.get_detail_is_played();
+            ui.set_detail_is_played(new_played);
+
+            let mut list = cached_catalog.lock().unwrap();
+            if let Some(item) = list.iter_mut().find(|i| i.id == id) {
+                item.is_played = new_played;
+            }
+            let cards = list.iter().map(tv_item_to_card).collect::<Vec<_>>();
+            drop(list);
+            set_catalog(&ui, cards);
+
+            let _ = local_store.save_progress("local", &id, 0, 0);
+            if id.starts_with("telegram:") {
+                let prov_id = id.strip_prefix("telegram:").unwrap_or(&id);
+                let _ = local_store.mark_telegram_played(prov_id, new_played, None, None, None);
+            }
+
+            let session = credential_store.get().ok().flatten();
+            if let Some(sess) = session {
+                let jf = jellyfin.clone();
+                let item_id = id.clone();
+                std::thread::spawn(move || {
+                    let _ = jf.toggle_played(
+                        &sess.server_url,
+                        &sess.user_id,
+                        &sess.access_token,
+                        &item_id,
+                        new_played,
+                    );
+                });
+            }
+        });
+    }
+
+    // 5. Play Detail Item (Play from start or resume)
+    {
+        let weak = ui.as_weak();
+        let player = player.clone();
+        let headers = headers.clone();
+        let credential_store = credential_store.clone();
+        let local_store = local_store.clone();
+        let jellyfin = jellyfin.clone();
+        let reporter = reporter.clone();
+        let session_ctrl = session_ctrl.clone();
+        let current_item = current_item.clone();
+        let cached_catalog = cached_catalog.clone();
+        let phash_coord = phash_coord.clone();
+
+        ui.on_play_detail_item(move |id, resume| {
+            let Some(ui) = weak.upgrade() else { return };
+            ui.set_detail_visible(false);
+            let Some(player) = &player else {
+                show_error(&ui, "libmpv is not available");
+                return;
+            };
+            let id = id.to_string();
+
+            let target_item = cached_catalog
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|i| i.id == id)
+                .cloned()
+                .unwrap_or_else(|| {
+                    if id == "sample" {
+                        sample_catalog_tv_items()[0].clone()
+                    } else {
+                        TvItem {
+                            id: id.clone(),
+                            title: Path::new(&id)
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| id.clone()),
+                            overview: None,
+                            year: None,
+                            runtime_ticks: None,
+                            genres: vec![],
+                            tags: vec![],
+                            studios: vec![],
+                            people: vec![],
+                            primary_image_tag: None,
+                            backdrop_image_tag: None,
+                            thumb_image_tag: None,
+                            is_favorite: false,
+                            playback_position_ticks: 0,
+                            played_percentage: None,
+                            is_played: false,
+                            provider_video_id: None,
+                            media_source_id: None,
+                            container: None,
+                            file_size_bytes: None,
+                            width: None,
+                            height: None,
+                        }
+                    }
+                });
+
+            start_item_playback_with_resume(
+                &ui,
+                player,
+                target_item,
+                &headers,
+                &credential_store,
+                &local_store,
+                &jellyfin,
+                &reporter,
+                &session_ctrl,
+                &current_item,
+                &phash_coord,
+                Some(resume),
+            );
+        });
+    }
+
+    // 6. Select Performer (Drilldown discovery)
+    {
+        let weak = ui.as_weak();
+        let cached_catalog = cached_catalog.clone();
+        let credential_store = credential_store.clone();
+        let jellyfin = jellyfin.clone();
+        let local_store = local_store.clone();
+        ui.on_select_performer(move |performer| {
+            let Some(ui) = weak.upgrade() else { return };
+            ui.set_detail_visible(false);
+            ui.set_search_query(performer.clone());
+            ui.set_active_screen("browse".into());
+            let perf = performer.to_string();
+            let weak = weak.clone();
+            let cached_catalog = cached_catalog.clone();
+            let credential_store = credential_store.clone();
+            let jellyfin = jellyfin.clone();
+            let local_store = local_store.clone();
+
+            std::thread::spawn(move || {
+                let session = credential_store.get().ok().flatten();
+                let raw_items = if let Some(session) = session {
+                    let q = GetItemsQuery {
+                        person: Some(&perf),
+                        sort_by: "SortName",
+                        limit: 50,
+                        ..Default::default()
+                    };
+                    jellyfin
+                        .get_items(
+                            &session.server_url,
+                            &session.user_id,
+                            &session.access_token,
+                            &q,
+                        )
+                        .map(|page| page.items)
+                        .unwrap_or_else(|_| {
+                            sample_catalog_tv_items()
+                                .into_iter()
+                                .filter(|i| i.people.iter().any(|p| p.name.eq_ignore_ascii_case(&perf)))
+                                .collect()
+                        })
+                } else {
+                    sample_catalog_tv_items()
+                        .into_iter()
+                        .filter(|i| i.people.iter().any(|p| p.name.eq_ignore_ascii_case(&perf)))
+                        .collect()
+                };
+
+                let raw_items = filter_catalog_items(raw_items, &local_store);
+                let cards = raw_items.iter().map(tv_item_to_card).collect::<Vec<_>>();
+                *cached_catalog.lock().unwrap() = raw_items;
+
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        set_catalog(&ui, cards);
+                    }
+                })
+                .ok();
+            });
+        });
+    }
+
+    // 7. Select Studio (Drilldown discovery)
+    {
+        let weak = ui.as_weak();
+        let cached_catalog = cached_catalog.clone();
+        let credential_store = credential_store.clone();
+        let jellyfin = jellyfin.clone();
+        let local_store = local_store.clone();
+        ui.on_select_studio(move |studio| {
+            let Some(ui) = weak.upgrade() else { return };
+            ui.set_detail_visible(false);
+            ui.set_search_query(studio.clone());
+            ui.set_active_screen("browse".into());
+            let stud = studio.to_string();
+            let weak = weak.clone();
+            let cached_catalog = cached_catalog.clone();
+            let credential_store = credential_store.clone();
+            let jellyfin = jellyfin.clone();
+            let local_store = local_store.clone();
+
+            std::thread::spawn(move || {
+                let session = credential_store.get().ok().flatten();
+                let raw_items = if let Some(session) = session {
+                    let q = GetItemsQuery {
+                        studio: Some(&stud),
+                        sort_by: "SortName",
+                        limit: 50,
+                        ..Default::default()
+                    };
+                    jellyfin
+                        .get_items(
+                            &session.server_url,
+                            &session.user_id,
+                            &session.access_token,
+                            &q,
+                        )
+                        .map(|page| page.items)
+                        .unwrap_or_else(|_| {
+                            sample_catalog_tv_items()
+                                .into_iter()
+                                .filter(|i| i.studios.iter().any(|s| s.eq_ignore_ascii_case(&stud)))
+                                .collect()
+                        })
+                } else {
+                    sample_catalog_tv_items()
+                        .into_iter()
+                        .filter(|i| i.studios.iter().any(|s| s.eq_ignore_ascii_case(&stud)))
+                        .collect()
+                };
+
+                let raw_items = filter_catalog_items(raw_items, &local_store);
+                let cards = raw_items.iter().map(tv_item_to_card).collect::<Vec<_>>();
+                *cached_catalog.lock().unwrap() = raw_items;
+
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        set_catalog(&ui, cards);
+                    }
+                })
+                .ok();
+            });
+        });
+    }
+}
+
 fn install_renderer(
     ui: &MainWindow,
     player: Rc<Player>,
@@ -3095,12 +3631,12 @@ mod tests {
             runtime_ticks: Some(120_000_000_000), // 12000s = 200m = 3h 20m
             genres: vec![],
             tags: vec![],
-            studios: vec![],
-            people: vec![],
+            studios: vec!["Lust Cinema".into()],
+            people: vec![make_sample_person("Eva Green")],
             primary_image_tag: None,
             backdrop_image_tag: None,
             thumb_image_tag: None,
-            is_favorite: false,
+            is_favorite: true,
             playback_position_ticks: 0,
             played_percentage: None,
             is_played: false,
@@ -3119,6 +3655,8 @@ mod tests {
         assert_eq!(card.duration, "3h 20m");
         assert_eq!(card.provider, "jellyfin");
         assert!(!card.is_played);
+        assert!(card.is_favorite);
+        assert_eq!(card.studio, "Lust Cinema");
     }
 
     #[test]
