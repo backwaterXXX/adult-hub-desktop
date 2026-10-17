@@ -1,4 +1,7 @@
-use crate::models::{CategoryDto, PerformerBioDto, TelegramHistoryResponseDto, VideoDto};
+use crate::models::{
+    CategoryDto, PerformerBioDto, PhashGenerationRequest, PhashGenerationResponse,
+    PhashJobStatusResponse, TelegramHistoryResponseDto, VideoDto,
+};
 use reqwest::blocking::Client;
 use std::time::Duration;
 use thiserror::Error;
@@ -9,8 +12,35 @@ pub enum ResolverError {
     Http(#[from] reqwest::Error),
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
+    #[error("authorization rejected (HTTP {0})")]
+    Auth(u16),
+    #[error("not found (HTTP 404)")]
+    NotFound,
+    #[error("conflict / terminal job failure (HTTP 409)")]
+    Conflict,
+    #[error("status error (HTTP {0}): {1}")]
+    Status(u16, String),
     #[error("api error: {0}")]
     Api(String),
+}
+
+impl ResolverError {
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            ResolverError::Http(e) => {
+                if e.is_timeout() || e.is_connect() {
+                    return true;
+                }
+                if let Some(status) = e.status() {
+                    status.as_u16() == 429 || status.is_server_error()
+                } else {
+                    true
+                }
+            }
+            ResolverError::Status(code, _) => *code == 429 || *code >= 500,
+            _ => false,
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, ResolverError>;
@@ -29,6 +59,7 @@ impl ResolverClient {
 
         Self { client }
     }
+
 
     pub fn get_categories(&self, base_url: &str) -> Result<Vec<CategoryDto>> {
         let url = format!("{}/admin/api/categories", base_url.trim_end_matches('/'));
@@ -94,6 +125,88 @@ impl ResolverClient {
         Ok(res)
     }
 
+    pub fn generate_phash(
+        &self,
+        base_url: &str,
+        token: &str,
+        video_id: &str,
+        duration_us: u64,
+    ) -> Result<PhashGenerationResponse> {
+        let url = format!(
+            "{}/admin/api/v2/video-phash/generate",
+            base_url.trim_end_matches('/')
+        );
+        let req_body = PhashGenerationRequest {
+            video_id: video_id.to_string(),
+            duration_us,
+        };
+        let response = self
+            .client
+            .post(&url)
+            .header("X-Emby-Token", token)
+            .header("Content-Type", "application/json")
+            .json(&req_body)
+            .send()?;
+
+        let status = response.status();
+        let code = status.as_u16();
+
+        if code == 401 || code == 403 {
+            return Err(ResolverError::Auth(code));
+        }
+        if code == 404 {
+            return Err(ResolverError::NotFound);
+        }
+        if code == 409 {
+            return Err(ResolverError::Conflict);
+        }
+        if !status.is_success() {
+            let body_text = response.text().unwrap_or_default();
+            return Err(ResolverError::Status(code, body_text));
+        }
+
+        let gen_resp: PhashGenerationResponse = response.json()?;
+        Ok(gen_resp)
+    }
+
+    pub fn get_phash_job(
+        &self,
+        base_url: &str,
+        token: &str,
+        job_id: &str,
+    ) -> Result<PhashJobStatusResponse> {
+        let url = format!(
+            "{}/admin/api/v2/video-phash/jobs/{}",
+            base_url.trim_end_matches('/'),
+            urlencoding(job_id.trim())
+        );
+        let response = self
+            .client
+            .get(&url)
+            .header("X-Emby-Token", token)
+            .send()?;
+
+        let status = response.status();
+        let code = status.as_u16();
+
+        if code == 401 || code == 403 {
+            return Err(ResolverError::Auth(code));
+        }
+        if code == 404 {
+            return Err(ResolverError::NotFound);
+        }
+        if code == 409 {
+            return Err(ResolverError::Conflict);
+        }
+        if !status.is_success() {
+            let body_text = response.text().unwrap_or_default();
+            return Err(ResolverError::Status(code, body_text));
+        }
+
+        let job_resp: PhashJobStatusResponse = response.json()?;
+        Ok(job_resp)
+    }
+
     pub fn stream_url(base_url: &str, provider_or_id: &str) -> String {
         let ref_id = if provider_or_id.starts_with("telegram:") {
             provider_or_id.to_string()
@@ -112,6 +225,7 @@ impl Default for ResolverClient {
         Self::new()
     }
 }
+
 
 fn urlencoding(input: &str) -> String {
     let mut encoded = String::new();
@@ -167,4 +281,64 @@ mod tests {
         assert_eq!(hist.next_offset_id, Some(1002));
         assert!(hist.has_more);
     }
+
+    #[test]
+    fn parses_phash_generation_response() {
+        let json_queued = r#"{
+            "ok": true,
+            "job_id": "job_12345",
+            "state": "queued",
+            "already_computed": false,
+            "thumbnail_ready": false
+        }"#;
+        let resp: PhashGenerationResponse = serde_json::from_str(json_queued).unwrap();
+        assert!(resp.ok);
+        assert_eq!(resp.job_id.as_deref(), Some("job_12345"));
+        assert_eq!(resp.state.as_deref(), Some("queued"));
+        assert!(!resp.already_computed);
+
+        let json_done = r#"{
+            "ok": true,
+            "job_id": null,
+            "state": "done",
+            "already_computed": true
+        }"#;
+        let resp_done: PhashGenerationResponse = serde_json::from_str(json_done).unwrap();
+        assert!(resp_done.ok);
+        assert!(resp_done.already_computed);
+    }
+
+    #[test]
+    fn parses_phash_job_status_response() {
+        let json_status = r#"{
+            "ok": true,
+            "job": {
+                "id": "job_12345",
+                "video_id": "telegram:-100123:456:789",
+                "state": "processing",
+                "decoder_profile": "resolver-ffmpeg-stash-v2",
+                "thumbnail_ready": false
+            }
+        }"#;
+        let resp: PhashJobStatusResponse = serde_json::from_str(json_status).unwrap();
+        assert!(resp.ok);
+        let job = resp.job.expect("job exists");
+        assert_eq!(job.id, "job_12345");
+        assert_eq!(job.video_id, "telegram:-100123:456:789");
+        assert_eq!(job.state, "processing");
+        assert_eq!(job.decoder_profile.as_deref(), Some("resolver-ffmpeg-stash-v2"));
+    }
+
+    #[test]
+    fn resolver_error_retryability() {
+        assert!(ResolverError::Status(429, "Too Many Requests".into()).is_retryable());
+        assert!(ResolverError::Status(500, "Internal Server Error".into()).is_retryable());
+        assert!(ResolverError::Status(503, "Service Unavailable".into()).is_retryable());
+        assert!(!ResolverError::Status(400, "Bad Request".into()).is_retryable());
+        assert!(!ResolverError::Auth(401).is_retryable());
+        assert!(!ResolverError::Auth(403).is_retryable());
+        assert!(!ResolverError::NotFound.is_retryable());
+        assert!(!ResolverError::Conflict.is_retryable());
+    }
 }
+

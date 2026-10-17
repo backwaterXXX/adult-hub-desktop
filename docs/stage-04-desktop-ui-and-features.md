@@ -1,6 +1,6 @@
 # Stage 4 — Desktop UI and Supporting Features
 
-Status: not started. Depends on Stages 1–3 acceptance.
+Status: completed. Verified in docs/stage-04-evidence.md. Depends on Stages 1–3 acceptance.
 
 ## Objective
 
@@ -56,12 +56,12 @@ Use temporary local stores and API test doubles to cover import/export round tri
 
 ## Acceptance checklist
 
-- [ ] Every parity checklist entry outside packaging/update delivery has a completed desktop implementation.
-- [ ] Desktop layouts and keyboard interactions work at supported sizes/scales.
-- [ ] Panic exit immediately hides content and stops audio/video.
-- [ ] Settings, clearing controls and configuration compatibility pass.
-- [ ] Diagnostics contain useful information without secrets.
-- [ ] pHash jobs persist, recover and handle authentication/transient/terminal errors correctly.
-- [ ] All UI strings and documentation are English.
+- [x] Every parity checklist entry outside packaging/update delivery has a completed desktop implementation.
+- [x] Desktop layouts and keyboard interactions work at supported sizes/scales.
+- [x] Panic exit immediately hides content and stops audio/video.
+- [x] Settings, clearing controls and configuration compatibility pass.
+- [x] Diagnostics contain useful information without secrets.
+- [x] pHash jobs persist, recover and handle authentication/transient/terminal errors correctly.
+- [x] All UI strings and documentation are English.
 
 Next: [Stage 5](stage-05-packaging-and-release.md).

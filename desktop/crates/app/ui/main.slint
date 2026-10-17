@@ -427,11 +427,41 @@ export component MainWindow inherits Window {
     callback clear-search-history();
     callback clear-progress-history();
 
+    // Stage 4 Settings & Feature State
+    in-out property <string> resolver-url-input: "";
+    in-out property <string> seek-step-label: "Seek: 15s";
+    in-out property <int> seek-step-sec: 15;
+    in-out property <string> cache-limit-label: "Cache Limit: 256 MB";
+    in-out property <bool> phash-active: false;
+    in-out property <bool> low-ram-active: false;
+    in-out property <string> phash-status-text: "";
+    in-out property <[string]> excluded-tags-list: [];
+    in-out property <[string]> hidden-channels-list: [];
+    in-out property <string> new-tag-input: "";
+    in-out property <[string]> available-libraries: [];
+
+    // Stage 4 Callbacks
+    callback save-resolver-url(string);
+    callback test-resolver-connection();
+    callback cycle-seek-step();
+    callback cycle-cache-limit();
+    callback toggle-low-ram();
+    callback toggle-phash();
+    callback add-excluded-tag(string);
+    callback remove-excluded-tag(string);
+    callback unhide-all-channels();
+    callback clear-image-cache();
+    callback export-config();
+    callback import-config();
+    callback export-diagnostics();
+    callback switch-library();
+
     // Local Server Discovery
     in-out property <[DiscoveredServerItem]> discovered-servers: [];
     in-out property <bool> is-scanning-servers: false;
     callback scan-servers();
     callback select-discovered-server(string);
+
 
     VerticalLayout {
         spacing: 0px;
@@ -756,8 +786,30 @@ export component MainWindow inherits Window {
                                     }
                                 }
                             }
+
+                            // Video Matching (pHash) Badge
+                            if root.phash-status-text != "" : Rectangle {
+                                height: 24px;
+                                border-radius: 12px;
+                                background: #1e1e1ecc;
+                                border-width: 1px;
+                                border-color: #29b6f6;
+
+                                HorizontalLayout {
+                                    padding-left: 10px;
+                                    padding-right: 10px;
+                                    Text {
+                                        text: "🔍 " + root.phash-status-text;
+                                        color: #29b6f6;
+                                        font-size: 10px;
+                                        font-weight: 700;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
                         }
                     }
+
 
                     // Floating Stats HUD
                     if root.hud-visible : Rectangle {
@@ -876,17 +928,18 @@ export component MainWindow inherits Window {
                             }
 
                             TvSecondaryButton {
-                                text: "-10s";
+                                text: "-" + root.seek-step-sec + "s";
                                 custom-height: 30px;
-                                clicked => { root.seek-relative(-10); }
+                                clicked => { root.seek-relative(-root.seek-step-sec); }
                             }
 
                             TvSecondaryButton {
-                                text: "+10s";
+                                text: "+" + root.seek-step-sec + "s";
                                 custom-height: 30px;
-                                clicked => { root.seek-relative(10); }
+                                clicked => { root.seek-relative(root.seek-step-sec); }
                             }
                         }
+
 
                         // Row 2: Play/Pause, Speed, Buffer, HW Decode, Autoplay, Random, Aspect & Volume
                         HorizontalLayout {
@@ -1264,6 +1317,25 @@ export component MainWindow inherits Window {
                                         clicked => { root.perform-logout(); }
                                     }
                                 }
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    alignment: center;
+
+                                    Text {
+                                        text: "Active Library: " + root.current-library;
+                                        color: #e0e0e0;
+                                        font-size: 13px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                    }
+
+                                    TvSecondaryButton {
+                                        text: "Switch Library";
+                                        custom-height: 32px;
+                                        clicked => { root.switch-library(); }
+                                    }
+                                }
                             }
                         }
                     }
@@ -1296,11 +1368,21 @@ export component MainWindow inherits Window {
                                 }
 
                                 TvSecondaryButton {
+                                    text: root.seek-step-label;
+                                    horizontal-stretch: 1;
+                                    clicked => { root.cycle-seek-step(); }
+                                }
+
+                                TvSecondaryButton {
                                     text: root.hwdec-active ? "Hardware Decode: ON" : "Hardware Decode: OFF";
                                     active: root.hwdec-active;
                                     horizontal-stretch: 1;
                                     clicked => { root.toggle-hwdec(); }
                                 }
+                            }
+
+                            HorizontalLayout {
+                                spacing: 14px;
 
                                 TvSecondaryButton {
                                     text: root.autoplay-active ? "Autoplay: ON" : "Autoplay: OFF";
@@ -1308,11 +1390,265 @@ export component MainWindow inherits Window {
                                     horizontal-stretch: 1;
                                     clicked => { root.toggle-autoplay(); }
                                 }
+
+                                TvSecondaryButton {
+                                    text: root.low-ram-active ? "Low-RAM Mode: ON" : "Low-RAM Mode: OFF";
+                                    active: root.low-ram-active;
+                                    horizontal-stretch: 1;
+                                    clicked => { root.toggle-low-ram(); }
+                                }
                             }
                         }
                     }
 
-                    // Card 3: Privacy & Data Management
+                    // Card 3: Resolver API & Video Matching
+                    Rectangle {
+                        border-radius: 12px;
+                        background: #1e1e1e;
+                        border-width: 1px;
+                        border-color: #ffffff14;
+
+                        VerticalLayout {
+                            padding: 22px;
+                            spacing: 14px;
+
+                            Text {
+                                text: "Resolver API & Video Matching (pHash)";
+                                color: #e91e63;
+                                font-size: 16px;
+                                font-weight: 700;
+                            }
+
+                            Text {
+                                text: "Resolver Base URL (for channel catalog and video fingerprint generation):";
+                                color: #9e9e9e;
+                                font-size: 13px;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 12px;
+
+                                LineEdit {
+                                    horizontal-stretch: 1;
+                                    text: root.resolver-url-input;
+                                    placeholder-text: "https://resolver.example.com";
+                                    edited(text) => { root.resolver-url-input = text; }
+                                }
+
+                                TvPrimaryButton {
+                                    text: "Save & Test";
+                                    custom-height: 38px;
+                                    clicked => {
+                                        root.save-resolver-url(root.resolver-url-input);
+                                        root.test-resolver-connection();
+                                    }
+                                }
+                            }
+
+                            HorizontalLayout {
+                                spacing: 14px;
+
+                                TvSecondaryButton {
+                                    text: root.phash-active ? "Video Matching (pHash on playback): ON" : "Video Matching (pHash on playback): OFF";
+                                    active: root.phash-active;
+                                    horizontal-stretch: 1;
+                                    clicked => { root.toggle-phash(); }
+                                }
+                            }
+                        }
+                    }
+
+                    // Card 4: Cache & Local Storage
+                    Rectangle {
+                        border-radius: 12px;
+                        background: #1e1e1e;
+                        border-width: 1px;
+                        border-color: #ffffff14;
+
+                        VerticalLayout {
+                            padding: 22px;
+                            spacing: 14px;
+
+                            Text {
+                                text: "Cache & Local Storage";
+                                color: #e91e63;
+                                font-size: 16px;
+                                font-weight: 700;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 14px;
+
+                                TvSecondaryButton {
+                                    text: root.cache-limit-label;
+                                    horizontal-stretch: 1;
+                                    clicked => { root.cycle-cache-limit(); }
+                                }
+
+                                TvSecondaryButton {
+                                    text: "Clear Image Cache";
+                                    horizontal-stretch: 1;
+                                    clicked => { root.clear-image-cache(); }
+                                }
+                            }
+                        }
+                    }
+
+                    // Card 5: Content Filters
+                    Rectangle {
+                        border-radius: 12px;
+                        background: #1e1e1e;
+                        border-width: 1px;
+                        border-color: #ffffff14;
+
+                        VerticalLayout {
+                            padding: 22px;
+                            spacing: 14px;
+
+                            Text {
+                                text: "Content Filters";
+                                color: #e91e63;
+                                font-size: 16px;
+                                font-weight: 700;
+                            }
+
+                            Text {
+                                text: "Excluded Tags (hidden from catalog and search):";
+                                color: #9e9e9e;
+                                font-size: 13px;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 10px;
+
+                                LineEdit {
+                                    horizontal-stretch: 1;
+                                    text: root.new-tag-input;
+                                    placeholder-text: "Enter tag to exclude...";
+                                    edited(text) => { root.new-tag-input = text; }
+                                }
+
+                                TvSecondaryButton {
+                                    text: "Exclude Tag";
+                                    custom-height: 38px;
+                                    clicked => {
+                                        if (root.new-tag-input != "") {
+                                            root.add-excluded-tag(root.new-tag-input);
+                                            root.new-tag-input = "";
+                                        }
+                                    }
+                                }
+                            }
+
+                            if root.excluded-tags-list.length > 0 : HorizontalLayout {
+                                spacing: 8px;
+                                for tag in root.excluded-tags-list : Rectangle {
+                                    height: 28px;
+                                    border-radius: 14px;
+                                    background: #2a2a2a;
+                                    border-width: 1px;
+                                    border-color: #e91e6388;
+
+                                    HorizontalLayout {
+                                        padding-left: 10px;
+                                        padding-right: 10px;
+                                        spacing: 6px;
+                                        alignment: center;
+
+                                        Text {
+                                            text: tag;
+                                            color: #ffffff;
+                                            font-size: 12px;
+                                            vertical-alignment: center;
+                                        }
+
+                                        tag-touch := TouchArea {
+                                            width: 14px;
+                                            height: 14px;
+                                            clicked => { root.remove-excluded-tag(tag); }
+                                            Text {
+                                                text: "✕";
+                                                color: tag-touch.has-hover ? #ff4081 : #9e9e9e;
+                                                font-size: 11px;
+                                                font-weight: 700;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            HorizontalLayout {
+                                spacing: 14px;
+                                alignment: center;
+
+                                Text {
+                                    text: "Hidden Channels: " + root.hidden-channels-list.length + " channel(s) hidden";
+                                    color: #e0e0e0;
+                                    font-size: 13px;
+                                    horizontal-stretch: 1;
+                                    vertical-alignment: center;
+                                }
+
+                                if root.hidden-channels-list.length > 0 : TvSecondaryButton {
+                                    text: "Unhide All Channels";
+                                    custom-height: 32px;
+                                    clicked => { root.unhide-all-channels(); }
+                                }
+                            }
+                        }
+                    }
+
+                    // Card 6: Configuration & Diagnostics
+                    Rectangle {
+                        border-radius: 12px;
+                        background: #1e1e1e;
+                        border-width: 1px;
+                        border-color: #ffffff14;
+
+                        VerticalLayout {
+                            padding: 22px;
+                            spacing: 14px;
+
+                            Text {
+                                text: "Configuration & Diagnostics";
+                                color: #e91e63;
+                                font-size: 16px;
+                                font-weight: 700;
+                            }
+
+                            Text {
+                                text: "Export non-secret configuration (v1 JSON) or import Android TV settings. Export redacted local diagnostics for troubleshooting.";
+                                color: #9e9e9e;
+                                font-size: 13px;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 14px;
+
+                                TvSecondaryButton {
+                                    text: "Export Config (JSON)";
+                                    horizontal-stretch: 1;
+                                    clicked => { root.export-config(); }
+                                }
+
+                                TvSecondaryButton {
+                                    text: "Import Config (JSON)";
+                                    horizontal-stretch: 1;
+                                    clicked => { root.import-config(); }
+                                }
+
+                                TvSecondaryButton {
+                                    text: "Export Diagnostics";
+                                    horizontal-stretch: 1;
+                                    clicked => { root.export-diagnostics(); }
+                                }
+                            }
+                        }
+                    }
+
+                    // Card 7: Data & Privacy
                     Rectangle {
                         border-radius: 12px;
                         background: #1e1e1e;
@@ -1348,7 +1684,7 @@ export component MainWindow inherits Window {
                         }
                     }
 
-                    // Card 4: Emergency Panic Exit
+                    // Card 8: Emergency Panic Exit
                     Rectangle {
                         border-radius: 12px;
                         background: #1e1e1e;
@@ -1413,38 +1749,38 @@ export component MainWindow inherits Window {
                 return accept;
             }
             if (event.text == Key.LeftArrow) {
-                root.seek-relative(-5);
+                root.seek-relative(-root.seek-step-sec);
                 return accept;
             }
             if (event.text == Key.RightArrow) {
-                root.seek-relative(5);
+                root.seek-relative(root.seek-step-sec);
                 return accept;
             }
-            if (event.text == "f") {
+            if (event.text == "f" || event.text == "F") {
                 root.toggle-fullscreen();
                 return accept;
             }
-            if (event.text == "i") {
+            if (event.text == "i" || event.text == "I") {
                 root.toggle-hud();
                 return accept;
             }
-            if (event.text == "m") {
+            if (event.text == "m" || event.text == "M") {
                 root.toggle-mute();
                 return accept;
             }
-            if (event.text == "s") {
+            if (event.text == "s" || event.text == "S") {
                 root.cycle-speed();
                 return accept;
             }
-            if (event.text == "b") {
+            if (event.text == "b" || event.text == "B") {
                 root.cycle-buffer-profile();
                 return accept;
             }
-            if (event.text == "h") {
+            if (event.text == "h" || event.text == "H") {
                 root.toggle-hwdec();
                 return accept;
             }
-            if (event.text == "n") {
+            if (event.text == "n" || event.text == "N") {
                 root.play-random();
                 return accept;
             }
@@ -1456,3 +1792,4 @@ export component MainWindow inherits Window {
         }
     }
 }
+

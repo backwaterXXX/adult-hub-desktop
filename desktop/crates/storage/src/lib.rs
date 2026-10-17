@@ -39,6 +39,86 @@ impl TelegramProgressRecord {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StoredPhashJob {
+    pub video_id: String,
+    pub job_id: Option<String>,
+    pub state: String,
+    pub error_code: Option<String>,
+    pub duration_us: Option<u64>,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppConfigExport {
+    #[serde(default = "default_config_version")]
+    pub version: i32,
+    #[serde(default)]
+    pub selected_library_id: Option<String>,
+    #[serde(default)]
+    pub selected_library_name: Option<String>,
+    #[serde(default)]
+    pub resolver_base_url: Option<String>,
+    #[serde(default = "default_cache_limit_mb")]
+    pub cache_limit_mb: i32,
+    #[serde(default)]
+    pub phash_on_playback: bool,
+    #[serde(default = "default_buffer_profile")]
+    pub buffer_profile: String,
+    #[serde(default)]
+    pub low_ram_mode: bool,
+    #[serde(default = "default_seek_step_sec")]
+    pub seek_step_sec: i32,
+    #[serde(default)]
+    pub autoplay_next: bool,
+    #[serde(default)]
+    pub selected_home_category_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub hidden_channel_ids: Vec<String>,
+    #[serde(default)]
+    pub excluded_tags: Vec<String>,
+    #[serde(default = "default_auto_update_enabled")]
+    pub auto_update_enabled: bool,
+}
+
+fn default_config_version() -> i32 {
+    1
+}
+fn default_cache_limit_mb() -> i32 {
+    256
+}
+fn default_buffer_profile() -> String {
+    "standard".into()
+}
+fn default_seek_step_sec() -> i32 {
+    15
+}
+fn default_auto_update_enabled() -> bool {
+    true
+}
+
+impl Default for AppConfigExport {
+    fn default() -> Self {
+        Self {
+            version: default_config_version(),
+            selected_library_id: None,
+            selected_library_name: None,
+            resolver_base_url: None,
+            cache_limit_mb: default_cache_limit_mb(),
+            phash_on_playback: false,
+            buffer_profile: default_buffer_profile(),
+            low_ram_mode: false,
+            seek_step_sec: default_seek_step_sec(),
+            autoplay_next: false,
+            selected_home_category_ids: None,
+            hidden_channel_ids: Vec::new(),
+            excluded_tags: Vec::new(),
+            auto_update_enabled: default_auto_update_enabled(),
+        }
+    }
+}
+
 pub struct LocalStore {
     conn: Mutex<Connection>,
 }
@@ -144,8 +224,36 @@ impl LocalStore {
             )?;
         }
 
+        let v3_needed: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='phash_jobs'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|count| count == 0)
+            .unwrap_or(false);
+
+        if v3_needed {
+            conn.execute_batch(
+                "
+                BEGIN;
+                CREATE TABLE IF NOT EXISTS phash_jobs (
+                    video_id TEXT PRIMARY KEY,
+                    job_id TEXT,
+                    state TEXT NOT NULL,
+                    error_code TEXT,
+                    duration_us INTEGER,
+                    updated_at INTEGER NOT NULL
+                );
+                INSERT INTO schema_version (version) VALUES (3);
+                COMMIT;
+                ",
+            )?;
+        }
+
         Ok(())
     }
+
 
     // Settings helpers
     pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
@@ -471,7 +579,390 @@ impl LocalStore {
         self.set_setting("device_id", &new_id)?;
         Ok(new_id)
     }
+
+    // pHash Jobs persistence (schema v3, matches Android PhashJobStore)
+    pub fn save_phash_job(&self, job: &StoredPhashJob) -> Result<()> {
+        let now = if job.updated_at > 0 {
+            job.updated_at as i64
+        } else {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64
+        };
+
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO phash_jobs (video_id, job_id, state, error_code, duration_us, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(video_id) DO UPDATE SET
+                job_id = ?2,
+                state = ?3,
+                error_code = ?4,
+                duration_us = ?5,
+                updated_at = ?6",
+            params![
+                job.video_id,
+                job.job_id,
+                job.state,
+                job.error_code,
+                job.duration_us.map(|d| d as i64),
+                now,
+            ],
+        )?;
+
+        // Trim to MAX_JOBS (200), matching Android PhashJobStore
+        conn.execute(
+            "DELETE FROM phash_jobs WHERE video_id NOT IN (
+                SELECT video_id FROM phash_jobs ORDER BY updated_at DESC LIMIT 200
+            )",
+            [],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_phash_job(&self, video_id: &str) -> Result<Option<StoredPhashJob>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT video_id, job_id, state, error_code, duration_us, updated_at
+             FROM phash_jobs WHERE video_id = ?1",
+        )?;
+        let mut rows = stmt.query(params![video_id])?;
+        if let Some(row) = rows.next()? {
+            let video_id: String = row.get(0)?;
+            let job_id: Option<String> = row.get(1)?;
+            let state: String = row.get(2)?;
+            let error_code: Option<String> = row.get(3)?;
+            let dur: Option<i64> = row.get(4)?;
+            let updated: i64 = row.get(5)?;
+            Ok(Some(StoredPhashJob {
+                video_id,
+                job_id,
+                state,
+                error_code,
+                duration_us: dur.map(|d| d.max(0) as u64),
+                updated_at: updated.max(0) as u64,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn get_all_phash_jobs(&self) -> Result<Vec<StoredPhashJob>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT video_id, job_id, state, error_code, duration_us, updated_at
+             FROM phash_jobs ORDER BY updated_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let video_id: String = row.get(0)?;
+            let job_id: Option<String> = row.get(1)?;
+            let state: String = row.get(2)?;
+            let error_code: Option<String> = row.get(3)?;
+            let dur: Option<i64> = row.get(4)?;
+            let updated: i64 = row.get(5)?;
+            Ok(StoredPhashJob {
+                video_id,
+                job_id,
+                state,
+                error_code,
+                duration_us: dur.map(|d| d.max(0) as u64),
+                updated_at: updated.max(0) as u64,
+            })
+        })?;
+        let mut results = Vec::new();
+        for r in rows {
+            results.push(r?);
+        }
+        Ok(results)
+    }
+
+    pub fn remove_phash_job(&self, video_id: &str) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute("DELETE FROM phash_jobs WHERE video_id = ?1", params![video_id])?;
+        Ok(())
+    }
+
+    pub fn clear_all_phash_jobs(&self) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute("DELETE FROM phash_jobs", [])?;
+        Ok(())
+    }
+
+    // Config export and import (Version 1 Schema)
+    pub fn export_non_secret_config(&self) -> Result<AppConfigExport> {
+        let selected_library_id = self.get_setting("selected_library_id")?;
+        let selected_library_name = self.get_setting("selected_library_name")?;
+        let resolver_base_url = self
+            .get_setting("resolver_base_url")?
+            .or_else(|| self.get_setting("resolver_url").ok().flatten());
+        let cache_limit_mb = self
+            .get_setting("cache_limit_mb")?
+            .and_then(|s| s.parse::<i32>().ok())
+            .unwrap_or(256);
+        let phash_on_playback = self
+            .get_setting("phash_on_playback")?
+            .map(|s| s == "true" || s == "1")
+            .unwrap_or(false);
+        let buffer_profile = self
+            .get_setting("buffer_profile")?
+            .unwrap_or_else(|| "standard".into());
+        let low_ram_mode = self
+            .get_setting("low_ram_mode")?
+            .map(|s| s == "true" || s == "1")
+            .unwrap_or(false);
+        let seek_step_sec = self
+            .get_setting("seek_step_sec")?
+            .and_then(|s| s.parse::<i32>().ok())
+            .unwrap_or(15);
+        let autoplay_next = self
+            .get_setting("autoplay_next")?
+            .map(|s| s == "true" || s == "1")
+            .unwrap_or(false);
+        let selected_home_category_ids = self.get_home_categories()?;
+        let hidden_channel_ids = self.get_hidden_channels()?;
+        let excluded_tags = self.get_excluded_tags()?;
+        let auto_update_enabled = self
+            .get_setting("auto_update_enabled")?
+            .map(|s| s == "true" || s == "1")
+            .unwrap_or(true);
+
+        Ok(AppConfigExport {
+            version: 1,
+            selected_library_id,
+            selected_library_name,
+            resolver_base_url,
+            cache_limit_mb,
+            phash_on_playback,
+            buffer_profile,
+            low_ram_mode,
+            seek_step_sec,
+            autoplay_next,
+            selected_home_category_ids,
+            hidden_channel_ids,
+            excluded_tags,
+            auto_update_enabled,
+        })
+    }
+
+    pub fn export_non_secret_config_json(&self) -> Result<String> {
+        let config = self.export_non_secret_config()?;
+        Ok(serde_json::to_string_pretty(&config)?)
+    }
+
+    pub fn import_non_secret_config(&self, config: &AppConfigExport) -> Result<()> {
+        // Reject unsupported versions without partial application
+        if config.version != 1 {
+            return Err(StorageError::Custom(format!(
+                "Unsupported configuration version: {}",
+                config.version
+            )));
+        }
+        if config.cache_limit_mb < 0 {
+            return Err(StorageError::Custom("cacheLimitMb must be non-negative".into()));
+        }
+        if config.seek_step_sec <= 0 {
+            return Err(StorageError::Custom("seekStepSec must be positive".into()));
+        }
+        let profile = config.buffer_profile.as_str();
+        if profile != "fast_start" && profile != "standard" && profile != "large" {
+            return Err(StorageError::Custom(format!(
+                "Unsupported buffer profile: {}",
+                config.buffer_profile
+            )));
+        }
+
+        // Apply all-or-nothing in a single transaction
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+
+        if let (Some(lib_id), Some(lib_name)) = (&config.selected_library_id, &config.selected_library_name) {
+            tx.execute(
+                "INSERT INTO settings (key, value) VALUES ('selected_library_id', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = ?1",
+                params![lib_id],
+            )?;
+            tx.execute(
+                "INSERT INTO settings (key, value) VALUES ('selected_library_name', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = ?1",
+                params![lib_name],
+            )?;
+        }
+        if let Some(resolver_url) = &config.resolver_base_url {
+            let sanitized = resolver_url.trim_end_matches('/');
+            if sanitized.is_empty() {
+                tx.execute("DELETE FROM settings WHERE key = 'resolver_base_url'", [])?;
+                tx.execute("DELETE FROM settings WHERE key = 'resolver_url'", [])?;
+            } else {
+                tx.execute(
+                    "INSERT INTO settings (key, value) VALUES ('resolver_base_url', ?1)
+                     ON CONFLICT(key) DO UPDATE SET value = ?1",
+                    params![sanitized],
+                )?;
+                tx.execute(
+                    "INSERT INTO settings (key, value) VALUES ('resolver_url', ?1)
+                     ON CONFLICT(key) DO UPDATE SET value = ?1",
+                    params![sanitized],
+                )?;
+            }
+        }
+        tx.execute(
+            "INSERT INTO settings (key, value) VALUES ('cache_limit_mb', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = ?1",
+            params![config.cache_limit_mb.to_string()],
+        )?;
+        tx.execute(
+            "INSERT INTO settings (key, value) VALUES ('phash_on_playback', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = ?1",
+            params![if config.phash_on_playback { "true" } else { "false" }],
+        )?;
+        tx.execute(
+            "INSERT INTO settings (key, value) VALUES ('buffer_profile', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = ?1",
+            params![config.buffer_profile],
+        )?;
+        tx.execute(
+            "INSERT INTO settings (key, value) VALUES ('low_ram_mode', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = ?1",
+            params![if config.low_ram_mode { "true" } else { "false" }],
+        )?;
+        tx.execute(
+            "INSERT INTO settings (key, value) VALUES ('seek_step_sec', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = ?1",
+            params![config.seek_step_sec.to_string()],
+        )?;
+        tx.execute(
+            "INSERT INTO settings (key, value) VALUES ('autoplay_next', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = ?1",
+            params![if config.autoplay_next { "true" } else { "false" }],
+        )?;
+        tx.execute(
+            "INSERT INTO settings (key, value) VALUES ('auto_update_enabled', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = ?1",
+            params![if config.auto_update_enabled { "true" } else { "false" }],
+        )?;
+
+        if let Some(cat_ids) = &config.selected_home_category_ids {
+            let json_cats = serde_json::to_string(cat_ids)?;
+            tx.execute(
+                "INSERT INTO settings (key, value) VALUES ('selected_home_category_ids', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = ?1",
+                params![json_cats],
+            )?;
+        }
+
+        let json_hidden = serde_json::to_string(&config.hidden_channel_ids)?;
+        tx.execute(
+            "INSERT INTO settings (key, value) VALUES ('hidden_channel_ids', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = ?1",
+            params![json_hidden],
+        )?;
+
+        let json_tags = serde_json::to_string(&config.excluded_tags)?;
+        tx.execute(
+            "INSERT INTO settings (key, value) VALUES ('excluded_tags', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = ?1",
+            params![json_tags],
+        )?;
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn import_non_secret_config_json(&self, json_str: &str) -> Result<()> {
+        let config: AppConfigExport = serde_json::from_str(json_str)
+            .map_err(|e| StorageError::Custom(format!("Invalid configuration JSON: {e}")))?;
+        self.import_non_secret_config(&config)
+    }
+
+    // Hidden channels
+    pub fn get_hidden_channels(&self) -> Result<Vec<String>> {
+        if let Some(val) = self.get_setting("hidden_channel_ids")? {
+            let ids: Vec<String> = serde_json::from_str(&val).unwrap_or_default();
+            Ok(ids)
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    pub fn hide_channel(&self, channel_id: &str) -> Result<()> {
+        let mut ids = self.get_hidden_channels()?;
+        if !ids.iter().any(|i| i == channel_id) {
+            ids.push(channel_id.to_string());
+            let json = serde_json::to_string(&ids)?;
+            self.set_setting("hidden_channel_ids", &json)?;
+        }
+        Ok(())
+    }
+
+    pub fn unhide_channel(&self, channel_id: &str) -> Result<()> {
+        let mut ids = self.get_hidden_channels()?;
+        ids.retain(|i| i != channel_id);
+        let json = serde_json::to_string(&ids)?;
+        self.set_setting("hidden_channel_ids", &json)?;
+        Ok(())
+    }
+
+    pub fn clear_hidden_channels(&self) -> Result<()> {
+        let empty: Vec<String> = Vec::new();
+        let json = serde_json::to_string(&empty)?;
+        self.set_setting("hidden_channel_ids", &json)?;
+        Ok(())
+    }
+
+    // Excluded tags
+    pub fn get_excluded_tags(&self) -> Result<Vec<String>> {
+        if let Some(val) = self.get_setting("excluded_tags")? {
+            let tags: Vec<String> = serde_json::from_str(&val).unwrap_or_default();
+            Ok(tags)
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    pub fn exclude_tag(&self, tag: &str) -> Result<()> {
+        let trimmed = tag.trim();
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+        let mut tags = self.get_excluded_tags()?;
+        if !tags.iter().any(|t| t.eq_ignore_ascii_case(trimmed)) {
+            tags.push(trimmed.to_string());
+            let json = serde_json::to_string(&tags)?;
+            self.set_setting("excluded_tags", &json)?;
+        }
+        Ok(())
+    }
+
+    pub fn remove_excluded_tag(&self, tag: &str) -> Result<()> {
+        let mut tags = self.get_excluded_tags()?;
+        tags.retain(|t| !t.eq_ignore_ascii_case(tag.trim()));
+        let json = serde_json::to_string(&tags)?;
+        self.set_setting("excluded_tags", &json)?;
+        Ok(())
+    }
+
+    // Home categories
+    pub fn get_home_categories(&self) -> Result<Option<Vec<String>>> {
+        if let Some(val) = self.get_setting("selected_home_category_ids")? {
+            let ids: Vec<String> = serde_json::from_str(&val).unwrap_or_default();
+            Ok(Some(ids))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn set_home_categories(&self, ids: Option<&[String]>) -> Result<()> {
+        if let Some(ids) = ids {
+            let json = serde_json::to_string(ids)?;
+            self.set_setting("selected_home_category_ids", &json)?;
+        } else {
+            self.remove_setting("selected_home_category_ids")?;
+        }
+        Ok(())
+    }
 }
+
 
 pub fn default_db_path() -> std::path::PathBuf {
     #[cfg(windows)]
@@ -714,4 +1205,192 @@ mod tests {
         store.clear_all_progress().unwrap();
         assert!(store.get_all_telegram_progress(10).unwrap().is_empty());
     }
+
+    #[test]
+    fn phash_jobs_persistence() {
+        let store = LocalStore::open_in_memory().unwrap();
+        assert!(store.get_phash_job("telegram:-1001:2:3").unwrap().is_none());
+
+        let job1 = StoredPhashJob {
+            video_id: "telegram:-1001:2:3".into(),
+            job_id: Some("job_abc".into()),
+            state: "queued".into(),
+            error_code: None,
+            duration_us: Some(120_000_000),
+            updated_at: 1000,
+        };
+        store.save_phash_job(&job1).unwrap();
+
+        let loaded = store
+            .get_phash_job("telegram:-1001:2:3")
+            .unwrap()
+            .expect("job loaded");
+        assert_eq!(loaded.job_id.as_deref(), Some("job_abc"));
+        assert_eq!(loaded.state, "queued");
+        assert_eq!(loaded.duration_us, Some(120_000_000));
+
+        // Update state to done
+        let job_updated = StoredPhashJob {
+            video_id: "telegram:-1001:2:3".into(),
+            job_id: Some("job_abc".into()),
+            state: "done".into(),
+            error_code: None,
+            duration_us: Some(120_000_000),
+            updated_at: 2000,
+        };
+        store.save_phash_job(&job_updated).unwrap();
+        let loaded2 = store
+            .get_phash_job("telegram:-1001:2:3")
+            .unwrap()
+            .expect("job updated");
+        assert_eq!(loaded2.state, "done");
+
+        let all = store.get_all_phash_jobs().unwrap();
+        assert_eq!(all.len(), 1);
+
+        store.remove_phash_job("telegram:-1001:2:3").unwrap();
+        assert!(store.get_phash_job("telegram:-1001:2:3").unwrap().is_none());
+        assert!(store.get_all_phash_jobs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn config_export_and_import_roundtrip() {
+        let store = LocalStore::open_in_memory().unwrap();
+
+        // Default export
+        let default_cfg = store.export_non_secret_config().unwrap();
+        assert_eq!(default_cfg.version, 1);
+        assert_eq!(default_cfg.cache_limit_mb, 256);
+        assert_eq!(default_cfg.seek_step_sec, 15);
+        assert_eq!(default_cfg.buffer_profile, "standard");
+        assert!(!default_cfg.phash_on_playback);
+
+        // Custom config matching Android Version 1 JSON schema
+        let custom_json = r#"{
+            "version": 1,
+            "selectedLibraryId": "lib_adult_4k",
+            "selectedLibraryName": "4K Ultra Adult",
+            "resolverBaseUrl": "https://resolver.example.org",
+            "cacheLimitMb": 512,
+            "phashOnPlayback": true,
+            "bufferProfile": "fast_start",
+            "lowRamMode": true,
+            "seekStepSec": 30,
+            "autoplayNext": true,
+            "selectedHomeCategoryIds": ["cat1", "cat2"],
+            "hiddenChannelIds": ["chan_hidden_9"],
+            "excludedTags": ["tag_a", "tag_b"],
+            "autoUpdateEnabled": false
+        }"#;
+
+        store.import_non_secret_config_json(custom_json).unwrap();
+
+        let exported = store.export_non_secret_config().unwrap();
+        assert_eq!(exported.version, 1);
+        assert_eq!(exported.selected_library_id.as_deref(), Some("lib_adult_4k"));
+        assert_eq!(exported.selected_library_name.as_deref(), Some("4K Ultra Adult"));
+        assert_eq!(exported.resolver_base_url.as_deref(), Some("https://resolver.example.org"));
+        assert_eq!(exported.cache_limit_mb, 512);
+        assert!(exported.phash_on_playback);
+        assert_eq!(exported.buffer_profile, "fast_start");
+        assert!(exported.low_ram_mode);
+        assert_eq!(exported.seek_step_sec, 30);
+        assert!(exported.autoplay_next);
+        assert_eq!(exported.selected_home_category_ids, Some(vec!["cat1".into(), "cat2".into()]));
+        assert_eq!(exported.hidden_channel_ids, vec!["chan_hidden_9"]);
+        assert_eq!(exported.excluded_tags, vec!["tag_a", "tag_b"]);
+        assert!(!exported.auto_update_enabled);
+
+        // JSON string output is valid and can be re-imported
+        let json_out = store.export_non_secret_config_json().unwrap();
+        let store2 = LocalStore::open_in_memory().unwrap();
+        store2.import_non_secret_config_json(&json_out).unwrap();
+        let exported2 = store2.export_non_secret_config().unwrap();
+        assert_eq!(exported, exported2);
+    }
+
+    #[test]
+    fn config_import_validation_rejects_unsupported_version_without_partial_apply() {
+        let store = LocalStore::open_in_memory().unwrap();
+
+        // Initial setup
+        store.set_setting("cache_limit_mb", "100").unwrap();
+        store.set_setting("seek_step_sec", "10").unwrap();
+
+        // Attempt import with unsupported version 2
+        let invalid_version_json = r#"{
+            "version": 2,
+            "cacheLimitMb": 9999,
+            "seekStepSec": 60,
+            "bufferProfile": "standard"
+        }"#;
+
+        let res = store.import_non_secret_config_json(invalid_version_json);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("Unsupported configuration version: 2"));
+
+        // Settings must remain completely unmodified
+        assert_eq!(store.get_setting("cache_limit_mb").unwrap().as_deref(), Some("100"));
+        assert_eq!(store.get_setting("seek_step_sec").unwrap().as_deref(), Some("10"));
+    }
+
+    #[test]
+    fn config_import_validation_rejects_invalid_values() {
+        let store = LocalStore::open_in_memory().unwrap();
+        store.set_setting("buffer_profile", "standard").unwrap();
+
+        // Invalid buffer profile
+        let bad_profile = r#"{
+            "version": 1,
+            "bufferProfile": "hyper_stream",
+            "cacheLimitMb": 256,
+            "seekStepSec": 15
+        }"#;
+        assert!(store.import_non_secret_config_json(bad_profile).is_err());
+        assert_eq!(store.get_setting("buffer_profile").unwrap().as_deref(), Some("standard"));
+
+        // Negative cache limit
+        let negative_cache = r#"{
+            "version": 1,
+            "cacheLimitMb": -10,
+            "seekStepSec": 15,
+            "bufferProfile": "standard"
+        }"#;
+        assert!(store.import_non_secret_config_json(negative_cache).is_err());
+
+        // Zero or negative seek step
+        let zero_seek = r#"{
+            "version": 1,
+            "cacheLimitMb": 256,
+            "seekStepSec": 0,
+            "bufferProfile": "standard"
+        }"#;
+        assert!(store.import_non_secret_config_json(zero_seek).is_err());
+    }
+
+    #[test]
+    fn hidden_channels_and_excluded_tags_lifecycle() {
+        let store = LocalStore::open_in_memory().unwrap();
+
+        // Hidden channels
+        assert!(store.get_hidden_channels().unwrap().is_empty());
+        store.hide_channel("chan_1").unwrap();
+        store.hide_channel("chan_2").unwrap();
+        store.hide_channel("chan_1").unwrap(); // deduplication
+        assert_eq!(store.get_hidden_channels().unwrap(), vec!["chan_1", "chan_2"]);
+
+        store.unhide_channel("chan_1").unwrap();
+        assert_eq!(store.get_hidden_channels().unwrap(), vec!["chan_2"]);
+
+        // Excluded tags
+        assert!(store.get_excluded_tags().unwrap().is_empty());
+        store.exclude_tag("BDSM").unwrap();
+        store.exclude_tag("Anal").unwrap();
+        store.exclude_tag("bdsm").unwrap(); // case-insensitive deduplication
+        assert_eq!(store.get_excluded_tags().unwrap(), vec!["BDSM", "Anal"]);
+
+        store.remove_excluded_tag("bdsm").unwrap();
+        assert_eq!(store.get_excluded_tags().unwrap(), vec!["Anal"]);
+    }
 }
+

@@ -53,29 +53,34 @@ fi
 cat << 'EOF' > "${OUT_DIR}/README.txt"
 Adult Hub Desktop - Player (Windows x64)
 
-Uruchomienie:
-1. Uruchom adult-hub-desktop.exe
-2. Wybierz wideo z katalogu (Najnowsze, Wznów, Kanały) lub kliknij "Sample" / wpisz URL / otwórz plik lokalny.
-3. Skróty klawiszowe odtwarzacza:
-   - Spacja: Play / Pause
-   - Strzałka w lewo / w prawo: -5s / +5s
-   - f: Pełny ekran (Fullscreen) / Esc: Wyjście z pełnego ekranu
-   - m: Wyciszenie (Mute / Unmute)
-   - i: Statystyki odtwarzania (HUD)
-   - s: Zmiana prędkości odtwarzania (1.0x, 1.25x, 1.5x, 2.0x)
-   - b: Profil buforowania (Standard, FastStart, Large, LowMemory)
-   - h: Przełącznik dekodera sprzętowego (HW Decode: auto-safe / no z auto-fallbackiem)
-   - n: Odtwarzaj losowy następny film z katalogu
+Quick Start:
+1. Launch adult-hub-desktop.exe.
+2. Select a video from the catalog (Latest, Resume, Channels) or click "Sample" / enter URL / open local media.
+3. Player Keyboard Shortcuts:
+   - Space: Play / Pause
+   - Left / Right Arrow: Seek backward / forward by configurable seek step (10s, 15s, 30s)
+   - f / F: Toggle Fullscreen
+   - Esc: Exit Fullscreen or return to Browse screen
+   - m: Toggle Mute
+   - i: Toggle Playback HUD & Statistics
+   - s: Cycle Playback Speed (1.0x, 1.25x, 1.5x, 2.0x)
+   - b: Cycle Buffer Profile (Standard, FastStart, Large, LowMemory)
+   - h: Toggle Hardware Decode (auto-safe with automatic software fallback)
+   - n: Play next random catalog item
+   - Ctrl + Shift + Q: Emergency Panic Exit (instantly hides window, mutes audio, checkpoints progress, exits)
 
-Funkcje odtwarzania (Stage 3):
-- Pełna synchronizacja sesji Jellyfin (Start, Progress co 10s / coalesce 500ms, Stop)
-- Lokalne zapamiętywanie postępu wideo Telegram (wznowienie od >15s, zaliczenie obejrzenia przy >=90%)
-- Autoplay: automatyczne odtwarzanie kolejnego filmu po zakończeniu
-- Dedykowany profil bez napisów i wyboru ścieżek dźwiękowych (zoptymalizowany dla treści adult)
-- Mapowanie tonów HDR do SDR (target sRGB)
-- Automatyczny fallback na dekoder programowy przy błędzie akceleracji GPU
+Features & Capabilities:
+- Visual Parity with Android TV: Dark OLED theme, category navigation, responsive video cards.
+- Jellyfin Session Coordination: Start, progress updates every 10s (with 500ms coalescing), and stop reporting.
+- Local Telegram Progress: Resume prompts for position >15s, watched badge upon >=90% playback.
+- Resolver pHash Integration: Background video matching enqueue and status tracking.
+- Settings Management: Non-secret JSON import/export compatible with Android TV version 1 schema.
+- Content Filtering: Excluded tags and hidden channel management.
+- Privacy & Diagnostics: Instant panic shutdown, history clearing, and redacted diagnostics export.
+- Optimized Adult Content Player: Dedicated profile without subtitle or audio track selector overhead.
+- Tonemapping: High quality HDR to SDR tonemapping targeting sRGB color space.
 
-Plik libmpv-2.dll musi znajdować się w tym samym folderze co adult-hub-desktop.exe.
+Note: libmpv-2.dll must reside in the same directory as adult-hub-desktop.exe.
 EOF
 cp "${OUT_DIR}/README.txt" "${BIN_DIR}/README.txt"
 

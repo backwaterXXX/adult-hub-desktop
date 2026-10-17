@@ -152,6 +152,7 @@ dependencies = [
  "adult-hub-player",
  "adult-hub-storage",
  "glow 0.16.0",
+ "regex",
  "rfd",
  "slint",
  "slint-build",

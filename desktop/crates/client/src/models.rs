@@ -249,3 +249,41 @@ pub struct PlaybackStopInfo {
     pub failed: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PhashGenerationRequest {
+    pub video_id: String,
+    pub duration_us: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PhashGenerationResponse {
+    #[serde(default)]
+    pub ok: bool,
+    pub job_id: Option<String>,
+    pub state: Option<String>,
+    #[serde(default)]
+    pub already_computed: bool,
+    #[serde(default)]
+    pub thumbnail_ready: bool,
+    pub error_code: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PhashJobStatusResponse {
+    #[serde(default)]
+    pub ok: bool,
+    pub job: Option<PhashJobDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PhashJobDto {
+    pub id: String,
+    pub video_id: String,
+    pub state: String,
+    pub decoder_profile: Option<String>,
+    pub error_code: Option<String>,
+    #[serde(default)]
+    pub thumbnail_ready: bool,
+}
+
+

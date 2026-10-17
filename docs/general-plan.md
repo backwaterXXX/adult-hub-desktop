@@ -1,6 +1,6 @@
 # Adult Hub Desktop — General Plan
 
-Status: approved planning direction; implementation not started.
+Status: Stages 1–4 completed; Stage 5 in progress.
 
 ## Goal and agreed defaults
 

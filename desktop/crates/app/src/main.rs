@@ -1,9 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #![allow(clippy::too_many_arguments)]
 
+mod diagnostics;
+mod phash;
 mod renderer;
 mod reporter;
 mod session;
+
 
 use adult_hub_client::{
     discover_servers, GetItemsQuery, JellyfinClient, ResolverClient, ServiceUrlPolicy,
@@ -111,10 +114,58 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let reporter = Arc::new(PlaybackReporter::new(jellyfin.clone()));
     let session_ctrl = Arc::new(PlaybackSessionController::new(local_store.clone()));
 
+    let session_opt = local_store.load_session().ok().flatten();
+    let initial_resolver_url = local_store
+        .get_setting("resolver_base_url")
+        .ok()
+        .flatten()
+        .or_else(|| local_store.get_setting("resolver_url").ok().flatten())
+        .or_else(|| session_opt.as_ref().map(|s| s.server_url.clone()))
+        .unwrap_or_default();
+    let initial_auth_token = session_opt.as_ref().map(|s| s.access_token.clone());
+
+    let phash_coord = phash::PhashCoordinator::new(
+        local_store.clone(),
+        resolver.clone(),
+        initial_resolver_url.clone(),
+        initial_auth_token,
+    );
+
     let current_playing_item: Arc<Mutex<Option<TvItem>>> = Arc::new(Mutex::new(None));
     let cached_catalog: Arc<Mutex<Vec<TvItem>>> = Arc::new(Mutex::new(sample_catalog_tv_items()));
     let autoplay_active = Arc::new(AtomicBool::new(false));
     let hwdec_active = Arc::new(AtomicBool::new(true));
+
+    // Synchronize initial settings to UI
+    if let Ok(config) = local_store.export_non_secret_config() {
+        ui.set_seek_step_sec(config.seek_step_sec);
+        ui.set_seek_step_label(format!("Seek: {}s", config.seek_step_sec).into());
+        ui.set_cache_limit_label(format!("Cache Limit: {} MB", config.cache_limit_mb).into());
+        ui.set_phash_active(config.phash_on_playback);
+        ui.set_low_ram_active(config.low_ram_mode);
+        if let Some(url) = config.resolver_base_url {
+            ui.set_resolver_url_input(url.into());
+        }
+        if let Some(lib_name) = config.selected_library_name {
+            ui.set_current_library(lib_name.into());
+        }
+        let tags_model = Rc::new(slint::VecModel::from(
+            config
+                .excluded_tags
+                .into_iter()
+                .map(slint::SharedString::from)
+                .collect::<Vec<_>>(),
+        ));
+        ui.set_excluded_tags_list(tags_model.into());
+        let channels_model = Rc::new(slint::VecModel::from(
+            config
+                .hidden_channel_ids
+                .into_iter()
+                .map(slint::SharedString::from)
+                .collect::<Vec<_>>(),
+        ));
+        ui.set_hidden_channels_list(channels_model.into());
+    }
 
     install_controls(
         &ui,
@@ -129,6 +180,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         credential_store.clone(),
         local_store.clone(),
         jellyfin.clone(),
+        phash_coord.clone(),
     );
     install_fullscreen(&ui);
     install_stage2_handlers(
@@ -143,6 +195,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         session_ctrl.clone(),
         current_playing_item.clone(),
         cached_catalog.clone(),
+        phash_coord.clone(),
+    );
+    install_stage4_handlers(
+        &ui,
+        player.clone(),
+        local_store.clone(),
+        credential_store.clone(),
+        jellyfin.clone(),
+        resolver.clone(),
+        phash_coord.clone(),
+        reporter.clone(),
+        session_ctrl.clone(),
+        current_playing_item.clone(),
+        cached_catalog.clone(),
     );
 
     // Initial session restore & catalog population
@@ -152,6 +218,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(session.server_url.clone()),
             Some(session.access_token.clone()),
         );
+        let eff_res_url = if initial_resolver_url.is_empty() {
+            session.server_url.clone()
+        } else {
+            initial_resolver_url.clone()
+        };
+        phash_coord.update_auth(&eff_res_url, Some(&session.access_token));
         ui.set_is_logged_in(true);
         ui.set_logged_in_user(session.username.clone().into());
         ui.set_server_url_input(session.server_url.clone().into());
@@ -227,6 +299,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &reporter,
                 &session_ctrl,
                 &current_playing_item,
+                &phash_coord,
             );
         } else {
             load_media(&ui, player, &initial, &options.headers);
@@ -253,6 +326,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         credential_store.clone(),
         local_store.clone(),
         jellyfin.clone(),
+        phash_coord.clone(),
     );
 
     ui.show()?;
@@ -289,6 +363,7 @@ fn start_item_playback(
     reporter: &Arc<PlaybackReporter>,
     session_ctrl: &Arc<PlaybackSessionController>,
     current_item: &Arc<Mutex<Option<TvItem>>>,
+    phash_coord: &Arc<phash::PhashCoordinator>,
 ) {
     let _req_id = session_ctrl.next_request_id();
 
@@ -303,9 +378,10 @@ fn start_item_playback(
     // 2. Resolve stream URL
     let session = credential_store.get().ok().flatten();
     let resolver_url = local_store
-        .get_setting("resolver_url")
+        .get_setting("resolver_base_url")
         .ok()
         .flatten()
+        .or_else(|| local_store.get_setting("resolver_url").ok().flatten())
         .or_else(|| session.as_ref().map(|s| s.server_url.clone()));
 
     let (stream_url, play_method) = match PlaybackSessionController::resolve_stream_url(
@@ -381,6 +457,17 @@ fn start_item_playback(
         play_method,
         (start_pos_secs * 1000.0) as u64,
     );
+
+    // 6. Enqueue pHash video matching if enabled
+    let phash_enabled = local_store
+        .get_setting("phash_on_playback")
+        .ok()
+        .flatten()
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    if phash_enabled {
+        phash_coord.enqueue_generation(&item, None);
+    }
 }
 
 fn play_random_catalog_item(
@@ -394,6 +481,7 @@ fn play_random_catalog_item(
     session_ctrl: &Arc<PlaybackSessionController>,
     current_item: &Arc<Mutex<Option<TvItem>>>,
     cached_catalog: &Arc<Mutex<Vec<TvItem>>>,
+    phash_coord: &Arc<phash::PhashCoordinator>,
 ) {
     let items = cached_catalog.lock().unwrap().clone();
     if items.is_empty() {
@@ -429,6 +517,7 @@ fn play_random_catalog_item(
         reporter,
         session_ctrl,
         current_item,
+        phash_coord,
     );
 }
 
@@ -445,6 +534,7 @@ fn install_controls(
     credential_store: Arc<CredentialStore>,
     local_store: Arc<LocalStore>,
     jellyfin: Arc<JellyfinClient>,
+    phash_coord: Arc<phash::PhashCoordinator>,
 ) {
     {
         let weak = ui.as_weak();
@@ -524,6 +614,7 @@ fn install_controls(
         let reporter = reporter.clone();
         let session_ctrl = session_ctrl.clone();
         let current_item = current_item.clone();
+        let phash_coord = phash_coord.clone();
         ui.on_load_url(move |text| {
             let Some(ui) = weak.upgrade() else { return };
             let Some(player) = &player else {
@@ -577,6 +668,7 @@ fn install_controls(
                 &reporter,
                 &session_ctrl,
                 &current_item,
+                &phash_coord,
             );
         });
     }
@@ -591,6 +683,7 @@ fn install_controls(
         let reporter = reporter.clone();
         let session_ctrl = session_ctrl.clone();
         let current_item = current_item.clone();
+        let phash_coord = phash_coord.clone();
         ui.on_load_sample(move || {
             let Some(ui) = weak.upgrade() else { return };
             let Some(player) = &player else { return };
@@ -606,6 +699,7 @@ fn install_controls(
                 &reporter,
                 &session_ctrl,
                 &current_item,
+                &phash_coord,
             );
         });
     }
@@ -620,6 +714,7 @@ fn install_controls(
         let reporter = reporter.clone();
         let session_ctrl = session_ctrl.clone();
         let current_item = current_item.clone();
+        let phash_coord = phash_coord.clone();
         ui.on_open_file(move || {
             let Some(ui) = weak.upgrade() else { return };
             let Some(player) = &player else { return };
@@ -663,6 +758,7 @@ fn install_controls(
                         &reporter,
                         &session_ctrl,
                         &current_item,
+                        &phash_coord,
                     );
                 }
                 None => {
@@ -809,6 +905,7 @@ fn install_controls(
         let session_ctrl = session_ctrl.clone();
         let current_item = current_item.clone();
         let cached_catalog = cached_catalog.clone();
+        let phash_coord = phash_coord.clone();
         ui.on_play_random(move || {
             let Some(ui) = weak.upgrade() else { return };
             let Some(player) = &player else { return };
@@ -823,6 +920,7 @@ fn install_controls(
                 &session_ctrl,
                 &current_item,
                 &cached_catalog,
+                &phash_coord,
             );
         });
     }
@@ -964,6 +1062,7 @@ fn sample_catalog_items() -> Vec<VideoCardData> {
         .collect()
 }
 
+#[allow(dead_code)]
 fn sample_channel_items() -> Vec<VideoCardData> {
     vec![
         VideoCardData {
@@ -1015,6 +1114,34 @@ fn tv_item_to_card(item: &TvItem) -> VideoCardData {
     }
 }
 
+fn filter_catalog_items(items: Vec<TvItem>, local_store: &LocalStore) -> Vec<TvItem> {
+    let excluded_tags = local_store.get_excluded_tags().unwrap_or_default();
+    let hidden_channels = local_store.get_hidden_channels().unwrap_or_default();
+
+    if excluded_tags.is_empty() && hidden_channels.is_empty() {
+        return items;
+    }
+
+    items
+        .into_iter()
+        .filter(|item| {
+            for tag in &item.tags {
+                if excluded_tags.iter().any(|ex| ex.eq_ignore_ascii_case(tag)) {
+                    return false;
+                }
+            }
+            if let Some(prov_id) = &item.provider_video_id {
+                if let Some(ch) = prov_id.split(':').next() {
+                    if hidden_channels.iter().any(|h| h.eq_ignore_ascii_case(ch)) {
+                        return false;
+                    }
+                }
+            }
+            true
+        })
+        .collect()
+}
+
 fn install_stage2_handlers(
     ui: &MainWindow,
     player: Option<Rc<Player>>,
@@ -1027,6 +1154,7 @@ fn install_stage2_handlers(
     session_ctrl: Arc<PlaybackSessionController>,
     current_item: Arc<Mutex<Option<TvItem>>>,
     cached_catalog: Arc<Mutex<Vec<TvItem>>>,
+    phash_coord: Arc<phash::PhashCoordinator>,
 ) {
     // 1. Screen switching
     {
@@ -1045,6 +1173,7 @@ fn install_stage2_handlers(
         let credential_store = credential_store.clone();
         let reporter = reporter.clone();
         let cached_catalog = cached_catalog.clone();
+        let phash_coord = phash_coord.clone();
         ui.on_perform_login(move |server_url, username, password| {
             let Some(ui) = weak.upgrade() else { return };
             let server_url = server_url.trim().to_string();
@@ -1065,6 +1194,7 @@ fn install_stage2_handlers(
                     let credential_store = credential_store.clone();
                     let reporter = reporter.clone();
                     let cached_catalog = cached_catalog.clone();
+                    let phash_coord = phash_coord.clone();
                     ui.set_status("Connecting to server...".into());
                     ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
 
@@ -1087,21 +1217,25 @@ fn install_stage2_handlers(
                                     Some(session.server_url.clone()),
                                     Some(session.access_token.clone()),
                                 );
+                                let eff_res_url = local_store
+                                    .get_setting("resolver_base_url")
+                                    .ok()
+                                    .flatten()
+                                    .or_else(|| local_store.get_setting("resolver_url").ok().flatten())
+                                    .unwrap_or_else(|| session.server_url.clone());
+                                phash_coord.update_auth(&eff_res_url, Some(&session.access_token));
 
-                                let (cards, raw_items) = match jellyfin.get_latest_items(
+                                let raw_items = match jellyfin.get_latest_items(
                                     &normalized,
                                     &session.user_id,
                                     &session.access_token,
                                     None,
                                     50,
                                 ) {
-                                    Ok(list) => {
-                                        let cards =
-                                            list.iter().map(tv_item_to_card).collect::<Vec<_>>();
-                                        (cards, list)
-                                    }
-                                    Err(_) => (sample_catalog_items(), sample_catalog_tv_items()),
+                                    Ok(list) => filter_catalog_items(list, &local_store),
+                                    Err(_) => filter_catalog_items(sample_catalog_tv_items(), &local_store),
                                 };
+                                let cards = raw_items.iter().map(tv_item_to_card).collect::<Vec<_>>();
                                 *cached_catalog.lock().unwrap() = raw_items;
 
                                 slint::invoke_from_event_loop(move || {
@@ -1140,15 +1274,19 @@ fn install_stage2_handlers(
         let credential_store = credential_store.clone();
         let reporter = reporter.clone();
         let cached_catalog = cached_catalog.clone();
+        let phash_coord = phash_coord.clone();
         ui.on_perform_logout(move || {
             let Some(ui) = weak.upgrade() else { return };
             let _ = local_store.clear_session();
             let _ = credential_store.clear();
             reporter.set_auth(None, None);
-            *cached_catalog.lock().unwrap() = sample_catalog_tv_items();
+            phash_coord.update_auth("", None);
+            let raw_items = filter_catalog_items(sample_catalog_tv_items(), &local_store);
+            let cards = raw_items.iter().map(tv_item_to_card).collect::<Vec<_>>();
+            *cached_catalog.lock().unwrap() = raw_items;
             ui.set_is_logged_in(false);
             ui.set_logged_in_user("".into());
-            set_catalog(&ui, sample_catalog_items());
+            set_catalog(&ui, cards);
             ui.set_status("Logged out".into());
             ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
         });
@@ -1164,6 +1302,7 @@ fn install_stage2_handlers(
         let reporter = reporter.clone();
         let cached_catalog = cached_catalog.clone();
         let qc_running = qc_running.clone();
+        let phash_coord = phash_coord.clone();
         ui.on_start_quick_connect(move || {
             let Some(ui) = weak.upgrade() else { return };
             let server_url = ui.get_server_url_input().trim().to_string();
@@ -1187,6 +1326,7 @@ fn install_stage2_handlers(
             let credential_store = credential_store.clone();
             let reporter = reporter.clone();
             let cached_catalog = cached_catalog.clone();
+            let phash_coord = phash_coord.clone();
 
             ui.set_status("Requesting Quick Connect code...".into());
             ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
@@ -1243,25 +1383,25 @@ fn install_stage2_handlers(
                                         Some(session.server_url.clone()),
                                         Some(session.access_token.clone()),
                                     );
+                                    let eff_res_url = local_store
+                                        .get_setting("resolver_base_url")
+                                        .ok()
+                                        .flatten()
+                                        .or_else(|| local_store.get_setting("resolver_url").ok().flatten())
+                                        .unwrap_or_else(|| session.server_url.clone());
+                                    phash_coord.update_auth(&eff_res_url, Some(&session.access_token));
 
-                                    let (cards, raw_items) = match jellyfin.get_latest_items(
+                                    let raw_items = match jellyfin.get_latest_items(
                                         &normalized,
                                         &session.user_id,
                                         &session.access_token,
                                         None,
                                         50,
                                     ) {
-                                        Ok(list) => {
-                                            let cards = list
-                                                .iter()
-                                                .map(tv_item_to_card)
-                                                .collect::<Vec<_>>();
-                                            (cards, list)
-                                        }
-                                        Err(_) => {
-                                            (sample_catalog_items(), sample_catalog_tv_items())
-                                        }
+                                        Ok(list) => filter_catalog_items(list, &local_store),
+                                        Err(_) => filter_catalog_items(sample_catalog_tv_items(), &local_store),
                                     };
+                                    let cards = raw_items.iter().map(tv_item_to_card).collect::<Vec<_>>();
                                     *cached_catalog.lock().unwrap() = raw_items;
 
                                     let w = weak.clone();
@@ -1415,7 +1555,7 @@ fn install_stage2_handlers(
                 }
 
                 let session = credential_store.get().ok().flatten();
-                let (cards, raw_items) = if let Some(session) = session {
+                let (_cards, raw_items) = if let Some(session) = session {
                     if query.is_empty() {
                         jellyfin
                             .get_latest_items(
@@ -1462,6 +1602,8 @@ fn install_stage2_handlers(
                     (cards, filtered)
                 };
 
+                let raw_items = filter_catalog_items(raw_items, &local_store);
+                let cards = raw_items.iter().map(tv_item_to_card).collect();
                 *cached_catalog.lock().unwrap() = raw_items;
 
                 slint::invoke_from_event_loop(move || {
@@ -1496,7 +1638,7 @@ fn install_stage2_handlers(
 
             std::thread::spawn(move || {
                 let session = credential_store.get().ok().flatten();
-                let (cards, raw_items) = match cat.as_str() {
+                let raw_items = match cat.as_str() {
                     "Latest" => {
                         if let Some(session) = session {
                             jellyfin
@@ -1507,12 +1649,9 @@ fn install_stage2_handlers(
                                     None,
                                     50,
                                 )
-                                .map(|list| (list.iter().map(tv_item_to_card).collect(), list))
-                                .unwrap_or_else(|_| {
-                                    (sample_catalog_items(), sample_catalog_tv_items())
-                                })
+                                .unwrap_or_else(|_| sample_catalog_tv_items())
                         } else {
-                            (sample_catalog_items(), sample_catalog_tv_items())
+                            sample_catalog_tv_items()
                         }
                     }
                     "Resume" => {
@@ -1581,23 +1720,20 @@ fn install_stage2_handlers(
                         }
 
                         if resume_items.is_empty() && session.is_none() {
-                            (sample_catalog_items(), sample_catalog_tv_items())
+                            sample_catalog_tv_items()
                         } else {
-                            let cards = resume_items.iter().map(tv_item_to_card).collect();
-                            (cards, resume_items)
+                            resume_items
                         }
                     }
-                    "Channels" => {
-                        let cards = sample_channel_items();
-                        let raw = sample_catalog_tv_items()
-                            .into_iter()
-                            .filter(|i| i.is_telegram())
-                            .collect();
-                        (cards, raw)
-                    }
-                    _ => (sample_catalog_items(), sample_catalog_tv_items()),
+                    "Channels" => sample_catalog_tv_items()
+                        .into_iter()
+                        .filter(|i| i.is_telegram())
+                        .collect(),
+                    _ => sample_catalog_tv_items(),
                 };
 
+                let raw_items = filter_catalog_items(raw_items, &local_store);
+                let cards = raw_items.iter().map(tv_item_to_card).collect::<Vec<_>>();
                 *cached_catalog.lock().unwrap() = raw_items;
 
                 slint::invoke_from_event_loop(move || {
@@ -1622,6 +1758,7 @@ fn install_stage2_handlers(
         let session_ctrl = session_ctrl.clone();
         let current_item = current_item.clone();
         let cached_catalog = cached_catalog.clone();
+        let phash_coord = phash_coord.clone();
         ui.on_play_item(move |id| {
             let Some(ui) = weak.upgrade() else { return };
             let Some(player) = &player else {
@@ -1708,27 +1845,53 @@ fn install_stage2_handlers(
                 &reporter,
                 &session_ctrl,
                 &current_item,
+                &phash_coord,
             );
         });
     }
+}
 
-    // 8. Panic Exit (Emergency Hide)
+fn install_stage4_handlers(
+    ui: &MainWindow,
+    player: Option<Rc<Player>>,
+    local_store: Arc<LocalStore>,
+    credential_store: Arc<CredentialStore>,
+    jellyfin: Arc<JellyfinClient>,
+    resolver: Arc<ResolverClient>,
+    phash_coord: Arc<phash::PhashCoordinator>,
+    reporter: Arc<PlaybackReporter>,
+    session_ctrl: Arc<PlaybackSessionController>,
+    current_item: Arc<Mutex<Option<TvItem>>>,
+    cached_catalog: Arc<Mutex<Vec<TvItem>>>,
+) {
+    // 1. Emergency Panic Exit (Immediately hide, mute/stop, checkpoint, exit)
     {
         let weak = ui.as_weak();
         let player = player.clone();
+        let session_ctrl = session_ctrl.clone();
+        let current_item = current_item.clone();
+        let reporter = reporter.clone();
         ui.on_panic_exit(move || {
+            crate::diagnostics::GLOBAL_LOG
+                .w("Privacy", "Panic exit triggered; terminating process immediately");
             if let Some(ui) = weak.upgrade() {
                 let _ = ui.window().hide();
             }
             if let Some(player) = &player {
                 let _ = player.stop();
                 let _ = player.set_muted(true);
+                let pos_ms = (player.position().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
+                let dur_ms = (player.duration().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
+                if let Some(item) = current_item.lock().unwrap().as_ref() {
+                    session_ctrl.checkpoint_progress(item, pos_ms, dur_ms, false);
+                }
+                reporter.stop_session(pos_ms);
             }
             std::process::exit(0);
         });
     }
 
-    // 9. Clear Search History
+    // 2. Clear Search History
     {
         let weak = ui.as_weak();
         let local_store = local_store.clone();
@@ -1740,7 +1903,7 @@ fn install_stage2_handlers(
         });
     }
 
-    // 10. Clear Watch History & Progress
+    // 3. Clear Watch History & Progress
     {
         let weak = ui.as_weak();
         let local_store = local_store.clone();
@@ -1751,9 +1914,401 @@ fn install_stage2_handlers(
             ui.set_status("Watch history & progress cleared".into());
             ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
             if ui.get_active_category() == "Resume" {
-                set_catalog(&ui, sample_catalog_items());
-                *cached_catalog.lock().unwrap() = sample_catalog_tv_items();
+                let raw = filter_catalog_items(sample_catalog_tv_items(), &local_store);
+                let cards = raw.iter().map(tv_item_to_card).collect();
+                set_catalog(&ui, cards);
+                *cached_catalog.lock().unwrap() = raw;
             }
+        });
+    }
+
+    // 4. Save Resolver Base URL
+    {
+        let weak = ui.as_weak();
+        let local_store = local_store.clone();
+        let credential_store = credential_store.clone();
+        let phash_coord = phash_coord.clone();
+        ui.on_save_resolver_url(move |url| {
+            let Some(ui) = weak.upgrade() else { return };
+            let trimmed = url.trim().trim_end_matches('/').to_string();
+            let _ = local_store.set_setting("resolver_base_url", &trimmed);
+            let _ = local_store.set_setting("resolver_url", &trimmed);
+            let session = credential_store.get().ok().flatten();
+            phash_coord.update_auth(&trimmed, session.as_ref().map(|s| s.access_token.as_str()));
+            ui.set_resolver_url_input(trimmed.into());
+            ui.set_status("Resolver API URL updated".into());
+            ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
+        });
+    }
+
+    // 5. Test Resolver Connection
+    {
+        let weak = ui.as_weak();
+        let resolver = resolver.clone();
+        let credential_store = credential_store.clone();
+        ui.on_test_resolver_connection(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut url = ui.get_resolver_url_input().trim().trim_end_matches('/').to_string();
+            if url.is_empty() {
+                if let Some(session) = credential_store.get().ok().flatten() {
+                    url = session.server_url.trim_end_matches('/').to_string();
+                }
+            }
+            if url.is_empty() {
+                show_error(&ui, "No Resolver URL or server URL provided");
+                return;
+            }
+            ui.set_status(format!("Testing Resolver connection to {url}...").into());
+            ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
+            let weak = weak.clone();
+            let resolver = resolver.clone();
+            std::thread::spawn(move || {
+                match resolver.get_categories(&url) {
+                    Ok(cats) => {
+                        slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = weak.upgrade() {
+                                ui.set_status(
+                                    format!("Resolver connection OK: {} categories available", cats.len()).into()
+                                );
+                                ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
+                            }
+                        }).ok();
+                    }
+                    Err(err) => {
+                        slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = weak.upgrade() {
+                                show_error(&ui, format!("Resolver test failed: {err}"));
+                            }
+                        }).ok();
+                    }
+                }
+            });
+        });
+    }
+
+    // 6. Cycle Seek Step (10s, 15s, 30s)
+    {
+        let weak = ui.as_weak();
+        let local_store = local_store.clone();
+        ui.on_cycle_seek_step(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let current = ui.get_seek_step_sec();
+            let next = match current {
+                10 => 15,
+                15 => 30,
+                _ => 10,
+            };
+            let _ = local_store.set_setting("seek_step_sec", &next.to_string());
+            ui.set_seek_step_sec(next);
+            ui.set_seek_step_label(format!("Seek: {next}s").into());
+        });
+    }
+
+    // 7. Cycle Cache Limit (128, 256, 512, 1024 MB)
+    {
+        let weak = ui.as_weak();
+        let local_store = local_store.clone();
+        ui.on_cycle_cache_limit(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let current = local_store
+                .get_setting("cache_limit_mb")
+                .ok()
+                .flatten()
+                .and_then(|s| s.parse::<i32>().ok())
+                .unwrap_or(256);
+            let next = match current {
+                128 => 256,
+                256 => 512,
+                512 => 1024,
+                _ => 128,
+            };
+            let _ = local_store.set_setting("cache_limit_mb", &next.to_string());
+            ui.set_cache_limit_label(format!("Cache Limit: {next} MB").into());
+        });
+    }
+
+    // 8. Toggle Low-RAM Mode
+    {
+        let weak = ui.as_weak();
+        let local_store = local_store.clone();
+        ui.on_toggle_low_ram(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let active = !ui.get_low_ram_active();
+            let _ = local_store.set_setting("low_ram_mode", if active { "true" } else { "false" });
+            ui.set_low_ram_active(active);
+            ui.set_status(
+                if active {
+                    "Low-RAM mode enabled"
+                } else {
+                    "Low-RAM mode disabled"
+                }
+                .into(),
+            );
+            ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
+        });
+    }
+
+    // 9. Toggle Video Matching (pHash)
+    {
+        let weak = ui.as_weak();
+        let local_store = local_store.clone();
+        ui.on_toggle_phash(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let active = !ui.get_phash_active();
+            let _ = local_store.set_setting("phash_on_playback", if active { "true" } else { "false" });
+            ui.set_phash_active(active);
+            ui.set_status(
+                if active {
+                    "Video matching (pHash) enabled"
+                } else {
+                    "Video matching disabled"
+                }
+                .into(),
+            );
+            ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
+        });
+    }
+
+    // 10. Excluded Tags
+    {
+        let weak = ui.as_weak();
+        let local_store = local_store.clone();
+        ui.on_add_excluded_tag(move |tag| {
+            let Some(ui) = weak.upgrade() else { return };
+            let tag = tag.trim().to_string();
+            if !tag.is_empty() {
+                let _ = local_store.exclude_tag(&tag);
+                if let Ok(tags) = local_store.get_excluded_tags() {
+                    let model = Rc::new(slint::VecModel::from(
+                        tags.into_iter().map(slint::SharedString::from).collect::<Vec<_>>(),
+                    ));
+                    ui.set_excluded_tags_list(model.into());
+                }
+                ui.set_new_tag_input("".into());
+            }
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let local_store = local_store.clone();
+        ui.on_remove_excluded_tag(move |tag| {
+            let Some(ui) = weak.upgrade() else { return };
+            let _ = local_store.remove_excluded_tag(&tag);
+            if let Ok(tags) = local_store.get_excluded_tags() {
+                let model = Rc::new(slint::VecModel::from(
+                    tags.into_iter().map(slint::SharedString::from).collect::<Vec<_>>(),
+                ));
+                ui.set_excluded_tags_list(model.into());
+            }
+        });
+    }
+
+    // 11. Unhide All Channels
+    {
+        let weak = ui.as_weak();
+        let local_store = local_store.clone();
+        ui.on_unhide_all_channels(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let _ = local_store.clear_hidden_channels();
+            let model = Rc::new(slint::VecModel::from(Vec::<slint::SharedString>::new()));
+            ui.set_hidden_channels_list(model.into());
+            ui.set_status("All channels unhidden".into());
+            ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
+        });
+    }
+
+    // 12. Clear Image Cache
+    {
+        let weak = ui.as_weak();
+        ui.on_clear_image_cache(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let cache_dir = std::env::temp_dir().join("adult-hub-cache");
+            let _ = std::fs::remove_dir_all(&cache_dir);
+            ui.set_status("Image cache cleared".into());
+            ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
+        });
+    }
+
+    // 13. Export Configuration
+    {
+        let weak = ui.as_weak();
+        let local_store = local_store.clone();
+        ui.on_export_config(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            match local_store.export_non_secret_config_json() {
+                Ok(json) => {
+                    let target_path = export_file_dialog("adult-hub-config.json", "json");
+                    match std::fs::write(&target_path, json) {
+                        Ok(_) => {
+                            crate::diagnostics::GLOBAL_LOG
+                                .i("Config", &format!("Config exported to {target_path}"));
+                            ui.set_status(format!("Config exported to {target_path}").into());
+                            ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
+                        }
+                        Err(e) => show_error(&ui, format!("Failed to write config: {e}")),
+                    }
+                }
+                Err(e) => show_error(&ui, format!("Export error: {e}")),
+            }
+        });
+    }
+
+    // 14. Import Configuration
+    {
+        let weak = ui.as_weak();
+        let local_store = local_store.clone();
+        ui.on_import_config(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let import_path = pick_config_file();
+            match import_path.and_then(|p| std::fs::read_to_string(&p).ok()) {
+                Some(json) => match local_store.import_non_secret_config_json(&json) {
+                    Ok(()) => {
+                        crate::diagnostics::GLOBAL_LOG
+                            .i("Config", "Config imported successfully");
+                        if let Ok(config) = local_store.export_non_secret_config() {
+                            ui.set_seek_step_sec(config.seek_step_sec);
+                            ui.set_seek_step_label(format!("Seek: {}s", config.seek_step_sec).into());
+                            ui.set_cache_limit_label(
+                                format!("Cache Limit: {} MB", config.cache_limit_mb).into(),
+                            );
+                            ui.set_phash_active(config.phash_on_playback);
+                            ui.set_low_ram_active(config.low_ram_mode);
+                            if let Some(url) = config.resolver_base_url {
+                                ui.set_resolver_url_input(url.into());
+                            }
+                            if let Some(lib_name) = config.selected_library_name {
+                                ui.set_current_library(lib_name.into());
+                            }
+                            let tags_model = Rc::new(slint::VecModel::from(
+                                config
+                                    .excluded_tags
+                                    .into_iter()
+                                    .map(slint::SharedString::from)
+                                    .collect::<Vec<_>>(),
+                            ));
+                            ui.set_excluded_tags_list(tags_model.into());
+                            let channels_model = Rc::new(slint::VecModel::from(
+                                config
+                                    .hidden_channel_ids
+                                    .into_iter()
+                                    .map(slint::SharedString::from)
+                                    .collect::<Vec<_>>(),
+                            ));
+                            ui.set_hidden_channels_list(channels_model.into());
+                        }
+                        ui.set_status("Configuration imported successfully".into());
+                        ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
+                    }
+                    Err(err) => show_error(&ui, format!("Config import rejected: {err}")),
+                },
+                None => {
+                    show_error(&ui, "No configuration file selected");
+                }
+            }
+        });
+    }
+
+    // 15. Export Redacted Diagnostics
+    {
+        let weak = ui.as_weak();
+        ui.on_export_diagnostics(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let target_path = export_file_dialog("adult-hub-diagnostics.txt", "txt");
+            match crate::diagnostics::GLOBAL_LOG.export_to_file(
+                &target_path,
+                env!("CARGO_PKG_VERSION"),
+                &[("Platform", std::env::consts::OS)],
+            ) {
+                Ok(()) => {
+                    ui.set_status(format!("Redacted diagnostics exported to {target_path}").into());
+                    ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
+                }
+                Err(e) => show_error(&ui, format!("Diagnostics export failed: {e}")),
+            }
+        });
+    }
+
+    // 16. Switch Library
+    {
+        let weak = ui.as_weak();
+        let credential_store = credential_store.clone();
+        let jellyfin = jellyfin.clone();
+        let local_store = local_store.clone();
+        let cached_catalog = cached_catalog.clone();
+        ui.on_switch_library(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let session = credential_store.get().ok().flatten();
+            let Some(session) = session else {
+                show_error(&ui, "Please log in to switch Jellyfin libraries");
+                return;
+            };
+            let weak = weak.clone();
+            let jellyfin = jellyfin.clone();
+            let local_store = local_store.clone();
+            let cached_catalog = cached_catalog.clone();
+            std::thread::spawn(move || {
+                match jellyfin.get_user_views(
+                    &session.server_url,
+                    &session.user_id,
+                    &session.access_token,
+                ) {
+                    Ok(views) if !views.is_empty() => {
+                        let current_lib_id =
+                            local_store.get_setting("selected_library_id").ok().flatten();
+                        let current_idx = views
+                            .iter()
+                            .position(|v| Some(&v.id) == current_lib_id.as_ref())
+                            .unwrap_or(0);
+                        let next_idx = (current_idx + 1) % views.len();
+                        let next_view = &views[next_idx];
+                        let _ = local_store
+                            .set_setting("selected_library_id", &next_view.id);
+                        let _ = local_store
+                            .set_setting("selected_library_name", &next_view.name);
+
+                        let raw_items = match jellyfin.get_latest_items(
+                            &session.server_url,
+                            &session.user_id,
+                            &session.access_token,
+                            Some(&next_view.id),
+                            50,
+                        ) {
+                            Ok(list) => filter_catalog_items(list, &local_store),
+                            Err(_) => filter_catalog_items(sample_catalog_tv_items(), &local_store),
+                        };
+                        let cards = raw_items.iter().map(tv_item_to_card).collect::<Vec<_>>();
+                        *cached_catalog.lock().unwrap() = raw_items;
+
+                        let lib_name = next_view.name.clone();
+                        slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = weak.upgrade() {
+                                ui.set_current_library(lib_name.into());
+                                set_catalog(&ui, cards);
+                                ui.set_status("Library switched".into());
+                                ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
+                            }
+                        })
+                        .ok();
+                    }
+                    Ok(_) => {
+                        slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = weak.upgrade() {
+                                ui.set_status("No additional libraries found".into());
+                            }
+                        })
+                        .ok();
+                    }
+                    Err(e) => {
+                        slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = weak.upgrade() {
+                                show_error(&ui, format!("Failed to load libraries: {e}"));
+                            }
+                        })
+                        .ok();
+                    }
+                }
+            });
         });
     }
 }
@@ -1839,6 +2394,7 @@ fn install_polling(
     credential_store: Arc<CredentialStore>,
     local_store: Arc<LocalStore>,
     jellyfin: Arc<JellyfinClient>,
+    phash_coord: Arc<phash::PhashCoordinator>,
 ) {
     let ui_weak = ui.as_weak();
     let timer = Timer::default();
@@ -1854,6 +2410,7 @@ fn install_polling(
     let cs = credential_store.clone();
     let ls = local_store.clone();
     let jf = jellyfin.clone();
+    let phash_ref = phash_coord.clone();
 
     timer.start(TimerMode::Repeated, Duration::from_millis(100), move || {
         let Some(ui) = ui_weak.upgrade() else { return };
@@ -1877,6 +2434,7 @@ fn install_polling(
                 &cs,
                 &ls,
                 &jf,
+                &phash_ref,
             );
         }
 
@@ -1911,6 +2469,23 @@ fn install_polling(
             ui.set_hud_text(stats_text(&player.stats()).into());
         }
 
+        // Update pHash video matching status in player overlay
+        if tick % 5 == 0 {
+            if let Some(item) = cur_item.lock().unwrap().as_ref() {
+                if let Some(vid) = phash::adult_hub_video_id(item) {
+                    if let Some(st) = phash_ref.get_status(&vid) {
+                        ui.set_phash_status_text(st.message.into());
+                    } else {
+                        ui.set_phash_status_text("".into());
+                    }
+                } else {
+                    ui.set_phash_status_text("".into());
+                }
+            } else {
+                ui.set_phash_status_text("".into());
+            }
+        }
+
         // Periodic progress checkpoint and reporting every ~10 seconds (~100 ticks at 100ms)
         if tick % 100 == 0 && !idle {
             let pos_ms = (player.position().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
@@ -1937,6 +2512,7 @@ fn handle_event(
     credential_store: &Arc<CredentialStore>,
     local_store: &Arc<LocalStore>,
     jellyfin: &Arc<JellyfinClient>,
+    phash_coord: &Arc<phash::PhashCoordinator>,
 ) {
     use adult_hub_player::PlayerEvent;
     match event {
@@ -1950,12 +2526,28 @@ fn handle_event(
                         .map(|name| name.to_string_lossy().into_owned())
                 })
                 .unwrap_or_else(|| "media".to_owned());
+            crate::diagnostics::GLOBAL_LOG.i("Player", &format!("Loaded filename: {name}"));
             ui.set_status(format!("Loaded: {name}").into());
             ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
             ui.set_playing(!player.is_paused());
 
             let pos_ms = (player.position().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
             reporter.report_start(pos_ms, !player.is_paused());
+
+            let dur_ms = (player.duration().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
+            if dur_ms > 0 {
+                if let Some(item) = current_item.lock().unwrap().as_ref() {
+                    let phash_enabled = local_store
+                        .get_setting("phash_on_playback")
+                        .ok()
+                        .flatten()
+                        .map(|v| v == "true" || v == "1")
+                        .unwrap_or(false);
+                    if phash_enabled {
+                        phash_coord.enqueue_generation(item, Some(dur_ms));
+                    }
+                }
+            }
         }
         PlayerEvent::VideoReconfig { width, height } => {
             update_texture_size(ui, width, height);
@@ -1963,6 +2555,7 @@ fn handle_event(
         PlayerEvent::EndFile { eof, error } => {
             ui.set_playing(false);
             if let Some(error) = error {
+                crate::diagnostics::GLOBAL_LOG.e("Player", &format!("Playback error: {error}"));
                 let err_lower = error.to_lowercase();
                 let is_hwdec_err = err_lower.contains("hwdec")
                     || err_lower.contains("decode")
@@ -1990,12 +2583,14 @@ fn handle_event(
                             reporter,
                             session_ctrl,
                             current_item,
+                            phash_coord,
                         );
                         return;
                     }
                 }
                 show_error(ui, format!("Playback error: {error}"));
             } else if eof {
+                crate::diagnostics::GLOBAL_LOG.i("Player", "Playback completed EOF");
                 let pos_ms = (player.position().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
                 let dur_ms = (player.duration().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
                 if let Some(item) = current_item.lock().unwrap().as_ref() {
@@ -2018,6 +2613,7 @@ fn handle_event(
                         session_ctrl,
                         current_item,
                         cached_catalog,
+                        phash_coord,
                     );
                 }
             }
@@ -2046,7 +2642,9 @@ fn stats_text(stats: &PlaybackStats) -> String {
 }
 
 fn show_error(ui: &MainWindow, message: impl Into<slint::SharedString>) {
-    ui.set_status(message.into());
+    let msg = message.into();
+    crate::diagnostics::GLOBAL_LOG.e("UI", msg.as_str());
+    ui.set_status(msg);
     ui.set_status_color(slint::Color::from_rgb_u8(255, 118, 118));
 }
 
@@ -2116,6 +2714,40 @@ fn pick_media_file() -> Option<String> {
 #[cfg(not(windows))]
 fn pick_media_file() -> Option<String> {
     None
+}
+
+#[cfg(windows)]
+fn export_file_dialog(default_name: &str, ext: &str) -> String {
+    rfd::FileDialog::new()
+        .set_file_name(default_name)
+        .add_filter(ext, &[ext])
+        .save_file()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| default_name.to_string())
+}
+
+#[cfg(not(windows))]
+fn export_file_dialog(default_name: &str, _ext: &str) -> String {
+    default_name.to_string()
+}
+
+#[cfg(windows)]
+fn pick_config_file() -> Option<String> {
+    rfd::FileDialog::new()
+        .set_title("Import Configuration")
+        .add_filter("JSON", &["json"])
+        .pick_file()
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
+#[cfg(not(windows))]
+fn pick_config_file() -> Option<String> {
+    let candidate = PathBuf::from("adult-hub-config.json");
+    if candidate.exists() {
+        Some(candidate.to_string_lossy().into_owned())
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
