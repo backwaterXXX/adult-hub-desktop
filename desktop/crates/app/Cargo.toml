@@ -14,6 +14,12 @@ glow.workspace = true
 slint.workspace = true
 uuid.workspace = true
 regex.workspace = true
+ring.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+thiserror.workspace = true
+url.workspace = true
 
 
 [target.'cfg(windows)'.dependencies]

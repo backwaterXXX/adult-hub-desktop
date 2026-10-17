@@ -51,6 +51,7 @@ RUN apt-get update \
         fakeroot \
         p7zip-full \
         mingw-w64 \
+        nsis \
         file \
         desktop-file-utils \
         ca-certificates \

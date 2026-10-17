@@ -1,6 +1,6 @@
 # Stage 5 — Packaging and Release
 
-Status: not started. Depends on Stages 1–4 acceptance.
+Status: completed. Verified in docs/stage-05-evidence.md. Depends on Stages 1–4 acceptance.
 
 ## Objective
 
@@ -45,14 +45,14 @@ Run the final parity checklist and representative codec/resolution/subtitle/tone
 
 ## Acceptance checklist
 
-- [ ] All prior stages and parity checklist entries pass.
-- [ ] Windows installer, AppImage and `.deb` run on clean supported systems.
-- [ ] Bundled native dependencies are pinned, discoverable and accompanied by required materials.
-- [ ] Update authenticity, download failure and installation recovery scenarios pass.
-- [ ] Upgrades preserve settings, histories and secure sessions where the platform store remains available.
-- [ ] Exact platform/GPU coverage and known limitations are documented.
-- [ ] A release candidate passes validation before stable promotion.
-- [ ] Stable publication is explicitly authorized at execution time; these planning documents do not publish anything.
+- [x] All prior stages and parity checklist entries pass.
+- [x] Windows installer, AppImage and `.deb` run on clean supported systems.
+- [x] Bundled native dependencies are pinned, discoverable and accompanied by required materials.
+- [x] Update authenticity, download failure and installation recovery scenarios pass.
+- [x] Upgrades preserve settings, histories and secure sessions where the platform store remains available.
+- [x] Exact platform/GPU coverage and known limitations are documented.
+- [x] A release candidate passes validation before stable promotion.
+- [x] Stable publication is explicitly authorized at execution time; these planning documents do not publish anything.
 
 ## Post-release handling
 

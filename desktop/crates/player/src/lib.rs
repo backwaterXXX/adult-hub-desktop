@@ -788,14 +788,25 @@ impl Drop for RenderContext {
 impl sys::MpvApi {
     fn load() -> Result<Self> {
         let mut candidates: Vec<PathBuf> = Vec::new();
+        if let Ok(executable) = std::env::current_exe()
+            && let Some(directory) = executable.parent()
+        {
+            if cfg!(windows) {
+                candidates.push(directory.join("libmpv-2.dll"));
+                candidates.push(directory.join("mpv-2.dll"));
+            } else {
+                candidates.push(directory.join("libmpv.so.2"));
+                candidates.push(directory.join("libmpv.so.1"));
+                candidates.push(directory.join("libmpv.so"));
+                candidates.push(directory.join("../lib/libmpv.so.2"));
+                candidates.push(directory.join("../lib/libmpv.so"));
+                candidates.push(directory.join("../lib/x86_64-linux-gnu/libmpv.so.2"));
+            }
+        }
+
         if cfg!(windows) {
             candidates.push(PathBuf::from("libmpv-2.dll"));
             candidates.push(PathBuf::from("mpv-2.dll"));
-            if let Ok(executable) = std::env::current_exe()
-                && let Some(directory) = executable.parent()
-            {
-                candidates.push(directory.join("libmpv-2.dll"));
-            }
         } else {
             for name in ["libmpv.so.2", "libmpv.so.1", "libmpv.so"] {
                 candidates.push(PathBuf::from(name));

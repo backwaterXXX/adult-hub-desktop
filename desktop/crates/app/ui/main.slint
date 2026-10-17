@@ -462,6 +462,22 @@ export component MainWindow inherits Window {
     callback scan-servers();
     callback select-discovered-server(string);
 
+    // Stage 5 Update State & Callbacks
+    in-out property <string> app-version: "0.1.0";
+    in-out property <bool> auto-update-enabled: true;
+    in-out property <string> update-status: "";
+    in-out property <bool> update-available: false;
+    in-out property <string> update-version: "";
+    in-out property <string> update-release-notes: "";
+    in-out property <bool> update-downloading: false;
+    in-out property <float> update-progress: 0.0;
+    in-out property <bool> update-ready: false;
+
+    callback toggle-auto-update();
+    callback check-for-updates();
+    callback start-update-download();
+    callback install-update();
+
 
     VerticalLayout {
         spacing: 0px;
@@ -1713,6 +1729,86 @@ export component MainWindow inherits Window {
                                     text: "Panic Exit Now (Ctrl+Shift+Q)";
                                     clicked => { root.panic-exit(); }
                                 }
+                            }
+                        }
+                    }
+
+                    // Card 9: Application Updates & Release
+                    Rectangle {
+                        border-radius: 12px;
+                        background: #1e1e1e;
+                        border-width: 1px;
+                        border-color: #ffffff14;
+
+                        VerticalLayout {
+                            padding: 22px;
+                            spacing: 14px;
+
+                            Text {
+                                text: "Application Updates & Release";
+                                color: #e91e63;
+                                font-size: 16px;
+                                font-weight: 700;
+                            }
+
+                            Text {
+                                text: "Adult Hub Desktop " + root.app-version + " (Desktop Edition)";
+                                color: #ffffff;
+                                font-size: 14px;
+                                font-weight: 600;
+                            }
+
+                            Text {
+                                text: "Manage automatic update checks, review release notes, and install cryptographically verified releases.";
+                                color: #9e9e9e;
+                                font-size: 13px;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 14px;
+
+                                TvSecondaryButton {
+                                    text: root.auto-update-enabled ? "Auto Update: Enabled" : "Auto Update: Disabled";
+                                    active: root.auto-update-enabled;
+                                    horizontal-stretch: 1;
+                                    clicked => { root.toggle-auto-update(); }
+                                }
+
+                                TvPrimaryButton {
+                                    text: root.update-downloading ? "Downloading..." : (root.update-ready ? "Install Update Now" : (root.update-available ? "Download Update (" + root.update-version + ")" : "Check for Updates"));
+                                    horizontal-stretch: 1;
+                                    clicked => {
+                                        if (root.update-ready) {
+                                            root.install-update();
+                                        } else if (root.update-available) {
+                                            root.start-update-download();
+                                        } else {
+                                            root.check-for-updates();
+                                        }
+                                    }
+                                }
+                            }
+
+                            if root.update-status != "" : Rectangle {
+                                background: #252528;
+                                border-radius: 6px;
+                                height: 36px;
+                                HorizontalLayout {
+                                    padding-left: 12px;
+                                    padding-right: 12px;
+                                    Text {
+                                        text: root.update-status;
+                                        color: #e0e0e0;
+                                        font-size: 12px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+
+                            if root.update-release-notes != "" : Text {
+                                text: "Release Notes: " + root.update-release-notes;
+                                color: #ff80ab;
+                                font-size: 12px;
                             }
                         }
                     }

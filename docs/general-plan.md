@@ -1,6 +1,6 @@
 # Adult Hub Desktop — General Plan
 
-Status: Stages 1–4 completed; Stage 5 in progress.
+Status: Stages 1–5 completed. Verified with end-to-end evidence.
 
 ## Goal and agreed defaults
 

@@ -153,9 +153,15 @@ dependencies = [
  "adult-hub-storage",
  "glow 0.16.0",
  "regex",
+ "reqwest",
  "rfd",
+ "ring",
+ "serde",
+ "serde_json",
  "slint",
  "slint-build",
+ "thiserror 2.0.21",
+ "url",
  "uuid",
 ]
 

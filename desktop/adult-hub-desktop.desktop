@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Adult Hub Desktop
+GenericName=Adult Content Media Player
+Comment=Cross-platform media player and catalog browser for adult content
+Exec=adult-hub-desktop %U
+Icon=adult-hub-desktop
+Terminal=false
+Categories=AudioVideo;Player;Video;
+Keywords=video;media;player;streaming;jellyfin;
+StartupNotify=true
+StartupWMClass=adult-hub-desktop

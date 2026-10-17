@@ -21,4 +21,5 @@ url = "2.5"
 uuid = { version = "1.10", features = ["v4"] }
 thiserror = "2.0"
 regex = "1.11"
+ring = "0.17"
 
