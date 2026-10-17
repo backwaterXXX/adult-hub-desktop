@@ -77,6 +77,53 @@ pub enum TrackKind {
     Subtitle,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BufferProfile {
+    FastStart,
+    #[default]
+    Standard,
+    Large,
+    LowMemory,
+}
+
+impl BufferProfile {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::FastStart => "Fast Start",
+            Self::Standard => "Standard",
+            Self::Large => "Large",
+            Self::LowMemory => "Low-Memory",
+        }
+    }
+
+    pub fn demuxer_max_bytes(&self) -> &'static str {
+        match self {
+            Self::FastStart => "16M",
+            Self::Standard => "64M",
+            Self::Large => "150M",
+            Self::LowMemory => "8M",
+        }
+    }
+
+    pub fn demuxer_max_back_bytes(&self) -> &'static str {
+        match self {
+            Self::FastStart => "8M",
+            Self::Standard => "32M",
+            Self::Large => "64M",
+            Self::LowMemory => "2M",
+        }
+    }
+
+    pub fn demuxer_readahead_secs(&self) -> &'static str {
+        match self {
+            Self::FastStart => "5",
+            Self::Standard => "20",
+            Self::Large => "60",
+            Self::LowMemory => "3",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct PlaybackStats {
     pub video_codec: Option<String>,
@@ -93,44 +140,68 @@ pub struct PlaybackStats {
     pub gamma: Option<String>,
     pub pixelformat: Option<String>,
     pub vo: Option<String>,
+    pub cache_duration_secs: Option<f64>,
+    pub paused_for_cache: bool,
 }
 
 impl PlaybackStats {
     pub fn to_hud_text(&self) -> String {
         let mut lines = Vec::new();
-        if let (Some(width), Some(height)) = (self.width, self.height) {
-            lines.push(format!("Resolution: {width}x{height}"));
+        let res = match (self.width, self.height) {
+            (Some(w), Some(h)) if w > 0 && h > 0 => format!("{w}x{h}"),
+            _ => "Unknown".to_string(),
+        };
+        lines.push(format!("Resolution: {res}"));
+
+        let vcodec = self.video_codec.as_deref().unwrap_or("Unknown");
+        lines.push(format!("Video Codec: {vcodec}"));
+
+        let acodec = self.audio_codec.as_deref().unwrap_or("Unknown");
+        lines.push(format!("Audio Codec: {acodec}"));
+
+        let decoder = self.decoder.as_deref().unwrap_or("Unknown");
+        let hwdec = self.hwdec.as_deref().unwrap_or("no");
+        let hw_label = if hwdec != "no" && !hwdec.is_empty() {
+            format!("{decoder} (HW: {hwdec})")
+        } else {
+            format!("{decoder} (Software Fallback)")
+        };
+        lines.push(format!("Decoder: {hw_label}"));
+
+        if let Some(cache_secs) = self.cache_duration_secs {
+            let state = if self.paused_for_cache { " (Buffering...)" } else { "" };
+            lines.push(format!("Buffer Cache: {cache_secs:.1} s{state}"));
+        } else {
+            lines.push("Buffer Cache: N/A".to_string());
         }
-        if let Some(codec) = &self.video_codec {
-            lines.push(format!("Video: {codec}"));
-        }
-        if let Some(codec) = &self.audio_codec {
-            lines.push(format!("Audio: {codec}"));
-        }
-        if let Some(decoder) = &self.decoder {
-            lines.push(format!("Decoder: {decoder}"));
-        }
-        if let Some(hwdec) = &self.hwdec {
-            lines.push(format!("Hardware decode: {hwdec}"));
-        }
-        if let Some(vo) = &self.vo {
-            lines.push(format!("Video output: {vo}"));
-        }
+
         if let Some(fps) = self.container_fps {
-            lines.push(format!("Container FPS: {fps:.3}"));
+            lines.push(format!("Container FPS: {fps:.2}"));
+        } else {
+            lines.push("Container FPS: N/A".to_string());
         }
+
         if let Some(bitrate) = self.video_bitrate {
-            lines.push(format!("Video bitrate: {:.0} kbit/s", bitrate / 1000.0));
+            lines.push(format!("Video Bitrate: {:.0} kbit/s", bitrate / 1000.0));
+        } else {
+            lines.push("Video Bitrate: N/A".to_string());
         }
-        if let Some(dropped) = self.dropped_frames {
-            lines.push(format!("Dropped frames: {dropped}"));
-        }
+
+        let dropped = self.dropped_frames.unwrap_or(0);
+        lines.push(format!("Dropped Frames: {dropped}"));
+
         if let Some(pixelformat) = &self.pixelformat {
             lines.push(format!("Pixel format: {pixelformat}"));
         }
+
         if let (Some(primaries), Some(gamma)) = (&self.color_primaries, &self.gamma) {
-            lines.push(format!("Color: {primaries} / {gamma}"));
+            lines.push(format!("Color: {primaries} / {gamma} (SDR mapped)"));
         }
+
+        if let Some(vo) = &self.vo {
+            lines.push(format!("Video Output: {vo}"));
+        }
+
         if let Some(format) = &self.file_format {
             lines.push(format!("Container: {format}"));
         }
@@ -178,6 +249,9 @@ impl Player {
             ("audio-client-name", "Adult Hub Desktop"),
             ("title", "Adult Hub Desktop"),
             ("msg-level", "all=warn"),
+            ("tone-mapping", "auto"),
+            ("target-colorspace-hint", "no"),
+            ("target-trc", "srgb"),
         ] {
             if let Err(error) = unsafe { set_option_raw(&api, handle, name, value) } {
                 unsafe { (api.mpv_terminate_destroy)(handle) };
@@ -359,9 +433,28 @@ impl Player {
         )
     }
 
+    pub fn set_buffer_profile(&self, profile: BufferProfile) -> Result<()> {
+        self.set_property_string("demuxer-max-bytes", profile.demuxer_max_bytes())?;
+        self.set_property_string("demuxer-max-back-bytes", profile.demuxer_max_back_bytes())?;
+        self.set_property_string("demuxer-readahead-secs", profile.demuxer_readahead_secs())?;
+        Ok(())
+    }
+
+    pub fn set_hwdec(&self, hwdec: &str) -> Result<()> {
+        self.set_property_string("hwdec", hwdec)
+    }
+
+    pub fn current_hwdec(&self) -> Option<String> {
+        self.get_string("hwdec-current")
+            .or_else(|| self.get_string("hwdec"))
+    }
+
     pub fn stats(&self) -> PlaybackStats {
         let width = self.get_u32("width");
         let height = self.get_u32("height");
+        let cache_duration_secs = self.get_f64("demuxer-cache-duration");
+        let paused_for_cache = self.get_string("paused-for-cache").as_deref() == Some("yes");
+
         PlaybackStats {
             video_codec: self.get_string("video-codec"),
             audio_codec: self.get_string("audio-codec-name"),
@@ -379,6 +472,8 @@ impl Player {
             gamma: self.get_string("video-params/gamma"),
             pixelformat: self.get_string("video-params/pixelformat"),
             vo: self.get_string("current-vo"),
+            cache_duration_secs,
+            paused_for_cache,
         }
     }
 
@@ -858,7 +953,10 @@ mod tests {
     #[test]
     fn stats_hud_text_formatting() {
         let empty = PlaybackStats::default();
-        assert_eq!(empty.to_hud_text(), "");
+        let empty_hud = empty.to_hud_text();
+        assert!(empty_hud.contains("Resolution: Unknown"));
+        assert!(empty_hud.contains("Buffer Cache: N/A"));
+        assert!(empty_hud.contains("Container FPS: N/A"));
 
         let populated = PlaybackStats {
             width: Some(1920),
@@ -875,20 +973,44 @@ mod tests {
             color_primaries: Some("bt709".into()),
             gamma: Some("bt709".into()),
             file_format: Some("mp4".into()),
+            cache_duration_secs: Some(14.5),
+            paused_for_cache: false,
         };
         let hud = populated.to_hud_text();
         assert!(hud.contains("Resolution: 1920x1080"));
-        assert!(hud.contains("Video: h264"));
-        assert!(hud.contains("Audio: aac"));
-        assert!(hud.contains("Decoder: h264_vaapi"));
-        assert!(hud.contains("Hardware decode: vaapi"));
-        assert!(hud.contains("Video output: gpu"));
-        assert!(hud.contains("Container FPS: 60.000"));
-        assert!(hud.contains("Video bitrate: 5000 kbit/s"));
-        assert!(hud.contains("Dropped frames: 2"));
+        assert!(hud.contains("Video Codec: h264"));
+        assert!(hud.contains("Audio Codec: aac"));
+        assert!(hud.contains("Decoder: h264_vaapi (HW: vaapi)"));
+        assert!(hud.contains("Buffer Cache: 14.5 s"));
+        assert!(hud.contains("Container FPS: 60.00"));
+        assert!(hud.contains("Video Bitrate: 5000 kbit/s"));
+        assert!(hud.contains("Dropped Frames: 2"));
         assert!(hud.contains("Pixel format: yuv420p"));
-        assert!(hud.contains("Color: bt709 / bt709"));
+        assert!(hud.contains("Color: bt709 / bt709 (SDR mapped)"));
         assert!(hud.contains("Container: mp4"));
+    }
+
+    #[test]
+    fn buffer_profile_parameters() {
+        let fast = BufferProfile::FastStart;
+        assert_eq!(fast.name(), "Fast Start");
+        assert_eq!(fast.demuxer_max_bytes(), "16M");
+        assert_eq!(fast.demuxer_readahead_secs(), "5");
+
+        let std = BufferProfile::Standard;
+        assert_eq!(std.name(), "Standard");
+        assert_eq!(std.demuxer_max_bytes(), "64M");
+        assert_eq!(std.demuxer_readahead_secs(), "20");
+
+        let large = BufferProfile::Large;
+        assert_eq!(large.name(), "Large");
+        assert_eq!(large.demuxer_max_bytes(), "150M");
+        assert_eq!(large.demuxer_readahead_secs(), "60");
+
+        let low = BufferProfile::LowMemory;
+        assert_eq!(low.name(), "Low-Memory");
+        assert_eq!(low.demuxer_max_bytes(), "8M");
+        assert_eq!(low.demuxer_readahead_secs(), "3");
     }
 
     #[test]

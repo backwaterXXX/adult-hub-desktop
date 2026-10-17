@@ -12,6 +12,7 @@ adult-hub-client = { path = "../client" }
 adult-hub-storage = { path = "../storage" }
 glow.workspace = true
 slint.workspace = true
+uuid.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 rfd = { version = "0.17", default-features = false }

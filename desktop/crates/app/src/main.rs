@@ -1,18 +1,23 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![allow(clippy::too_many_arguments)]
 
 mod renderer;
+mod reporter;
+mod session;
 
 use adult_hub_client::{
     GetItemsQuery, JellyfinClient, ResolverClient, ServiceUrlPolicy, ServiceUrlValidation, TvItem,
 };
-use adult_hub_player::{PlaybackStats, Player, parse_header};
+use adult_hub_player::{BufferProfile, PlaybackStats, Player, parse_header};
 use adult_hub_storage::{CredentialStore, LocalStore, Session, default_db_path};
+use reporter::PlaybackReporter;
+use session::PlaybackSessionController;
 use slint::{Timer, TimerMode};
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 slint::include_modules!();
@@ -102,8 +107,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| "desktop-device-default".to_string());
     let jellyfin = Arc::new(JellyfinClient::new(device_id));
     let resolver = Arc::new(ResolverClient::new());
+    let reporter = Arc::new(PlaybackReporter::new(jellyfin.clone()));
+    let session_ctrl = Arc::new(PlaybackSessionController::new(local_store.clone()));
 
-    install_controls(&ui, player.clone(), options.headers.clone());
+    let current_playing_item: Arc<Mutex<Option<TvItem>>> = Arc::new(Mutex::new(None));
+    let cached_catalog: Arc<Mutex<Vec<TvItem>>> = Arc::new(Mutex::new(sample_catalog_tv_items()));
+    let autoplay_active = Arc::new(AtomicBool::new(false));
+    let hwdec_active = Arc::new(AtomicBool::new(true));
+
+    install_controls(
+        &ui,
+        player.clone(),
+        options.headers.clone(),
+        autoplay_active.clone(),
+        hwdec_active.clone(),
+        reporter.clone(),
+        session_ctrl.clone(),
+        current_playing_item.clone(),
+        cached_catalog.clone(),
+        credential_store.clone(),
+        local_store.clone(),
+        jellyfin.clone(),
+    );
     install_fullscreen(&ui);
     install_stage2_handlers(
         &ui,
@@ -113,31 +138,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         credential_store.clone(),
         jellyfin.clone(),
         resolver.clone(),
+        reporter.clone(),
+        session_ctrl.clone(),
+        current_playing_item.clone(),
+        cached_catalog.clone(),
     );
 
     // Initial session restore & catalog population
     if let Ok(Some(session)) = local_store.load_session() {
         let _ = credential_store.save(session.clone());
+        reporter.set_auth(
+            Some(session.server_url.clone()),
+            Some(session.access_token.clone()),
+        );
         ui.set_is_logged_in(true);
         ui.set_logged_in_user(session.username.clone().into());
         ui.set_server_url_input(session.server_url.clone().into());
 
         let weak = ui.as_weak();
         let jf = jellyfin.clone();
+        let catalog_ref = cached_catalog.clone();
         std::thread::spawn(move || {
-            let items = jf
-                .get_latest_items(
-                    &session.server_url,
-                    &session.user_id,
-                    &session.access_token,
-                    None,
-                    50,
-                )
-                .map(|list| list.iter().map(tv_item_to_card).collect::<Vec<_>>())
-                .unwrap_or_else(|_| sample_catalog_items());
+            let (cards, raw_items) = match jf.get_latest_items(
+                &session.server_url,
+                &session.user_id,
+                &session.access_token,
+                None,
+                50,
+            ) {
+                Ok(list) => {
+                    let cards = list.iter().map(tv_item_to_card).collect::<Vec<_>>();
+                    (cards, list)
+                }
+                Err(_) => (sample_catalog_items(), sample_catalog_tv_items()),
+            };
+            *catalog_ref.lock().unwrap() = raw_items;
             slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {
-                    set_catalog(&ui, items);
+                    set_catalog(&ui, cards);
                 }
             })
             .ok();
@@ -152,8 +190,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let (Some(player), Some(initial)) = (&player, initial_media(&options)) {
-        load_media(&ui, player, &initial, &options.headers);
-        ui.set_url_text(initial.into());
+        if initial.ends_with("sample.mp4") {
+            let sample_item = sample_catalog_tv_items()[0].clone();
+            start_item_playback(
+                &ui,
+                player,
+                sample_item,
+                &options.headers,
+                &credential_store,
+                &local_store,
+                &jellyfin,
+                &reporter,
+                &session_ctrl,
+                &current_playing_item,
+            );
+        } else {
+            load_media(&ui, player, &initial, &options.headers);
+            ui.set_url_text(initial.into());
+        }
         if options.url.is_some() {
             ui.set_active_screen("player".into());
         }
@@ -161,7 +215,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.set_status("Ready.".into());
     }
 
-    install_polling(&ui, player.clone(), frame_pending);
+    install_polling(
+        &ui,
+        player.clone(),
+        frame_pending,
+        reporter.clone(),
+        session_ctrl.clone(),
+        current_playing_item.clone(),
+        cached_catalog.clone(),
+        autoplay_active.clone(),
+        hwdec_active.clone(),
+        options.headers.clone(),
+        credential_store.clone(),
+        local_store.clone(),
+        jellyfin.clone(),
+    );
 
     ui.show()?;
     ui.run()?;
@@ -186,10 +254,175 @@ fn media_beside_executable(name: &str) -> Option<String> {
         .then(|| candidate.to_string_lossy().into_owned())
 }
 
-fn install_controls(ui: &MainWindow, player: Option<Rc<Player>>, headers: Vec<String>) {
+fn start_item_playback(
+    ui: &MainWindow,
+    player: &Player,
+    item: TvItem,
+    headers: &[String],
+    credential_store: &Arc<CredentialStore>,
+    local_store: &Arc<LocalStore>,
+    jellyfin: &Arc<JellyfinClient>,
+    reporter: &Arc<PlaybackReporter>,
+    session_ctrl: &Arc<PlaybackSessionController>,
+    current_item: &Arc<Mutex<Option<TvItem>>>,
+) {
+    let _req_id = session_ctrl.next_request_id();
+
+    // 1. Persist outgoing video's progress and stop session
+    if let Some(prev) = current_item.lock().unwrap().take() {
+        let pos = (player.position().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
+        let dur = (player.duration().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
+        session_ctrl.checkpoint_progress(&prev, pos, dur, false);
+        reporter.stop_session(pos);
+    }
+
+    // 2. Resolve stream URL
+    let session = credential_store.get().ok().flatten();
+    let resolver_url = local_store
+        .get_setting("resolver_url")
+        .ok()
+        .flatten()
+        .or_else(|| session.as_ref().map(|s| s.server_url.clone()));
+
+    let (stream_url, play_method) = match PlaybackSessionController::resolve_stream_url(
+        &item,
+        session.as_ref().map(|s| s.server_url.as_str()),
+        resolver_url.as_deref(),
+    ) {
+        Ok(res) => res,
+        Err(err) => {
+            show_error(ui, err);
+            return;
+        }
+    };
+
+    let mut stream_headers = headers.to_vec();
+    if !item.is_telegram() {
+        if let Some(sess) = &session {
+            stream_headers.extend(jellyfin.stream_headers(Some(&sess.access_token)));
+        }
+    }
+
+    // 3. Determine resume position
+    let duration_ms = item.runtime_ticks.map(|t| (t / 10_000) as u64).unwrap_or(0);
+    let mut start_pos_secs = 0.0;
+    ui.set_resume_prompt_visible(false);
+
+    if item.is_telegram() {
+        let prov_id = item
+            .provider_video_id
+            .as_deref()
+            .or_else(|| item.id.strip_prefix("telegram:"))
+            .unwrap_or(&item.id);
+        if let Some(resume_ms) = session_ctrl.get_telegram_resume_position(prov_id) {
+            if PlaybackSessionController::should_prompt_resume(resume_ms, duration_ms) {
+                ui.set_resume_prompt_position((resume_ms as f32) / 1000.0);
+                ui.set_resume_prompt_time(format_time(resume_ms as f64 / 1000.0).into());
+                ui.set_resume_prompt_visible(true);
+            }
+        }
+    } else {
+        let resume_ms = (item.playback_position_ticks / 10_000).max(0) as u64;
+        if PlaybackSessionController::should_prompt_resume(resume_ms, duration_ms) {
+            start_pos_secs = resume_ms as f64 / 1000.0;
+        }
+    }
+
+    // 4. Update UI & current item
+    *current_item.lock().unwrap() = Some(item.clone());
+    ui.set_url_text(stream_url.clone().into());
+    ui.set_status(format!("Loading: {}", item.title).into());
+    ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
+    ui.set_active_screen("player".into());
+
+    // 5. Start player & session reporting
+    let start_pos_opt = if start_pos_secs > 0.0 {
+        Some(start_pos_secs)
+    } else {
+        None
+    };
+    let path = resolve_media_input(&stream_url);
+    if let Err(e) = player.load_with_start(&path, &stream_headers, start_pos_opt) {
+        show_error(ui, e.to_string());
+        return;
+    }
+
+    reporter.start_session(
+        &item.id,
+        item.media_source_id.clone(),
+        None,
+        play_method,
+        (start_pos_secs * 1000.0) as u64,
+    );
+}
+
+fn play_random_catalog_item(
+    ui: &MainWindow,
+    player: &Player,
+    headers: &[String],
+    credential_store: &Arc<CredentialStore>,
+    local_store: &Arc<LocalStore>,
+    jellyfin: &Arc<JellyfinClient>,
+    reporter: &Arc<PlaybackReporter>,
+    session_ctrl: &Arc<PlaybackSessionController>,
+    current_item: &Arc<Mutex<Option<TvItem>>>,
+    cached_catalog: &Arc<Mutex<Vec<TvItem>>>,
+) {
+    let items = cached_catalog.lock().unwrap().clone();
+    if items.is_empty() {
+        show_error(ui, "No catalog items available for random playback");
+        return;
+    }
+    let current_id = current_item
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|i| i.id.clone())
+        .unwrap_or_default();
+    let candidates: Vec<&TvItem> = items.iter().filter(|i| i.id != current_id).collect();
+    let target = if !candidates.is_empty() {
+        let idx = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_millis() as usize
+            % candidates.len();
+        candidates[idx].clone()
+    } else {
+        items[0].clone()
+    };
+
+    start_item_playback(
+        ui,
+        player,
+        target,
+        headers,
+        credential_store,
+        local_store,
+        jellyfin,
+        reporter,
+        session_ctrl,
+        current_item,
+    );
+}
+
+fn install_controls(
+    ui: &MainWindow,
+    player: Option<Rc<Player>>,
+    headers: Vec<String>,
+    autoplay_active: Arc<AtomicBool>,
+    hwdec_active: Arc<AtomicBool>,
+    reporter: Arc<PlaybackReporter>,
+    session_ctrl: Arc<PlaybackSessionController>,
+    current_item: Arc<Mutex<Option<TvItem>>>,
+    cached_catalog: Arc<Mutex<Vec<TvItem>>>,
+    credential_store: Arc<CredentialStore>,
+    local_store: Arc<LocalStore>,
+    jellyfin: Arc<JellyfinClient>,
+) {
     {
         let weak = ui.as_weak();
         let player = player.clone();
+        let reporter = reporter.clone();
         ui.on_toggle_play(move || {
             let Some(ui) = weak.upgrade() else { return };
             let Some(player) = &player else {
@@ -197,7 +430,11 @@ fn install_controls(ui: &MainWindow, player: Option<Rc<Player>>, headers: Vec<St
                 return;
             };
             match player.toggle_pause() {
-                Ok(paused) => ui.set_playing(!paused),
+                Ok(paused) => {
+                    ui.set_playing(!paused);
+                    let pos_ms = (player.position().unwrap_or(0.0) * 1000.0) as u64;
+                    reporter.report_progress_now(pos_ms, paused);
+                }
                 Err(error) => show_error(&ui, error.to_string()),
             }
         });
@@ -206,11 +443,15 @@ fn install_controls(ui: &MainWindow, player: Option<Rc<Player>>, headers: Vec<St
     {
         let weak = ui.as_weak();
         let player = player.clone();
+        let reporter = reporter.clone();
         ui.on_seek_to(move |seconds| {
             let Some(ui) = weak.upgrade() else { return };
             let Some(player) = &player else { return };
             if let Err(error) = player.seek_absolute(seconds as f64) {
                 show_error(&ui, error.to_string());
+            } else {
+                let pos_ms = (seconds as f64 * 1000.0) as u64;
+                reporter.report_progress_now(pos_ms, player.is_paused());
             }
         });
     }
@@ -218,11 +459,15 @@ fn install_controls(ui: &MainWindow, player: Option<Rc<Player>>, headers: Vec<St
     {
         let weak = ui.as_weak();
         let player = player.clone();
+        let reporter = reporter.clone();
         ui.on_seek_relative(move |seconds| {
             let Some(ui) = weak.upgrade() else { return };
             let Some(player) = &player else { return };
             if let Err(error) = player.seek_relative(seconds as f64) {
                 show_error(&ui, error.to_string());
+            } else {
+                let pos_ms = (player.position().unwrap_or(0.0) * 1000.0) as u64;
+                reporter.report_progress_now(pos_ms, player.is_paused());
             }
         });
     }
@@ -246,6 +491,12 @@ fn install_controls(ui: &MainWindow, player: Option<Rc<Player>>, headers: Vec<St
         let weak = ui.as_weak();
         let player = player.clone();
         let headers = headers.clone();
+        let credential_store = credential_store.clone();
+        let local_store = local_store.clone();
+        let jellyfin = jellyfin.clone();
+        let reporter = reporter.clone();
+        let session_ctrl = session_ctrl.clone();
+        let current_item = current_item.clone();
         ui.on_load_url(move |text| {
             let Some(ui) = weak.upgrade() else { return };
             let Some(player) = &player else {
@@ -257,9 +508,49 @@ fn install_controls(ui: &MainWindow, player: Option<Rc<Player>>, headers: Vec<St
                 show_error(&ui, "Enter a media URL or file path first");
                 return;
             }
-            ui.set_url_text(text.clone().into());
-            load_media(&ui, player, &text, &headers);
-            ui.set_active_screen("player".into());
+            let custom_item = TvItem {
+                id: text.clone(),
+                title: Path::new(&text)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "Media".into()),
+                overview: None,
+                year: None,
+                runtime_ticks: None,
+                genres: vec![],
+                tags: vec![],
+                studios: vec![],
+                people: vec![],
+                primary_image_tag: None,
+                backdrop_image_tag: None,
+                thumb_image_tag: None,
+                is_favorite: false,
+                playback_position_ticks: 0,
+                played_percentage: None,
+                is_played: false,
+                provider_video_id: if text.starts_with("telegram:") {
+                    Some(text.replace("telegram:", ""))
+                } else {
+                    None
+                },
+                media_source_id: None,
+                container: None,
+                file_size_bytes: None,
+                width: None,
+                height: None,
+            };
+            start_item_playback(
+                &ui,
+                player,
+                custom_item,
+                &headers,
+                &credential_store,
+                &local_store,
+                &jellyfin,
+                &reporter,
+                &session_ctrl,
+                &current_item,
+            );
         });
     }
 
@@ -267,17 +558,28 @@ fn install_controls(ui: &MainWindow, player: Option<Rc<Player>>, headers: Vec<St
         let weak = ui.as_weak();
         let player = player.clone();
         let headers = headers.clone();
+        let credential_store = credential_store.clone();
+        let local_store = local_store.clone();
+        let jellyfin = jellyfin.clone();
+        let reporter = reporter.clone();
+        let session_ctrl = session_ctrl.clone();
+        let current_item = current_item.clone();
         ui.on_load_sample(move || {
             let Some(ui) = weak.upgrade() else { return };
             let Some(player) = &player else { return };
-            match media_beside_executable("sample.mp4") {
-                Some(path) => {
-                    ui.set_url_text(path.clone().into());
-                    load_media(&ui, player, &path, &headers);
-                    ui.set_active_screen("player".into());
-                }
-                None => show_error(&ui, "sample.mp4 was not found next to the executable"),
-            }
+            let sample_item = sample_catalog_tv_items()[0].clone();
+            start_item_playback(
+                &ui,
+                player,
+                sample_item,
+                &headers,
+                &credential_store,
+                &local_store,
+                &jellyfin,
+                &reporter,
+                &session_ctrl,
+                &current_item,
+            );
         });
     }
 
@@ -285,14 +587,56 @@ fn install_controls(ui: &MainWindow, player: Option<Rc<Player>>, headers: Vec<St
         let weak = ui.as_weak();
         let player = player.clone();
         let headers = headers.clone();
+        let credential_store = credential_store.clone();
+        let local_store = local_store.clone();
+        let jellyfin = jellyfin.clone();
+        let reporter = reporter.clone();
+        let session_ctrl = session_ctrl.clone();
+        let current_item = current_item.clone();
         ui.on_open_file(move || {
             let Some(ui) = weak.upgrade() else { return };
             let Some(player) = &player else { return };
             match pick_media_file() {
                 Some(path) => {
-                    ui.set_url_text(path.clone().into());
-                    load_media(&ui, player, &path, &headers);
-                    ui.set_active_screen("player".into());
+                    let local_item = TvItem {
+                        id: path.clone(),
+                        title: Path::new(&path)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| "Local Video".into()),
+                        overview: None,
+                        year: None,
+                        runtime_ticks: None,
+                        genres: vec![],
+                        tags: vec![],
+                        studios: vec![],
+                        people: vec![],
+                        primary_image_tag: None,
+                        backdrop_image_tag: None,
+                        thumb_image_tag: None,
+                        is_favorite: false,
+                        playback_position_ticks: 0,
+                        played_percentage: None,
+                        is_played: false,
+                        provider_video_id: None,
+                        media_source_id: None,
+                        container: None,
+                        file_size_bytes: None,
+                        width: None,
+                        height: None,
+                    };
+                    start_item_playback(
+                        &ui,
+                        player,
+                        local_item,
+                        &headers,
+                        &credential_store,
+                        &local_store,
+                        &jellyfin,
+                        &reporter,
+                        &session_ctrl,
+                        &current_item,
+                    );
                 }
                 None => {
                     if !cfg!(windows) {
@@ -352,6 +696,132 @@ fn install_controls(ui: &MainWindow, player: Option<Rc<Player>>, headers: Vec<St
             ui.set_muted(muted);
         });
     }
+
+    // Stage 3 Playback Controls
+    {
+        let weak = ui.as_weak();
+        let player = player.clone();
+        const SPEEDS: [f64; 4] = [1.0, 1.25, 1.5, 2.0];
+        let speed_idx = Rc::new(Cell::new(0usize));
+        ui.on_cycle_speed(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let Some(player) = &player else { return };
+            let next = (speed_idx.get() + 1) % SPEEDS.len();
+            speed_idx.set(next);
+            let speed = SPEEDS[next];
+            if let Err(error) = player.set_speed(speed) {
+                show_error(&ui, error.to_string());
+            } else {
+                ui.set_speed_label(format!("{speed:.2}x").into());
+            }
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let player = player.clone();
+        const PROFILES: [BufferProfile; 4] = [
+            BufferProfile::Standard,
+            BufferProfile::FastStart,
+            BufferProfile::Large,
+            BufferProfile::LowMemory,
+        ];
+        let prof_idx = Rc::new(Cell::new(0usize));
+        ui.on_cycle_buffer_profile(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let Some(player) = &player else { return };
+            let next = (prof_idx.get() + 1) % PROFILES.len();
+            prof_idx.set(next);
+            let profile = PROFILES[next];
+            if let Err(error) = player.set_buffer_profile(profile) {
+                show_error(&ui, error.to_string());
+            } else {
+                ui.set_buffer_profile_label(format!("Buffer: {}", profile.name()).into());
+            }
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let player = player.clone();
+        let hwdec_active = hwdec_active.clone();
+        ui.on_toggle_hwdec(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let Some(player) = &player else { return };
+            let active = !hwdec_active.load(Ordering::SeqCst);
+            hwdec_active.store(active, Ordering::SeqCst);
+            let mode = if active { "auto-safe" } else { "no" };
+            if let Err(error) = player.set_hwdec(mode) {
+                show_error(&ui, error.to_string());
+            } else {
+                ui.set_hwdec_active(active);
+                ui.set_status(format!("Decoder mode: {mode}").into());
+            }
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let autoplay_active = autoplay_active.clone();
+        ui.on_toggle_autoplay(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let active = !autoplay_active.load(Ordering::SeqCst);
+            autoplay_active.store(active, Ordering::SeqCst);
+            ui.set_autoplay_active(active);
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let player = player.clone();
+        let headers = headers.clone();
+        let credential_store = credential_store.clone();
+        let local_store = local_store.clone();
+        let jellyfin = jellyfin.clone();
+        let reporter = reporter.clone();
+        let session_ctrl = session_ctrl.clone();
+        let current_item = current_item.clone();
+        let cached_catalog = cached_catalog.clone();
+        ui.on_play_random(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let Some(player) = &player else { return };
+            play_random_catalog_item(
+                &ui,
+                player,
+                &headers,
+                &credential_store,
+                &local_store,
+                &jellyfin,
+                &reporter,
+                &session_ctrl,
+                &current_item,
+                &cached_catalog,
+            );
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let player = player.clone();
+        ui.on_accept_resume(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let Some(player) = &player else { return };
+            let pos = ui.get_resume_prompt_position();
+            ui.set_resume_prompt_visible(false);
+            let _ = player.seek_absolute(pos as f64);
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let player = player.clone();
+        ui.on_reject_resume(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let Some(player) = &player else { return };
+            ui.set_resume_prompt_visible(false);
+            let _ = player.seek_absolute(0.0);
+        });
+    }
 }
 
 fn install_fullscreen(ui: &MainWindow) {
@@ -381,33 +851,88 @@ fn install_fullscreen(ui: &MainWindow) {
     }
 }
 
-fn sample_catalog_items() -> Vec<VideoCardData> {
+fn sample_catalog_tv_items() -> Vec<TvItem> {
     vec![
-        VideoCardData {
+        TvItem {
             id: "sample".into(),
             title: "Local Demo Sample (1080p)".into(),
-            duration: "0:10".into(),
-            year: "2026".into(),
+            overview: Some("Local MP4 test sample".into()),
+            year: Some(2026),
+            runtime_ticks: Some(100_000_000), // 10s
+            genres: vec!["Sample".into()],
+            tags: vec![],
+            studios: vec!["Local".into()],
+            people: vec![],
+            primary_image_tag: None,
+            backdrop_image_tag: None,
+            thumb_image_tag: None,
+            is_favorite: false,
+            playback_position_ticks: 0,
+            played_percentage: None,
             is_played: false,
-            provider: "local".into(),
+            provider_video_id: None,
+            media_source_id: None,
+            container: Some("mp4".into()),
+            file_size_bytes: Some(120_000),
+            width: Some(1920),
+            height: Some(1080),
         },
-        VideoCardData {
+        TvItem {
             id: "telegram:demo_channel:101".into(),
             title: "Channel Highlight #101".into(),
-            duration: "14:22".into(),
-            year: "2026".into(),
+            overview: Some("Exclusive channel video".into()),
+            year: Some(2026),
+            runtime_ticks: Some(8_620_000_000), // 14m 22s = 862s
+            genres: vec!["Channel".into()],
+            tags: vec![],
+            studios: vec!["Channel Studios".into()],
+            people: vec![],
+            primary_image_tag: None,
+            backdrop_image_tag: None,
+            thumb_image_tag: None,
+            is_favorite: false,
+            playback_position_ticks: 0,
+            played_percentage: None,
             is_played: false,
-            provider: "telegram".into(),
+            provider_video_id: Some("demo_channel:101".into()),
+            media_source_id: None,
+            container: Some("mp4".into()),
+            file_size_bytes: Some(450_000_000),
+            width: Some(1920),
+            height: Some(1080),
         },
-        VideoCardData {
+        TvItem {
             id: "telegram:demo_channel:102".into(),
             title: "Exclusive Scene #102".into(),
-            duration: "25:40".into(),
-            year: "2026".into(),
+            overview: Some("Scene clip".into()),
+            year: Some(2026),
+            runtime_ticks: Some(15_400_000_000), // 25m 40s
+            genres: vec!["Exclusive".into()],
+            tags: vec![],
+            studios: vec!["Channel Studios".into()],
+            people: vec![],
+            primary_image_tag: None,
+            backdrop_image_tag: None,
+            thumb_image_tag: None,
+            is_favorite: true,
+            playback_position_ticks: 0,
+            played_percentage: None,
             is_played: true,
-            provider: "telegram".into(),
+            provider_video_id: Some("demo_channel:102".into()),
+            media_source_id: None,
+            container: Some("mp4".into()),
+            file_size_bytes: Some(850_000_000),
+            width: Some(1920),
+            height: Some(1080),
         },
     ]
+}
+
+fn sample_catalog_items() -> Vec<VideoCardData> {
+    sample_catalog_tv_items()
+        .iter()
+        .map(tv_item_to_card)
+        .collect()
 }
 
 fn sample_channel_items() -> Vec<VideoCardData> {
@@ -441,6 +966,8 @@ fn tv_item_to_card(item: &TvItem) -> VideoCardData {
     let duration_str = item.formatted_duration();
     let provider = if item.is_telegram() {
         "telegram".to_string()
+    } else if item.id == "sample" || item.id.starts_with('/') || item.id.contains(":\\") {
+        "local".to_string()
     } else {
         "jellyfin".to_string()
     };
@@ -462,6 +989,10 @@ fn install_stage2_handlers(
     credential_store: Arc<CredentialStore>,
     jellyfin: Arc<JellyfinClient>,
     resolver: Arc<ResolverClient>,
+    reporter: Arc<PlaybackReporter>,
+    session_ctrl: Arc<PlaybackSessionController>,
+    current_item: Arc<Mutex<Option<TvItem>>>,
+    cached_catalog: Arc<Mutex<Vec<TvItem>>>,
 ) {
     // 1. Screen switching
     {
@@ -478,6 +1009,8 @@ fn install_stage2_handlers(
         let jellyfin = jellyfin.clone();
         let local_store = local_store.clone();
         let credential_store = credential_store.clone();
+        let reporter = reporter.clone();
+        let cached_catalog = cached_catalog.clone();
         ui.on_perform_login(move |server_url, username, password| {
             let Some(ui) = weak.upgrade() else { return };
             let server_url = server_url.trim().to_string();
@@ -496,6 +1029,8 @@ fn install_stage2_handlers(
                     let jellyfin = jellyfin.clone();
                     let local_store = local_store.clone();
                     let credential_store = credential_store.clone();
+                    let reporter = reporter.clone();
+                    let cached_catalog = cached_catalog.clone();
                     ui.set_status("Connecting to server...".into());
                     ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
 
@@ -514,26 +1049,33 @@ fn install_stage2_handlers(
                                 };
                                 let _ = local_store.save_session(&session);
                                 let _ = credential_store.save(session.clone());
+                                reporter.set_auth(
+                                    Some(session.server_url.clone()),
+                                    Some(session.access_token.clone()),
+                                );
 
-                                let items = jellyfin
-                                    .get_latest_items(
-                                        &normalized,
-                                        &session.user_id,
-                                        &session.access_token,
-                                        None,
-                                        50,
-                                    )
-                                    .map(|list| {
-                                        list.iter().map(tv_item_to_card).collect::<Vec<_>>()
-                                    })
-                                    .unwrap_or_else(|_| sample_catalog_items());
+                                let (cards, raw_items) = match jellyfin.get_latest_items(
+                                    &normalized,
+                                    &session.user_id,
+                                    &session.access_token,
+                                    None,
+                                    50,
+                                ) {
+                                    Ok(list) => {
+                                        let cards =
+                                            list.iter().map(tv_item_to_card).collect::<Vec<_>>();
+                                        (cards, list)
+                                    }
+                                    Err(_) => (sample_catalog_items(), sample_catalog_tv_items()),
+                                };
+                                *cached_catalog.lock().unwrap() = raw_items;
 
                                 slint::invoke_from_event_loop(move || {
                                     let Some(ui) = weak.upgrade() else { return };
                                     ui.set_is_logged_in(true);
                                     ui.set_logged_in_user(session.username.into());
                                     ui.set_server_url_input(session.server_url.into());
-                                    set_catalog(&ui, items);
+                                    set_catalog(&ui, cards);
                                     ui.set_status("Logged in successfully".into());
                                     ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
                                     ui.set_active_screen("browse".into());
@@ -562,10 +1104,14 @@ fn install_stage2_handlers(
         let weak = ui.as_weak();
         let local_store = local_store.clone();
         let credential_store = credential_store.clone();
+        let reporter = reporter.clone();
+        let cached_catalog = cached_catalog.clone();
         ui.on_perform_logout(move || {
             let Some(ui) = weak.upgrade() else { return };
             let _ = local_store.clear_session();
             let _ = credential_store.clear();
+            reporter.set_auth(None, None);
+            *cached_catalog.lock().unwrap() = sample_catalog_tv_items();
             ui.set_is_logged_in(false);
             ui.set_logged_in_user("".into());
             set_catalog(&ui, sample_catalog_items());
@@ -581,6 +1127,8 @@ fn install_stage2_handlers(
         let jellyfin = jellyfin.clone();
         let local_store = local_store.clone();
         let credential_store = credential_store.clone();
+        let reporter = reporter.clone();
+        let cached_catalog = cached_catalog.clone();
         let qc_running = qc_running.clone();
         ui.on_start_quick_connect(move || {
             let Some(ui) = weak.upgrade() else { return };
@@ -603,6 +1151,8 @@ fn install_stage2_handlers(
             let jellyfin = jellyfin.clone();
             let local_store = local_store.clone();
             let credential_store = credential_store.clone();
+            let reporter = reporter.clone();
+            let cached_catalog = cached_catalog.clone();
 
             ui.set_status("Requesting Quick Connect code...".into());
             ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
@@ -655,19 +1205,30 @@ fn install_stage2_handlers(
                                     };
                                     let _ = local_store.save_session(&session);
                                     let _ = credential_store.save(session.clone());
+                                    reporter.set_auth(
+                                        Some(session.server_url.clone()),
+                                        Some(session.access_token.clone()),
+                                    );
 
-                                    let items = jellyfin
-                                        .get_latest_items(
-                                            &normalized,
-                                            &session.user_id,
-                                            &session.access_token,
-                                            None,
-                                            50,
-                                        )
-                                        .map(|list| {
-                                            list.iter().map(tv_item_to_card).collect::<Vec<_>>()
-                                        })
-                                        .unwrap_or_else(|_| sample_catalog_items());
+                                    let (cards, raw_items) = match jellyfin.get_latest_items(
+                                        &normalized,
+                                        &session.user_id,
+                                        &session.access_token,
+                                        None,
+                                        50,
+                                    ) {
+                                        Ok(list) => {
+                                            let cards = list
+                                                .iter()
+                                                .map(tv_item_to_card)
+                                                .collect::<Vec<_>>();
+                                            (cards, list)
+                                        }
+                                        Err(_) => {
+                                            (sample_catalog_items(), sample_catalog_tv_items())
+                                        }
+                                    };
+                                    *cached_catalog.lock().unwrap() = raw_items;
 
                                     let w = weak.clone();
                                     slint::invoke_from_event_loop(move || {
@@ -675,7 +1236,7 @@ fn install_stage2_handlers(
                                             ui.set_quick_connect_code("".into());
                                             ui.set_is_logged_in(true);
                                             ui.set_logged_in_user(session.username.into());
-                                            set_catalog(&ui, items);
+                                            set_catalog(&ui, cards);
                                             ui.set_status("Quick Connect authenticated!".into());
                                             ui.set_status_color(slint::Color::from_rgb_u8(
                                                 140, 200, 160,
@@ -734,6 +1295,7 @@ fn install_stage2_handlers(
         let jellyfin = jellyfin.clone();
         let credential_store = credential_store.clone();
         let local_store = local_store.clone();
+        let cached_catalog = cached_catalog.clone();
         ui.on_search_catalog(move |query| {
             if weak.upgrade().is_none() {
                 return;
@@ -743,6 +1305,7 @@ fn install_stage2_handlers(
             let jellyfin = jellyfin.clone();
             let credential_store = credential_store.clone();
             let local_store = local_store.clone();
+            let cached_catalog = cached_catalog.clone();
 
             std::thread::spawn(move || {
                 if !query.is_empty() {
@@ -750,7 +1313,7 @@ fn install_stage2_handlers(
                 }
 
                 let session = credential_store.get().ok().flatten();
-                let items = if let Some(session) = session {
+                let (cards, raw_items) = if let Some(session) = session {
                     if query.is_empty() {
                         jellyfin
                             .get_latest_items(
@@ -760,8 +1323,8 @@ fn install_stage2_handlers(
                                 None,
                                 50,
                             )
-                            .map(|list| list.iter().map(tv_item_to_card).collect())
-                            .unwrap_or_else(|_| sample_catalog_items())
+                            .map(|list| (list.iter().map(tv_item_to_card).collect(), list))
+                            .unwrap_or_else(|_| (sample_catalog_items(), sample_catalog_tv_items()))
                     } else {
                         let q = GetItemsQuery {
                             parent_id: None,
@@ -778,21 +1341,30 @@ fn install_stage2_handlers(
                                 &session.access_token,
                                 &q,
                             )
-                            .map(|page| page.items.iter().map(tv_item_to_card).collect())
+                            .map(|page| {
+                                (
+                                    page.items.iter().map(tv_item_to_card).collect(),
+                                    page.items,
+                                )
+                            })
                             .unwrap_or_default()
                     }
                 } else if query.is_empty() {
-                    sample_catalog_items()
+                    (sample_catalog_items(), sample_catalog_tv_items())
                 } else {
-                    sample_catalog_items()
+                    let filtered: Vec<TvItem> = sample_catalog_tv_items()
                         .into_iter()
                         .filter(|item| item.title.to_lowercase().contains(&query.to_lowercase()))
-                        .collect()
+                        .collect();
+                    let cards = filtered.iter().map(tv_item_to_card).collect();
+                    (cards, filtered)
                 };
+
+                *cached_catalog.lock().unwrap() = raw_items;
 
                 slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
-                        set_catalog(&ui, items);
+                        set_catalog(&ui, cards);
                     }
                 })
                 .ok();
@@ -805,6 +1377,8 @@ fn install_stage2_handlers(
         let weak = ui.as_weak();
         let jellyfin = jellyfin.clone();
         let credential_store = credential_store.clone();
+        let local_store = local_store.clone();
+        let cached_catalog = cached_catalog.clone();
         let resolver = resolver.clone();
         ui.on_filter_category(move |cat| {
             if weak.upgrade().is_none() {
@@ -814,11 +1388,13 @@ fn install_stage2_handlers(
             let weak = weak.clone();
             let jellyfin = jellyfin.clone();
             let credential_store = credential_store.clone();
+            let local_store = local_store.clone();
+            let cached_catalog = cached_catalog.clone();
             let _resolver = resolver.clone();
 
             std::thread::spawn(move || {
                 let session = credential_store.get().ok().flatten();
-                let items: Vec<VideoCardData> = match cat.as_str() {
+                let (cards, raw_items) = match cat.as_str() {
                     "Latest" => {
                         if let Some(session) = session {
                             jellyfin
@@ -829,14 +1405,16 @@ fn install_stage2_handlers(
                                     None,
                                     50,
                                 )
-                                .map(|list| list.iter().map(tv_item_to_card).collect())
-                                .unwrap_or_else(|_| sample_catalog_items())
+                                .map(|list| (list.iter().map(tv_item_to_card).collect(), list))
+                                .unwrap_or_else(|_| {
+                                    (sample_catalog_items(), sample_catalog_tv_items())
+                                })
                         } else {
-                            sample_catalog_items()
+                            (sample_catalog_items(), sample_catalog_tv_items())
                         }
                     }
                     "Resume" => {
-                        if let Some(session) = session {
+                        let mut resume_items = if let Some(session) = &session {
                             jellyfin
                                 .get_resume_items(
                                     &session.server_url,
@@ -844,26 +1422,85 @@ fn install_stage2_handlers(
                                     &session.access_token,
                                     50,
                                 )
-                                .map(|list| list.iter().map(tv_item_to_card).collect())
                                 .unwrap_or_default()
                         } else {
-                            vec![VideoCardData {
-                                id: "sample".into(),
-                                title: "Sample In Progress".into(),
-                                duration: "0:10".into(),
-                                year: "2026".into(),
-                                is_played: false,
-                                provider: "local".into(),
-                            }]
+                            Vec::new()
+                        };
+
+                        // Merge local Telegram progress records
+                        if let Ok(records) = local_store.get_all_telegram_progress(50) {
+                            for rec in records {
+                                if rec.is_played {
+                                    continue;
+                                }
+                                let rec_id = format!("telegram:{}", rec.provider_video_id);
+                                if !resume_items.iter().any(|i| {
+                                    i.id == rec_id
+                                        || i.provider_video_id.as_deref()
+                                            == Some(&rec.provider_video_id)
+                                }) {
+                                    resume_items.push(TvItem {
+                                        id: rec_id.clone(),
+                                        title: if rec.title.is_empty() {
+                                            format!("Telegram {}", rec.provider_video_id)
+                                        } else {
+                                            rec.title.clone()
+                                        },
+                                        overview: None,
+                                        year: None,
+                                        runtime_ticks: Some((rec.duration_ms * 10_000) as i64),
+                                        genres: vec!["Telegram".into()],
+                                        tags: vec![],
+                                        studios: vec![],
+                                        people: vec![],
+                                        primary_image_tag: None,
+                                        backdrop_image_tag: None,
+                                        thumb_image_tag: None,
+                                        is_favorite: false,
+                                        playback_position_ticks: (rec.position_ms * 10_000) as i64,
+                                        played_percentage: if rec.duration_ms > 0 {
+                                            Some(
+                                                (rec.position_ms as f64 / rec.duration_ms as f64)
+                                                    * 100.0,
+                                            )
+                                        } else {
+                                            None
+                                        },
+                                        is_played: false,
+                                        provider_video_id: Some(rec.provider_video_id),
+                                        media_source_id: None,
+                                        container: Some("mp4".into()),
+                                        file_size_bytes: None,
+                                        width: None,
+                                        height: None,
+                                    });
+                                }
+                            }
+                        }
+
+                        if resume_items.is_empty() && session.is_none() {
+                            (sample_catalog_items(), sample_catalog_tv_items())
+                        } else {
+                            let cards = resume_items.iter().map(tv_item_to_card).collect();
+                            (cards, resume_items)
                         }
                     }
-                    "Channels" => sample_channel_items(),
-                    _ => sample_catalog_items(),
+                    "Channels" => {
+                        let cards = sample_channel_items();
+                        let raw = sample_catalog_tv_items()
+                            .into_iter()
+                            .filter(|i| i.is_telegram())
+                            .collect();
+                        (cards, raw)
+                    }
+                    _ => (sample_catalog_items(), sample_catalog_tv_items()),
                 };
+
+                *cached_catalog.lock().unwrap() = raw_items;
 
                 slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
-                        set_catalog(&ui, items);
+                        set_catalog(&ui, cards);
                     }
                 })
                 .ok();
@@ -877,8 +1514,12 @@ fn install_stage2_handlers(
         let player = player.clone();
         let headers = headers.clone();
         let credential_store = credential_store.clone();
-        let jellyfin = jellyfin.clone();
         let local_store = local_store.clone();
+        let jellyfin = jellyfin.clone();
+        let reporter = reporter.clone();
+        let session_ctrl = session_ctrl.clone();
+        let current_item = current_item.clone();
+        let cached_catalog = cached_catalog.clone();
         ui.on_play_item(move |id| {
             let Some(ui) = weak.upgrade() else { return };
             let Some(player) = &player else {
@@ -887,58 +1528,85 @@ fn install_stage2_handlers(
             };
             let id = id.to_string();
 
-            if id == "sample" {
-                if let Some(path) = media_beside_executable("sample.mp4") {
-                    ui.set_url_text(path.clone().into());
-                    load_media(&ui, player, &path, &headers);
-                    ui.set_active_screen("player".into());
-                } else {
-                    show_error(&ui, "sample.mp4 was not found next to the executable");
-                }
-                return;
-            }
+            // Locate in cached catalog or synthesize TvItem
+            let target_item = cached_catalog
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|i| i.id == id)
+                .cloned()
+                .unwrap_or_else(|| {
+                    if id == "sample" {
+                        sample_catalog_tv_items()[0].clone()
+                    } else if id.starts_with("telegram:") {
+                        let prov_id = id.strip_prefix("telegram:").unwrap_or(&id).to_string();
+                        TvItem {
+                            id: id.clone(),
+                            title: format!("Telegram video {prov_id}"),
+                            overview: None,
+                            year: None,
+                            runtime_ticks: None,
+                            genres: vec!["Telegram".into()],
+                            tags: vec![],
+                            studios: vec![],
+                            people: vec![],
+                            primary_image_tag: None,
+                            backdrop_image_tag: None,
+                            thumb_image_tag: None,
+                            is_favorite: false,
+                            playback_position_ticks: 0,
+                            played_percentage: None,
+                            is_played: false,
+                            provider_video_id: Some(prov_id),
+                            media_source_id: None,
+                            container: Some("mp4".into()),
+                            file_size_bytes: None,
+                            width: None,
+                            height: None,
+                        }
+                    } else {
+                        TvItem {
+                            id: id.clone(),
+                            title: Path::new(&id)
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| id.clone()),
+                            overview: None,
+                            year: None,
+                            runtime_ticks: None,
+                            genres: vec![],
+                            tags: vec![],
+                            studios: vec![],
+                            people: vec![],
+                            primary_image_tag: None,
+                            backdrop_image_tag: None,
+                            thumb_image_tag: None,
+                            is_favorite: false,
+                            playback_position_ticks: 0,
+                            played_percentage: None,
+                            is_played: false,
+                            provider_video_id: None,
+                            media_source_id: None,
+                            container: None,
+                            file_size_bytes: None,
+                            width: None,
+                            height: None,
+                        }
+                    }
+                });
 
-            if id.starts_with("http://") || id.starts_with("https://") {
-                ui.set_url_text(id.clone().into());
-                load_media(&ui, player, &id, &headers);
-                ui.set_active_screen("player".into());
-                return;
-            }
-
-            let session = credential_store.get().ok().flatten();
-
-            if id.starts_with("telegram:") {
-                let resolver_url = local_store
-                    .get_setting("resolver_url")
-                    .ok()
-                    .flatten()
-                    .unwrap_or_else(|| {
-                        session
-                            .as_ref()
-                            .map(|s| s.server_url.clone())
-                            .unwrap_or_default()
-                    });
-                if resolver_url.is_empty() {
-                    show_error(&ui, "Set resolver URL or connect to server first");
-                    return;
-                }
-                let stream_url = ResolverClient::stream_url(&resolver_url, &id);
-                ui.set_url_text(stream_url.clone().into());
-                load_media(&ui, player, &stream_url, &headers);
-                ui.set_active_screen("player".into());
-                return;
-            }
-
-            if let Some(session) = session {
-                let stream_url = JellyfinClient::stream_url(&session.server_url, &id);
-                let mut all_headers = headers.clone();
-                all_headers.extend(jellyfin.stream_headers(Some(&session.access_token)));
-                ui.set_url_text(stream_url.clone().into());
-                load_media(&ui, player, &stream_url, &all_headers);
-                ui.set_active_screen("player".into());
-            } else {
-                show_error(&ui, "Please log in to play Jellyfin items");
-            }
+            start_item_playback(
+                &ui,
+                player,
+                target_item,
+                &headers,
+                &credential_store,
+                &local_store,
+                &jellyfin,
+                &reporter,
+                &session_ctrl,
+                &current_item,
+            );
         });
     }
 }
@@ -1001,10 +1669,35 @@ fn install_renderer(
         })
 }
 
-fn install_polling(ui: &MainWindow, player: Option<Rc<Player>>, frame_pending: Arc<AtomicBool>) {
+fn install_polling(
+    ui: &MainWindow,
+    player: Option<Rc<Player>>,
+    frame_pending: Arc<AtomicBool>,
+    reporter: Arc<PlaybackReporter>,
+    session_ctrl: Arc<PlaybackSessionController>,
+    current_item: Arc<Mutex<Option<TvItem>>>,
+    cached_catalog: Arc<Mutex<Vec<TvItem>>>,
+    autoplay_active: Arc<AtomicBool>,
+    hwdec_active: Arc<AtomicBool>,
+    headers: Vec<String>,
+    credential_store: Arc<CredentialStore>,
+    local_store: Arc<LocalStore>,
+    jellyfin: Arc<JellyfinClient>,
+) {
     let ui_weak = ui.as_weak();
     let timer = Timer::default();
     let mut tick: u64 = 0;
+
+    let rep = reporter.clone();
+    let sctrl = session_ctrl.clone();
+    let cur_item = current_item.clone();
+    let cat_ref = cached_catalog.clone();
+    let ap_ref = autoplay_active.clone();
+    let hd_ref = hwdec_active.clone();
+    let hdrs = headers.clone();
+    let cs = credential_store.clone();
+    let ls = local_store.clone();
+    let jf = jellyfin.clone();
 
     timer.start(TimerMode::Repeated, Duration::from_millis(33), move || {
         let Some(ui) = ui_weak.upgrade() else { return };
@@ -1014,7 +1707,21 @@ fn install_polling(ui: &MainWindow, player: Option<Rc<Player>>, frame_pending: A
         let Some(player) = &player else { return };
 
         for event in player.events().try_iter() {
-            handle_event(&ui, player, event);
+            handle_event(
+                &ui,
+                player,
+                event,
+                &rep,
+                &sctrl,
+                &cur_item,
+                &cat_ref,
+                &ap_ref,
+                &hd_ref,
+                &hdrs,
+                &cs,
+                &ls,
+                &jf,
+            );
         }
 
         let idle = player.get_string("idle-active").as_deref() == Some("yes");
@@ -1047,10 +1754,34 @@ fn install_polling(ui: &MainWindow, player: Option<Rc<Player>>, frame_pending: A
         if ui.get_hud_visible() && tick % 15 == 0 {
             ui.set_hud_text(stats_text(&player.stats()).into());
         }
+
+        // Periodic progress checkpoint and reporting every ~10 seconds (~300 ticks)
+        if tick % 300 == 0 && !idle {
+            let pos_ms = (player.position().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
+            let dur_ms = (player.duration().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
+            rep.tick_periodic(pos_ms, paused);
+            if let Some(item) = cur_item.lock().unwrap().as_ref() {
+                sctrl.checkpoint_progress(item, pos_ms, dur_ms, false);
+            }
+        }
     });
 }
 
-fn handle_event(ui: &MainWindow, player: &Player, event: adult_hub_player::PlayerEvent) {
+fn handle_event(
+    ui: &MainWindow,
+    player: &Player,
+    event: adult_hub_player::PlayerEvent,
+    reporter: &Arc<PlaybackReporter>,
+    session_ctrl: &Arc<PlaybackSessionController>,
+    current_item: &Arc<Mutex<Option<TvItem>>>,
+    cached_catalog: &Arc<Mutex<Vec<TvItem>>>,
+    autoplay_active: &Arc<AtomicBool>,
+    hwdec_active: &Arc<AtomicBool>,
+    headers: &[String],
+    credential_store: &Arc<CredentialStore>,
+    local_store: &Arc<LocalStore>,
+    jellyfin: &Arc<JellyfinClient>,
+) {
     use adult_hub_player::PlayerEvent;
     match event {
         PlayerEvent::FileLoaded { width, height } => {
@@ -1066,6 +1797,9 @@ fn handle_event(ui: &MainWindow, player: &Player, event: adult_hub_player::Playe
             ui.set_status(format!("Loaded: {name}").into());
             ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
             ui.set_playing(!player.is_paused());
+
+            let pos_ms = (player.position().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
+            reporter.report_start(pos_ms, !player.is_paused());
         }
         PlayerEvent::VideoReconfig { width, height } => {
             update_texture_size(ui, width, height);
@@ -1073,10 +1807,63 @@ fn handle_event(ui: &MainWindow, player: &Player, event: adult_hub_player::Playe
         PlayerEvent::EndFile { eof, error } => {
             ui.set_playing(false);
             if let Some(error) = error {
+                let err_lower = error.to_lowercase();
+                let is_hwdec_err = err_lower.contains("hwdec")
+                    || err_lower.contains("decode")
+                    || err_lower.contains("codec")
+                    || err_lower.contains("hardware");
+
+                if hwdec_active.load(Ordering::SeqCst) && is_hwdec_err {
+                    hwdec_active.store(false, Ordering::SeqCst);
+                    let _ = player.set_hwdec("no");
+                    ui.set_hwdec_active(false);
+                    ui.set_status(
+                        "Hardware decode failed; retrying with software decode...".into(),
+                    );
+                    ui.set_status_color(slint::Color::from_rgb_u8(255, 180, 100));
+
+                    if let Some(item) = current_item.lock().unwrap().clone() {
+                        start_item_playback(
+                            ui,
+                            player,
+                            item,
+                            headers,
+                            credential_store,
+                            local_store,
+                            jellyfin,
+                            reporter,
+                            session_ctrl,
+                            current_item,
+                        );
+                        return;
+                    }
+                }
                 show_error(ui, format!("Playback error: {error}"));
             } else if eof {
+                let pos_ms = (player.position().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
+                let dur_ms = (player.duration().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
+                if let Some(item) = current_item.lock().unwrap().as_ref() {
+                    session_ctrl.checkpoint_progress(item, pos_ms, dur_ms, true);
+                }
+                reporter.stop_session(pos_ms);
+
                 ui.set_status("Playback ended.".into());
                 ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
+
+                if autoplay_active.load(Ordering::SeqCst) {
+                    play_random_catalog_item(
+                        ui,
+                        player,
+                        headers,
+                        credential_store,
+                        local_store,
+                        jellyfin,
+                        reporter,
+                        session_ctrl,
+                        current_item,
+                        cached_catalog,
+                    );
+                }
             }
         }
         PlayerEvent::Shutdown => {}

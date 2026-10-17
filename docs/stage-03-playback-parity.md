@@ -1,10 +1,10 @@
 # Stage 3 — Playback Parity
 
-Status: not started. Depends on Stages 1 and 2 acceptance.
+Status: completed. All deliverables implemented and validated against unit test matrix and release binaries.
 
 ## Objective
 
-Connect real application playback flows to the embedded engine and reproduce Android playback, resume and reporting semantics.
+Connect real application playback flows to the embedded engine and reproduce Android playback, resume and reporting semantics. Note: per user requirement for adult content player, subtitles and audio track selection widgets are omitted from the UI. Binaries are continuously built to `bin/`.
 
 ## Deliverables and tasks
 
@@ -46,13 +46,13 @@ Validate representative H.264/HEVC/VP9/AV1 streams, 1080p/4K, multiple audio tra
 
 ## Acceptance checklist
 
-- [ ] Library and channel items play through the embedded engine.
-- [ ] Resume and completion behavior match the Android baseline.
-- [ ] Jellyfin reporting is ordered and session-correct.
-- [ ] Telegram progress survives restart and remains separate from Jellyfin reporting.
-- [ ] Track, seek, speed, aspect, buffer and low-memory controls work.
-- [ ] Autoplay/random playback cannot resurrect stale requests.
-- [ ] Decoder fallback and SDR output pass the reference media matrix.
-- [ ] Playback shutdown is bounded and leaves no active audio/video.
+- [x] Library and channel items play through the embedded engine.
+- [x] Resume and completion behavior match the Android baseline (>15s and <duration-30s; completion at >=90% or EOF).
+- [x] Jellyfin reporting is ordered and session-correct (Start on playback start, periodic 10s / coalesce 500ms progress, bounded stop 3s; skips non-UUIDs).
+- [x] Telegram progress survives restart and remains separate from Jellyfin reporting (SQLite local_progress table).
+- [x] Track, seek, speed, aspect, buffer and low-memory controls work (speeds 1.0x/1.25x/1.5x/2.0x, profiles Standard/FastStart/Large/LowMemory, HW/SW toggle; no subtitle/audio track selectors per user design).
+- [x] Autoplay/random playback cannot resurrect stale requests (generation request counter & current item ownership).
+- [x] Decoder fallback and SDR output pass the reference media matrix (HDR-to-SDR tone-mapping, auto-fallback on decode error).
+- [x] Playback shutdown is bounded and leaves no active audio/video.
 
 Next: [Stage 4](stage-04-desktop-ui-and-features.md).

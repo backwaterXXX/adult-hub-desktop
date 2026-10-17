@@ -1,6 +1,6 @@
 use crate::models::{
-    AuthResult, QuickConnectInit, QuickConnectStatus, ServerInfo, TvItem, TvItemsPage, TvLibrary,
-    TvPersonRole,
+    AuthResult, PlaybackProgressInfo, PlaybackStartInfo, PlaybackStopInfo, QuickConnectInit,
+    QuickConnectStatus, ServerInfo, TvItem, TvItemsPage, TvLibrary, TvPersonRole,
 };
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderValue};
@@ -419,6 +419,110 @@ impl JellyfinClient {
         }
         headers
     }
+
+    pub fn report_playback_start(
+        &self,
+        base_url: &str,
+        token: &str,
+        info: &PlaybackStartInfo,
+    ) -> Result<()> {
+        if uuid::Uuid::parse_str(&info.item_id).is_err() {
+            return Ok(());
+        }
+        let url = format!("{}/Sessions/Playing", base_url.trim_end_matches('/'));
+        self.client
+            .post(&url)
+            .headers(self.headers(Some(token)))
+            .json(info)
+            .send()?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    pub fn report_playback_progress(
+        &self,
+        base_url: &str,
+        token: &str,
+        info: &PlaybackProgressInfo,
+    ) -> Result<()> {
+        if uuid::Uuid::parse_str(&info.item_id).is_err() {
+            return Ok(());
+        }
+        let url = format!("{}/Sessions/Playing/Progress", base_url.trim_end_matches('/'));
+        self.client
+            .post(&url)
+            .headers(self.headers(Some(token)))
+            .json(info)
+            .send()?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    pub fn report_playback_stopped(
+        &self,
+        base_url: &str,
+        token: &str,
+        info: &PlaybackStopInfo,
+    ) -> Result<()> {
+        if uuid::Uuid::parse_str(&info.item_id).is_err() {
+            return Ok(());
+        }
+        let url = format!("{}/Sessions/Playing/Stopped", base_url.trim_end_matches('/'));
+        self.client
+            .post(&url)
+            .headers(self.headers(Some(token)))
+            .json(info)
+            .send()?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    pub fn get_item_details(
+        &self,
+        base_url: &str,
+        user_id: &str,
+        token: &str,
+        item_id: &str,
+    ) -> Result<TvItem> {
+        let url = format!(
+            "{}/Users/{user_id}/Items/{item_id}?Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources",
+            base_url.trim_end_matches('/')
+        );
+        let res: BaseItemDto = self
+            .client
+            .get(&url)
+            .headers(self.headers(Some(token)))
+            .send()?
+            .error_for_status()?
+            .json()?;
+        Ok(map_base_item_to_tv_item(res))
+    }
+
+    pub fn toggle_favorite(
+        &self,
+        base_url: &str,
+        user_id: &str,
+        token: &str,
+        item_id: &str,
+        is_favorite: bool,
+    ) -> Result<()> {
+        if uuid::Uuid::parse_str(item_id).is_err() {
+            return Ok(());
+        }
+        let url = format!(
+            "{}/Users/{user_id}/FavoriteItems/{item_id}",
+            base_url.trim_end_matches('/')
+        );
+        let req = if is_favorite {
+            self.client.post(&url)
+        } else {
+            self.client.delete(&url)
+        };
+        req.headers(self.headers(Some(token)))
+            .send()?
+            .error_for_status()?;
+        Ok(())
+    }
 }
 
 fn urlencoding(input: &str) -> String {
@@ -702,5 +806,79 @@ mod tests {
             url,
             "http://192.168.1.50:8096/Items/item-456/Images/Primary?maxWidth=480&tag=tag123"
         );
+    }
+
+    #[test]
+    fn playback_reporting_skips_non_uuid() {
+        let client = JellyfinClient::new("test-device");
+        let start_info = PlaybackStartInfo {
+            item_id: "telegram:123456".into(),
+            media_source_id: None,
+            position_ticks: 10_000_000,
+            play_session_id: None,
+            can_seek: true,
+            is_muted: false,
+            is_paused: false,
+            repeat_mode: "RepeatNone".into(),
+            playback_order: "Default".into(),
+            play_method: crate::models::PlayMethod::DirectPlay,
+        };
+        // Non-UUID ID must return Ok(()) without attempting network connection
+        assert!(
+            client
+                .report_playback_start("http://invalid.local", "token", &start_info)
+                .is_ok()
+        );
+
+        let progress_info = PlaybackProgressInfo {
+            item_id: "telegram:123456".into(),
+            media_source_id: None,
+            position_ticks: 50_000_000,
+            play_session_id: None,
+            can_seek: true,
+            is_muted: false,
+            is_paused: false,
+            repeat_mode: "RepeatNone".into(),
+            playback_order: "Default".into(),
+            play_method: crate::models::PlayMethod::DirectPlay,
+        };
+        assert!(
+            client
+                .report_playback_progress("http://invalid.local", "token", &progress_info)
+                .is_ok()
+        );
+
+        let stop_info = PlaybackStopInfo {
+            item_id: "telegram:123456".into(),
+            media_source_id: None,
+            position_ticks: 60_000_000,
+            play_session_id: None,
+            failed: false,
+        };
+        assert!(
+            client
+                .report_playback_stopped("http://invalid.local", "token", &stop_info)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn serializes_playback_start_info() {
+        let start_info = PlaybackStartInfo {
+            item_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890".into(),
+            media_source_id: Some("src-1".into()),
+            position_ticks: 150_000_000,
+            play_session_id: Some("session-abc".into()),
+            can_seek: true,
+            is_muted: false,
+            is_paused: false,
+            repeat_mode: "RepeatNone".into(),
+            playback_order: "Default".into(),
+            play_method: crate::models::PlayMethod::DirectPlay,
+        };
+        let json = serde_json::to_string(&start_info).unwrap();
+        assert!(json.contains("\"ItemId\":\"a1b2c3d4-e5f6-7890-abcd-ef1234567890\""));
+        assert!(json.contains("\"PositionTicks\":150000000"));
+        assert!(json.contains("\"PlayMethod\":\"DirectPlay\""));
     }
 }

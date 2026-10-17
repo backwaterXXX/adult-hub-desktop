@@ -51,17 +51,29 @@ if [[ -f "${ROOT_DIR}/desktop/sample.mp4" ]]; then
 fi
 
 cat << 'EOF' > "${OUT_DIR}/README.txt"
-Adult Hub Desktop - Player Prototype (Windows x64)
+Adult Hub Desktop - Player (Windows x64)
 
 Uruchomienie:
 1. Uruchom adult-hub-desktop.exe
-2. Kliknij "Sample" (załadowanie lokalnego pliku sample.mp4) lub wpisz własny URL/ścieżkę i kliknij "Load".
-3. Skróty klawiszowe:
+2. Wybierz wideo z katalogu (Najnowsze, Wznów, Kanały) lub kliknij "Sample" / wpisz URL / otwórz plik lokalny.
+3. Skróty klawiszowe odtwarzacza:
    - Spacja: Play / Pause
    - Strzałka w lewo / w prawo: -5s / +5s
    - f: Pełny ekran (Fullscreen) / Esc: Wyjście z pełnego ekranu
    - m: Wyciszenie (Mute / Unmute)
    - i: Statystyki odtwarzania (HUD)
+   - s: Zmiana prędkości odtwarzania (1.0x, 1.25x, 1.5x, 2.0x)
+   - b: Profil buforowania (Standard, FastStart, Large, LowMemory)
+   - h: Przełącznik dekodera sprzętowego (HW Decode: auto-safe / no z auto-fallbackiem)
+   - n: Odtwarzaj losowy następny film z katalogu
+
+Funkcje odtwarzania (Stage 3):
+- Pełna synchronizacja sesji Jellyfin (Start, Progress co 10s / coalesce 500ms, Stop)
+- Lokalne zapamiętywanie postępu wideo Telegram (wznowienie od >15s, zaliczenie obejrzenia przy >=90%)
+- Autoplay: automatyczne odtwarzanie kolejnego filmu po zakończeniu
+- Dedykowany profil bez napisów i wyboru ścieżek dźwiękowych (zoptymalizowany dla treści adult)
+- Mapowanie tonów HDR do SDR (target sRGB)
+- Automatyczny fallback na dekoder programowy przy błędzie akceleracji GPU
 
 Plik libmpv-2.dll musi znajdować się w tym samym folderze co adult-hub-desktop.exe.
 EOF

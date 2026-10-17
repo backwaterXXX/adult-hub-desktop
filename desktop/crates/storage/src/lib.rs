@@ -17,6 +17,28 @@ pub enum StorageError {
 
 pub type Result<T> = std::result::Result<T, StorageError>;
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TelegramProgressRecord {
+    pub provider_video_id: String,
+    pub channel_id: Option<String>,
+    pub position_ms: u64,
+    pub duration_ms: u64,
+    pub title: String,
+    pub thumbnail_url: Option<String>,
+    pub is_played: bool,
+    pub updated_at: u64,
+}
+
+impl TelegramProgressRecord {
+    pub fn progress_fraction(&self) -> f32 {
+        if self.duration_ms > 0 {
+            (self.position_ms as f32 / self.duration_ms as f32).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    }
+}
+
 pub struct LocalStore {
     conn: Mutex<Connection>,
 }
@@ -88,10 +110,35 @@ impl LocalStore {
                     position_ms INTEGER NOT NULL,
                     duration_ms INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL,
+                    is_played INTEGER NOT NULL DEFAULT 0,
+                    title TEXT NOT NULL DEFAULT '',
+                    thumbnail_url TEXT,
                     PRIMARY KEY (channel_id, video_id)
                 );
 
                 INSERT INTO schema_version (version) VALUES (1);
+                COMMIT;
+                ",
+            )?;
+        }
+
+        let v2_needed: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('local_progress') WHERE name = 'is_played'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|count| count == 0)
+            .unwrap_or(false);
+
+        if v2_needed {
+            conn.execute_batch(
+                "
+                BEGIN;
+                ALTER TABLE local_progress ADD COLUMN is_played INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE local_progress ADD COLUMN title TEXT NOT NULL DEFAULT '';
+                ALTER TABLE local_progress ADD COLUMN thumbnail_url TEXT;
+                INSERT INTO schema_version (version) VALUES (2);
                 COMMIT;
                 ",
             )?;
@@ -204,6 +251,165 @@ impl LocalStore {
         } else {
             Ok(None)
         }
+    }
+
+    pub fn save_telegram_progress(&self, record: &TelegramProgressRecord) -> Result<()> {
+        let channel = record.channel_id.as_deref().unwrap_or("telegram");
+        let is_played = if record.is_played { 1 } else { 0 };
+        let now = if record.updated_at > 0 {
+            record.updated_at as i64
+        } else {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64
+        };
+
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO local_progress (channel_id, video_id, position_ms, duration_ms, updated_at, is_played, title, thumbnail_url)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(channel_id, video_id) DO UPDATE SET
+                position_ms = ?3,
+                duration_ms = ?4,
+                updated_at = ?5,
+                is_played = ?6,
+                title = CASE WHEN ?7 != '' THEN ?7 ELSE title END,
+                thumbnail_url = COALESCE(?8, thumbnail_url)",
+            params![
+                channel,
+                record.provider_video_id,
+                record.position_ms as i64,
+                record.duration_ms as i64,
+                now,
+                is_played,
+                record.title,
+                record.thumbnail_url,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_telegram_progress(
+        &self,
+        provider_video_id: &str,
+    ) -> Result<Option<TelegramProgressRecord>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT channel_id, video_id, position_ms, duration_ms, updated_at, is_played, title, thumbnail_url
+             FROM local_progress
+             WHERE video_id = ?1
+             ORDER BY updated_at DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query(params![provider_video_id])?;
+        if let Some(row) = rows.next()? {
+            let channel_id: String = row.get(0)?;
+            let video_id: String = row.get(1)?;
+            let pos: i64 = row.get(2)?;
+            let dur: i64 = row.get(3)?;
+            let updated: i64 = row.get(4)?;
+            let is_played: i32 = row.get(5)?;
+            let title: String = row.get(6)?;
+            let thumb: Option<String> = row.get(7)?;
+
+            Ok(Some(TelegramProgressRecord {
+                provider_video_id: video_id,
+                channel_id: Some(channel_id),
+                position_ms: pos.max(0) as u64,
+                duration_ms: dur.max(0) as u64,
+                title,
+                thumbnail_url: thumb,
+                is_played: is_played != 0,
+                updated_at: updated.max(0) as u64,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn mark_telegram_played(
+        &self,
+        provider_video_id: &str,
+        is_played: bool,
+        title: Option<&str>,
+        thumbnail_url: Option<&str>,
+        channel_id: Option<&str>,
+    ) -> Result<()> {
+        let existing = self.get_telegram_progress(provider_video_id)?;
+        let channel = channel_id
+            .map(str::to_string)
+            .or_else(|| existing.as_ref().and_then(|e| e.channel_id.clone()))
+            .unwrap_or_else(|| "telegram".into());
+        let pos = if is_played {
+            0
+        } else {
+            existing.as_ref().map(|e| e.position_ms).unwrap_or(0)
+        };
+        let dur = existing.as_ref().map(|e| e.duration_ms).unwrap_or(0);
+        let title_str = title
+            .map(str::to_string)
+            .or_else(|| existing.as_ref().map(|e| e.title.clone()))
+            .unwrap_or_else(|| "Telegram Video".into());
+        let thumb_str = thumbnail_url
+            .map(str::to_string)
+            .or_else(|| existing.as_ref().and_then(|e| e.thumbnail_url.clone()));
+
+        let record = TelegramProgressRecord {
+            provider_video_id: provider_video_id.into(),
+            channel_id: Some(channel),
+            position_ms: pos,
+            duration_ms: dur,
+            title: title_str,
+            thumbnail_url: thumb_str,
+            is_played,
+            updated_at: 0,
+        };
+        self.save_telegram_progress(&record)
+    }
+
+    pub fn get_all_telegram_progress(&self, limit: usize) -> Result<Vec<TelegramProgressRecord>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT channel_id, video_id, position_ms, duration_ms, updated_at, is_played, title, thumbnail_url
+             FROM local_progress
+             ORDER BY updated_at DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            let channel_id: String = row.get(0)?;
+            let video_id: String = row.get(1)?;
+            let pos: i64 = row.get(2)?;
+            let dur: i64 = row.get(3)?;
+            let updated: i64 = row.get(4)?;
+            let is_played: i32 = row.get(5)?;
+            let title: String = row.get(6)?;
+            let thumb: Option<String> = row.get(7)?;
+
+            Ok(TelegramProgressRecord {
+                provider_video_id: video_id,
+                channel_id: Some(channel_id),
+                position_ms: pos.max(0) as u64,
+                duration_ms: dur.max(0) as u64,
+                title,
+                thumbnail_url: thumb,
+                is_played: is_played != 0,
+                updated_at: updated.max(0) as u64,
+            })
+        })?;
+
+        let mut results = Vec::new();
+        for r in rows {
+            results.push(r?);
+        }
+        Ok(results)
+    }
+
+    pub fn clear_telegram_progress(&self, provider_video_id: &str) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "DELETE FROM local_progress WHERE video_id = ?1",
+            params![provider_video_id],
+        )?;
+        Ok(())
     }
 
     // Session persistence helpers
@@ -447,5 +653,54 @@ mod tests {
         assert!(!dev_id1.is_empty());
         let dev_id2 = store.get_or_create_device_id().unwrap();
         assert_eq!(dev_id1, dev_id2);
+    }
+
+    #[test]
+    fn telegram_progress_lifecycle() {
+        let store = LocalStore::open_in_memory().unwrap();
+        assert!(store.get_telegram_progress("vid_101").unwrap().is_none());
+
+        let rec = TelegramProgressRecord {
+            provider_video_id: "vid_101".into(),
+            channel_id: Some("chan_tg".into()),
+            position_ms: 45_000,
+            duration_ms: 120_000,
+            title: "Test Scene 101".into(),
+            thumbnail_url: Some("http://thumb/101.jpg".into()),
+            is_played: false,
+            updated_at: 1000,
+        };
+        assert_eq!(rec.progress_fraction(), 0.375);
+        store.save_telegram_progress(&rec).unwrap();
+
+        let loaded = store
+            .get_telegram_progress("vid_101")
+            .unwrap()
+            .expect("record found");
+        assert_eq!(loaded.provider_video_id, "vid_101");
+        assert_eq!(loaded.channel_id.as_deref(), Some("chan_tg"));
+        assert_eq!(loaded.position_ms, 45_000);
+        assert_eq!(loaded.duration_ms, 120_000);
+        assert_eq!(loaded.title, "Test Scene 101");
+        assert_eq!(loaded.thumbnail_url.as_deref(), Some("http://thumb/101.jpg"));
+        assert!(!loaded.is_played);
+
+        // Mark played
+        store
+            .mark_telegram_played("vid_101", true, None, None, None)
+            .unwrap();
+        let loaded2 = store
+            .get_telegram_progress("vid_101")
+            .unwrap()
+            .expect("record found");
+        assert!(loaded2.is_played);
+        assert_eq!(loaded2.position_ms, 0);
+        assert_eq!(loaded2.title, "Test Scene 101");
+
+        let all = store.get_all_telegram_progress(10).unwrap();
+        assert_eq!(all.len(), 1);
+
+        store.clear_telegram_progress("vid_101").unwrap();
+        assert!(store.get_telegram_progress("vid_101").unwrap().is_none());
     }
 }

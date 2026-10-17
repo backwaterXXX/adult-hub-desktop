@@ -178,3 +178,74 @@ pub struct TelegramHistoryResponseDto {
     #[serde(default)]
     pub has_more: bool,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PlayMethod {
+    #[default]
+    DirectPlay,
+    DirectStream,
+    Transcode,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlaybackStartInfo {
+    #[serde(rename = "ItemId")]
+    pub item_id: String,
+    #[serde(rename = "MediaSourceId", skip_serializing_if = "Option::is_none")]
+    pub media_source_id: Option<String>,
+    #[serde(rename = "PositionTicks")]
+    pub position_ticks: i64,
+    #[serde(rename = "PlaySessionId", skip_serializing_if = "Option::is_none")]
+    pub play_session_id: Option<String>,
+    #[serde(rename = "CanSeek")]
+    pub can_seek: bool,
+    #[serde(rename = "IsMuted")]
+    pub is_muted: bool,
+    #[serde(rename = "IsPaused")]
+    pub is_paused: bool,
+    #[serde(rename = "RepeatMode")]
+    pub repeat_mode: String,
+    #[serde(rename = "PlaybackOrder")]
+    pub playback_order: String,
+    #[serde(rename = "PlayMethod")]
+    pub play_method: PlayMethod,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlaybackProgressInfo {
+    #[serde(rename = "ItemId")]
+    pub item_id: String,
+    #[serde(rename = "MediaSourceId", skip_serializing_if = "Option::is_none")]
+    pub media_source_id: Option<String>,
+    #[serde(rename = "PositionTicks")]
+    pub position_ticks: i64,
+    #[serde(rename = "PlaySessionId", skip_serializing_if = "Option::is_none")]
+    pub play_session_id: Option<String>,
+    #[serde(rename = "CanSeek")]
+    pub can_seek: bool,
+    #[serde(rename = "IsMuted")]
+    pub is_muted: bool,
+    #[serde(rename = "IsPaused")]
+    pub is_paused: bool,
+    #[serde(rename = "RepeatMode")]
+    pub repeat_mode: String,
+    #[serde(rename = "PlaybackOrder")]
+    pub playback_order: String,
+    #[serde(rename = "PlayMethod")]
+    pub play_method: PlayMethod,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlaybackStopInfo {
+    #[serde(rename = "ItemId")]
+    pub item_id: String,
+    #[serde(rename = "MediaSourceId", skip_serializing_if = "Option::is_none")]
+    pub media_source_id: Option<String>,
+    #[serde(rename = "PositionTicks")]
+    pub position_ticks: i64,
+    #[serde(rename = "PlaySessionId", skip_serializing_if = "Option::is_none")]
+    pub play_session_id: Option<String>,
+    #[serde(rename = "Failed")]
+    pub failed: bool,
+}
+

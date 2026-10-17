@@ -155,6 +155,7 @@ dependencies = [
  "rfd",
  "slint",
  "slint-build",
+ "uuid",
 ]
 
 [[package]]

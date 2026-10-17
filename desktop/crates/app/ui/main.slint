@@ -69,6 +69,15 @@ export component MainWindow inherits Window {
     in-out property <int> texture-width: 640;
     in-out property <int> texture-height: 360;
 
+    // Stage 3 Player Features state
+    in-out property <string> speed-label: "1.0x";
+    in-out property <string> buffer-profile-label: "Buffer: Standard";
+    in-out property <bool> hwdec-active: true;
+    in-out property <bool> autoplay-active: false;
+    in-out property <bool> resume-prompt-visible: false;
+    in-out property <string> resume-prompt-time: "0:00";
+    in-out property <float> resume-prompt-position: 0;
+
     // Browsing & Catalog state
     in-out property <[VideoCardData]> catalog-items: [];
     in-out property <string> search-query: "";
@@ -106,6 +115,15 @@ export component MainWindow inherits Window {
     callback search-catalog(string);
     callback filter-category(string);
     callback play-item(string);
+
+    // Stage 3 Callbacks
+    callback cycle-speed();
+    callback cycle-buffer-profile();
+    callback toggle-hwdec();
+    callback toggle-autoplay();
+    callback play-random();
+    callback accept-resume();
+    callback reject-resume();
 
     VerticalLayout {
         spacing: 0px;
@@ -363,10 +381,48 @@ export component MainWindow inherits Window {
                             }
                         }
                     }
+
+                    if root.resume-prompt-visible : Rectangle {
+                        x: (parent.width - self.width) / 2;
+                        y: parent.height - self.height - 24px;
+                        width: 480px;
+                        height: 56px;
+                        background: #14141ee6;
+                        border-radius: 8px;
+                        border-width: 1px;
+                        border-color: #d65368;
+
+                        HorizontalLayout {
+                            padding-left: 18px;
+                            padding-right: 18px;
+                            spacing: 12px;
+                            alignment: center;
+
+                            Text {
+                                text: "Resume from " + root.resume-prompt-time + "?";
+                                color: #f2f2f7;
+                                font-size: 14px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+
+                            Button {
+                                text: "Resume";
+                                primary: true;
+                                clicked => { root.accept-resume(); }
+                            }
+
+                            Button {
+                                text: "Restart";
+                                clicked => { root.reject-resume(); }
+                            }
+                        }
+                    }
                 }
 
                 Rectangle {
-                    height: 136px;
+                    height: 180px;
                     background: #111118;
                     border-width: 1px;
                     border-color: #232331;
@@ -463,6 +519,44 @@ export component MainWindow inherits Window {
                                 maximum: 130;
                                 value: root.volume;
                                 changed(value) => { root.set-volume(value); }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 10px;
+                            alignment: center;
+
+                            Button {
+                                text: "Speed: " + root.speed-label;
+                                clicked => { root.cycle-speed(); }
+                            }
+
+                            Button {
+                                text: root.buffer-profile-label;
+                                clicked => { root.cycle-buffer-profile(); }
+                            }
+
+                            Button {
+                                text: root.hwdec-active ? "HW Decode: ON" : "HW Decode: OFF";
+                                clicked => { root.toggle-hwdec(); }
+                            }
+
+                            Button {
+                                text: root.autoplay-active ? "Autoplay: ON" : "Autoplay: OFF";
+                                primary: root.autoplay-active;
+                                clicked => { root.toggle-autoplay(); }
+                            }
+
+                            Button {
+                                text: "Random Next";
+                                clicked => { root.play-random(); }
+                            }
+
+                            Rectangle { horizontal-stretch: 1; }
+
+                            Button {
+                                text: "Browse";
+                                clicked => { root.switch-screen("browse"); }
                             }
                         }
                     }
@@ -642,6 +736,22 @@ export component MainWindow inherits Window {
             }
             if (event.text == "m") {
                 root.toggle-mute();
+                return accept;
+            }
+            if (event.text == "s") {
+                root.cycle-speed();
+                return accept;
+            }
+            if (event.text == "b") {
+                root.cycle-buffer-profile();
+                return accept;
+            }
+            if (event.text == "h") {
+                root.toggle-hwdec();
+                return accept;
+            }
+            if (event.text == "n") {
+                root.play-random();
                 return accept;
             }
             if (event.text == Key.Escape) {
