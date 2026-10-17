@@ -169,7 +169,11 @@ impl PlaybackStats {
         lines.push(format!("Decoder: {hw_label}"));
 
         if let Some(cache_secs) = self.cache_duration_secs {
-            let state = if self.paused_for_cache { " (Buffering...)" } else { "" };
+            let state = if self.paused_for_cache {
+                " (Buffering...)"
+            } else {
+                ""
+            };
             lines.push(format!("Buffer Cache: {cache_secs:.1} s{state}"));
         } else {
             lines.push("Buffer Cache: N/A".to_string());
@@ -217,6 +221,8 @@ pub struct Player {
     quit: Arc<AtomicBool>,
 }
 
+// SAFETY: libmpv client API is documented as safe to call from multiple threads.
+// All client API calls on the same mpv_handle are synchronized internally by libmpv.
 unsafe impl Send for Player {}
 unsafe impl Sync for Player {}
 
@@ -453,7 +459,8 @@ impl Player {
 
     pub fn current_hwdec(&self) -> Option<String> {
         self.get_string("hwdec-current")
-            .or_else(|| self.get_string("hwdec"))
+            .filter(|s| s != "no")
+            .or_else(|| self.get_string("hwdec").filter(|s| s != "no"))
     }
 
     pub fn stats(&self) -> PlaybackStats {
@@ -467,8 +474,8 @@ impl Player {
             audio_codec: self.get_string("audio-codec-name"),
             width,
             height,
-            decoder: self.get_string("video-params/pixelformat"),
-            hwdec: self.get_string("hwdec-current"),
+            decoder: self.get_string("video-codec"),
+            hwdec: self.current_hwdec(),
             dropped_frames: self
                 .get_string("decoder-frame-drop-count")
                 .and_then(|value| value.parse().ok()),
@@ -494,11 +501,7 @@ impl Player {
             .to_string_lossy()
             .into_owned();
         unsafe { (self.api.mpv_free)(raw.cast()) };
-        if value.is_empty() || value == "no" {
-            None
-        } else {
-            Some(value)
-        }
+        if value.is_empty() { None } else { Some(value) }
     }
 
     pub fn get_f64(&self, name: &str) -> Option<f64> {
@@ -847,9 +850,11 @@ impl sys::MpvApi {
         let version = unsafe { client_api_version() };
         if version < CLIENT_API_VERSION {
             return Err(PlayerError::Library(format!(
-                "libmpv client API {}.{} is too old; 2.6 or newer is required",
+                "libmpv client API {}.{} is too old; {}.{} or newer is required",
                 version >> 16,
-                version & 0xffff
+                version & 0xffff,
+                CLIENT_API_VERSION >> 16,
+                CLIENT_API_VERSION & 0xffff,
             )));
         }
 

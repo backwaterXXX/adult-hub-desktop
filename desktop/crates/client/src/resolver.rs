@@ -2,6 +2,7 @@ use crate::models::{
     CategoryDto, PerformerBioDto, PhashGenerationRequest, PhashGenerationResponse,
     PhashJobStatusResponse, TelegramHistoryResponseDto, VideoDto,
 };
+use crate::urlencoding;
 use reqwest::blocking::Client;
 use std::time::Duration;
 use thiserror::Error;
@@ -60,7 +61,6 @@ impl ResolverClient {
         Self { client }
     }
 
-
     pub fn get_categories(&self, base_url: &str) -> Result<Vec<CategoryDto>> {
         let url = format!("{}/admin/api/categories", base_url.trim_end_matches('/'));
         let res: Vec<CategoryDto> = self.client.get(&url).send()?.error_for_status()?.json()?;
@@ -76,8 +76,10 @@ impl ResolverClient {
         min_duration: Option<usize>,
     ) -> Result<Vec<VideoDto>> {
         let mut url = format!(
-            "{}/admin/api/category/{channel_id}?page={page}&sort={sort}",
-            base_url.trim_end_matches('/')
+            "{}/admin/api/category/{}?page={page}&sort={}",
+            base_url.trim_end_matches('/'),
+            crate::urlencoding(channel_id),
+            crate::urlencoding(sort),
         );
         if let Some(dur) = min_duration {
             url.push_str(&format!("&min_duration={dur}"));
@@ -94,8 +96,9 @@ impl ResolverClient {
         offset_id: Option<i64>,
     ) -> Result<TelegramHistoryResponseDto> {
         let mut url = format!(
-            "{}/admin/api/telegram/history/{channel_id}?limit={limit}",
-            base_url.trim_end_matches('/')
+            "{}/admin/api/telegram/history/{}?limit={limit}",
+            base_url.trim_end_matches('/'),
+            crate::urlencoding(channel_id),
         );
         if let Some(offset) = offset_id {
             url.push_str(&format!("&offset_id={offset}"));
@@ -107,9 +110,10 @@ impl ResolverClient {
 
     pub fn search(&self, base_url: &str, query: &str, provider: &str) -> Result<Vec<VideoDto>> {
         let url = format!(
-            "{}/admin/api/search?q={}&provider={provider}",
+            "{}/admin/api/search?q={}&provider={}",
             base_url.trim_end_matches('/'),
-            urlencoding(query.trim())
+            urlencoding(query.trim()),
+            urlencoding(provider.trim())
         );
         let res: Vec<VideoDto> = self.client.get(&url).send()?.error_for_status()?.json()?;
         Ok(res)
@@ -178,13 +182,9 @@ impl ResolverClient {
         let url = format!(
             "{}/admin/api/v2/video-phash/jobs/{}",
             base_url.trim_end_matches('/'),
-            urlencoding(job_id.trim())
+            crate::urlencoding(job_id.trim())
         );
-        let response = self
-            .client
-            .get(&url)
-            .header("X-Emby-Token", token)
-            .send()?;
+        let response = self.client.get(&url).header("X-Emby-Token", token).send()?;
 
         let status = response.status();
         let code = status.as_u16();
@@ -224,22 +224,6 @@ impl Default for ResolverClient {
     fn default() -> Self {
         Self::new()
     }
-}
-
-
-fn urlencoding(input: &str) -> String {
-    let mut encoded = String::new();
-    for b in input.bytes() {
-        match b {
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                encoded.push(b as char);
-            }
-            _ => {
-                encoded.push_str(&format!("%{:02X}", b));
-            }
-        }
-    }
-    encoded
 }
 
 #[cfg(test)]
@@ -326,7 +310,10 @@ mod tests {
         assert_eq!(job.id, "job_12345");
         assert_eq!(job.video_id, "telegram:-100123:456:789");
         assert_eq!(job.state, "processing");
-        assert_eq!(job.decoder_profile.as_deref(), Some("resolver-ffmpeg-stash-v2"));
+        assert_eq!(
+            job.decoder_profile.as_deref(),
+            Some("resolver-ffmpeg-stash-v2")
+        );
     }
 
     #[test]
@@ -341,4 +328,3 @@ mod tests {
         assert!(!ResolverError::Conflict.is_retryable());
     }
 }
-

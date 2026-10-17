@@ -1,6 +1,6 @@
-# Adult Hub Desktop — Planning Documents
+# Adult Hub Desktop — Architecture & Stage Documentation
 
-Status: planning only. No application implementation has started.
+Status: Stages 1–9 implemented and verified with end-to-end evidence.
 
 These documents describe a functional Windows/Linux port of Adult Hub TV and Mobile. The selected foundation is Rust, Slint and libmpv. Android remains a Kotlin application.
 

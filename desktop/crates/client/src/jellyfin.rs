@@ -52,10 +52,10 @@ impl JellyfinClient {
 
         Self {
             client,
-            client_name: "Adult Hub Desktop".into(),
+            client_name: crate::CLIENT_NAME.into(),
             device_name: "Desktop".into(),
             device_id: device_id.into(),
-            version: "0.1.0".into(),
+            version: env!("CARGO_PKG_VERSION").into(),
         }
     }
 
@@ -180,7 +180,10 @@ impl JellyfinClient {
 
     pub fn quick_connect_poll(&self, base_url: &str, secret: &str) -> Result<QuickConnectStatus> {
         let base = Self::clean_url(base_url);
-        let url = format!("{base}/QuickConnect/Connect?secret={secret}");
+        let url = format!(
+            "{base}/QuickConnect/Connect?secret={}",
+            crate::urlencoding(secret)
+        );
         #[derive(Deserialize)]
         struct ConnectDto {
             #[serde(rename = "Authenticated")]
@@ -241,7 +244,7 @@ impl JellyfinClient {
         token: &str,
     ) -> Result<Vec<TvLibrary>> {
         let base = Self::clean_url(base_url);
-        let url = format!("{base}/Users/{user_id}/Views");
+        let url = format!("{base}/Users/{}/Views", crate::urlencoding(user_id));
         let res: ItemsResponseDto = self
             .client
             .get(&url)
@@ -271,7 +274,8 @@ impl JellyfinClient {
     ) -> Result<Vec<TvItem>> {
         let base = Self::clean_url(base_url);
         let url = format!(
-            "{base}/Users/{user_id}/Items/Resume?Limit={limit}&Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources"
+            "{base}/Users/{}/Items/Resume?Limit={limit}&Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources",
+            crate::urlencoding(user_id)
         );
         let res: ItemsResponseDto = self
             .client
@@ -298,10 +302,11 @@ impl JellyfinClient {
     ) -> Result<Vec<TvItem>> {
         let base = Self::clean_url(base_url);
         let mut url = format!(
-            "{base}/Users/{user_id}/Items/Latest?Limit={limit}&Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources"
+            "{base}/Users/{}/Items/Latest?Limit={limit}&Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources",
+            crate::urlencoding(user_id)
         );
         if let Some(pid) = parent_id {
-            url.push_str(&format!("&ParentId={pid}"));
+            url.push_str(&format!("&ParentId={}", crate::urlencoding(pid)));
         }
         let res: Vec<BaseItemDto> = self
             .client
@@ -323,41 +328,42 @@ impl JellyfinClient {
     ) -> Result<TvItemsPage> {
         let base = Self::clean_url(base_url);
         let mut url = format!(
-            "{base}/Users/{user_id}/Items?StartIndex={}&Limit={}&Recursive=true&IncludeItemTypes=Movie&Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources",
+            "{base}/Users/{}/Items?StartIndex={}&Limit={}&Recursive=true&IncludeItemTypes=Movie&Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources",
+            crate::urlencoding(user_id),
             query.start_index,
             query.limit
         );
         if let Some(pid) = query.parent_id {
-            url.push_str(&format!("&ParentId={pid}"));
+            url.push_str(&format!("&ParentId={}", crate::urlencoding(pid)));
         }
         if !query.sort_by.is_empty() {
-            url.push_str(&format!("&SortBy={}", query.sort_by));
+            url.push_str(&format!("&SortBy={}", crate::urlencoding(query.sort_by)));
+            let order = if query.sort_descending {
+                "Descending"
+            } else {
+                "Ascending"
+            };
+            url.push_str(&format!("&SortOrder={order}"));
         }
-        let order = if query.sort_descending {
-            "Descending"
-        } else {
-            "Ascending"
-        };
-        url.push_str(&format!("&SortOrder={order}"));
 
         if let Some(term) = query.search_term {
             if !term.trim().is_empty() {
-                url.push_str(&format!("&SearchTerm={}", urlencoding(term.trim())));
+                url.push_str(&format!("&SearchTerm={}", crate::urlencoding(term.trim())));
             }
         }
         if let Some(person) = query.person {
             if !person.trim().is_empty() {
-                url.push_str(&format!("&Person={}", urlencoding(person.trim())));
+                url.push_str(&format!("&Person={}", crate::urlencoding(person.trim())));
             }
         }
         if let Some(studio) = query.studio {
             if !studio.trim().is_empty() {
-                url.push_str(&format!("&Studios={}", urlencoding(studio.trim())));
+                url.push_str(&format!("&Studios={}", crate::urlencoding(studio.trim())));
             }
         }
         if let Some(genre) = query.genre {
             if !genre.trim().is_empty() {
-                url.push_str(&format!("&Genres={}", urlencoding(genre.trim())));
+                url.push_str(&format!("&Genres={}", crate::urlencoding(genre.trim())));
             }
         }
         if let Some(fav) = query.is_favorite {
@@ -395,7 +401,8 @@ impl JellyfinClient {
     ) -> Result<Vec<TvItem>> {
         let base = Self::clean_url(base_url);
         let url = format!(
-            "{base}/Items/{item_id}/Similar?Limit={limit}&Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources"
+            "{base}/Items/{}/Similar?Limit={limit}&Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources",
+            crate::urlencoding(item_id)
         );
         let res: ItemsResponseDto = self
             .client
@@ -424,9 +431,7 @@ impl JellyfinClient {
             Some(t) if !t.trim().is_empty() => format!("&tag={t}"),
             _ => String::new(),
         };
-        format!(
-            "{base}/Items/{item_id}/Images/{image_type}?maxWidth={max_width}{tag_param}"
-        )
+        format!("{base}/Items/{item_id}/Images/{image_type}?maxWidth={max_width}{tag_param}")
     }
 
     pub fn stream_url(base_url: &str, item_id: &str) -> String {
@@ -516,7 +521,9 @@ impl JellyfinClient {
     ) -> Result<TvItem> {
         let base = Self::clean_url(base_url);
         let url = format!(
-            "{base}/Users/{user_id}/Items/{item_id}?Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources"
+            "{base}/Users/{}/Items/{}?Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources",
+            crate::urlencoding(user_id),
+            crate::urlencoding(item_id)
         );
         let res: BaseItemDto = self
             .client
@@ -540,7 +547,11 @@ impl JellyfinClient {
             return Ok(());
         }
         let base = Self::clean_url(base_url);
-        let url = format!("{base}/Users/{user_id}/FavoriteItems/{item_id}");
+        let url = format!(
+            "{base}/Users/{}/FavoriteItems/{}",
+            crate::urlencoding(user_id),
+            crate::urlencoding(item_id)
+        );
         let req = if is_favorite {
             self.client.post(&url)
         } else {
@@ -564,7 +575,11 @@ impl JellyfinClient {
             return Ok(());
         }
         let base = Self::clean_url(base_url);
-        let url = format!("{base}/Users/{user_id}/PlayedItems/{item_id}");
+        let url = format!(
+            "{base}/Users/{}/PlayedItems/{}",
+            crate::urlencoding(user_id),
+            crate::urlencoding(item_id)
+        );
         let req = if is_played {
             self.client.post(&url)
         } else {
@@ -575,21 +590,6 @@ impl JellyfinClient {
             .error_for_status()?;
         Ok(())
     }
-}
-
-fn urlencoding(input: &str) -> String {
-    let mut encoded = String::new();
-    for b in input.bytes() {
-        match b {
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                encoded.push(b as char);
-            }
-            _ => {
-                encoded.push_str(&format!("%{:02X}", b));
-            }
-        }
-    }
-    encoded
 }
 
 // Internal Jellyfin DTOs
@@ -935,6 +935,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires network access to adult.ferges.eu"]
     fn connects_to_adult_ferges_eu_bare_host() {
         let client = JellyfinClient::new("test-device");
         // Test with bare host

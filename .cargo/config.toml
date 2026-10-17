@@ -1,8 +1,6 @@
 # Cargo configuration for Adult Hub Desktop repository root.
 # Matches desktop/.cargo/config.toml so commands run from either /work or /work/desktop share settings.
 
-[build]
-rustflags = ["-C", "link-arg=-fuse-ld=bfd"]
 
 [target.x86_64-pc-windows-gnu]
 linker = "x86_64-w64-mingw32-gcc"

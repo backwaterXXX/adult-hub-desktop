@@ -44,7 +44,7 @@ pub struct TvPersonRole {
     pub primary_image_tag: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct TvItem {
     pub id: String,
     pub title: String,
@@ -71,6 +71,14 @@ pub struct TvItem {
 }
 
 impl TvItem {
+    pub fn new(id: impl Into<String>, title: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            title: title.into(),
+            ..Default::default()
+        }
+    }
+
     pub fn is_telegram(&self) -> bool {
         self.provider_video_id
             .as_deref()
@@ -290,6 +298,23 @@ pub struct PlaybackProgressInfo {
     pub play_method: PlayMethod,
 }
 
+impl From<PlaybackStartInfo> for PlaybackProgressInfo {
+    fn from(start: PlaybackStartInfo) -> Self {
+        Self {
+            item_id: start.item_id,
+            media_source_id: start.media_source_id,
+            position_ticks: start.position_ticks,
+            play_session_id: start.play_session_id,
+            can_seek: start.can_seek,
+            is_muted: start.is_muted,
+            is_paused: start.is_paused,
+            repeat_mode: start.repeat_mode,
+            playback_order: start.playback_order,
+            play_method: start.play_method,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlaybackStopInfo {
     #[serde(rename = "ItemId")]
@@ -373,10 +398,11 @@ mod tests {
         assert_eq!(item.people.len(), 2);
         assert_eq!(item.people[0].name, "Eva Green");
         assert_eq!(item.people[1].name, "Mia Ray");
-        assert_eq!(item.primary_image_tag.as_deref(), Some("https://thumb/999.jpg"));
+        assert_eq!(
+            item.primary_image_tag.as_deref(),
+            Some("https://thumb/999.jpg")
+        );
         assert_eq!(item.provider_video_id.as_deref(), Some("channel_4k:999"));
         assert!(item.is_telegram());
     }
 }
-
-

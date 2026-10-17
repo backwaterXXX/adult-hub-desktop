@@ -7,11 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-#[allow(dead_code)]
-const REPORTING_INTERVAL: Duration = Duration::from_secs(10);
 const PROGRESS_COALESCE_DELAY: Duration = Duration::from_millis(500);
-#[allow(dead_code)]
-const STOP_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone)]
 pub struct SessionInfo {
@@ -72,7 +68,17 @@ impl PlaybackReporter {
             thread::Builder::new()
                 .name("playback-reporter".into())
                 .spawn(move || {
-                    worker_loop(client, server_auth, current_session, command_rx, stop_signal)
+                    worker_loop(
+                        client,
+                        server_auth,
+                        current_session,
+                        command_rx,
+                        stop_signal,
+                    )
+                })
+                .map_err(|e| {
+                    eprintln!("Failed to spawn playback-reporter thread: {e}");
+                    e
                 })
                 .ok()
         };
@@ -264,10 +270,14 @@ fn worker_loop(
 
         match cmd {
             ReportCommand::Shutdown => break,
-            ReportCommand::Start { session, position_ms } => {
+            ReportCommand::Start {
+                session,
+                position_ms,
+            } => {
                 let is_current = {
                     let lock = current_session.lock().unwrap();
-                    lock.as_ref().is_some_and(|s| s.session_id == session.session_id)
+                    lock.as_ref()
+                        .is_some_and(|s| s.session_id == session.session_id)
                 };
                 if !is_current {
                     continue;
@@ -304,7 +314,8 @@ fn worker_loop(
             } => {
                 let is_current = {
                     let lock = current_session.lock().unwrap();
-                    lock.as_ref().is_some_and(|s| s.session_id == session.session_id)
+                    lock.as_ref()
+                        .is_some_and(|s| s.session_id == session.session_id)
                 };
                 if !is_current {
                     continue;
@@ -334,7 +345,10 @@ fn worker_loop(
                     let _ = client.report_playback_progress(&base_url, &token, &info);
                 }
             }
-            ReportCommand::Stop { session, position_ms } => {
+            ReportCommand::Stop {
+                session,
+                position_ms,
+            } => {
                 // Stop is always sent for the session even if current session has changed
                 if uuid::Uuid::parse_str(&session.item_id).is_err() {
                     continue;

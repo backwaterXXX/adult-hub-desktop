@@ -1,7 +1,7 @@
 use adult_hub_client::{PlayMethod, TvItem};
 use adult_hub_storage::{LocalStore, TelegramProgressRecord};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const RESUME_THRESHOLD_MIN_MS: u64 = 15_000;
 pub const RESUME_EXCLUSION_END_MS: u64 = 30_000;
@@ -164,8 +164,12 @@ mod tests {
 
         // <= 15s should not prompt resume
         assert!(!PlaybackSessionController::should_prompt_resume(0, dur));
-        assert!(!PlaybackSessionController::should_prompt_resume(10_000, dur));
-        assert!(!PlaybackSessionController::should_prompt_resume(15_000, dur));
+        assert!(!PlaybackSessionController::should_prompt_resume(
+            10_000, dur
+        ));
+        assert!(!PlaybackSessionController::should_prompt_resume(
+            15_000, dur
+        ));
 
         // > 15s and < duration - 30s should prompt resume
         assert!(PlaybackSessionController::should_prompt_resume(15_001, dur));
@@ -173,8 +177,12 @@ mod tests {
         assert!(PlaybackSessionController::should_prompt_resume(69_999, dur));
 
         // >= duration - 30s (70s) should NOT prompt resume (near end / credits)
-        assert!(!PlaybackSessionController::should_prompt_resume(70_000, dur));
-        assert!(!PlaybackSessionController::should_prompt_resume(95_000, dur));
+        assert!(!PlaybackSessionController::should_prompt_resume(
+            70_000, dur
+        ));
+        assert!(!PlaybackSessionController::should_prompt_resume(
+            95_000, dur
+        ));
 
         // Unknown duration: prompts resume as long as > 15s
         assert!(PlaybackSessionController::should_prompt_resume(25_000, 0));

@@ -32,9 +32,15 @@ jobs:
             libxcursor-dev libxrandr-dev libxi-dev libasound2-dev libpulse-dev
 
       - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99.1"
           components: rustfmt, clippy
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "desktop -> desktop/target"
 
       - name: Check code formatting
         run: cargo fmt --manifest-path desktop/Cargo.toml --all -- --check
@@ -57,11 +63,19 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libmpv-dev libsqlite3-dev libssl-dev libxkbcommon-dev \
-            libfontconfig1-dev libgl1-mesa-dev libx11-dev libasound2-dev dpkg-dev
+            libmpv-dev libsqlite3-dev libssl-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libfontconfig1-dev libfreetype-dev libgl1-mesa-dev libegl1-mesa-dev libx11-dev \
+            libxcursor-dev libxrandr-dev libxi-dev libasound2-dev libpulse-dev dpkg-dev
 
       - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "desktop -> desktop/target"
 
       - name: Build Linux release binary
         run: |
@@ -100,9 +114,15 @@ jobs:
             mingw-w64 nsis p7zip-full zip curl
 
       - name: Setup Rust toolchain for Windows target
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99.1"
           targets: x86_64-pc-windows-gnu
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "desktop -> desktop/target"
 
       - name: Build Windows release binary and ZIP
         run: ./scripts/package-windows.sh
@@ -138,6 +158,16 @@ jobs:
           mkdir -p bin
           find bin-artifacts -type f -exec cp {} bin/ \;
           ls -la bin/
+
+      - name: Validate Release Version
+        run: |
+          TAG_VER="${GITHUB_REF#refs/tags/desktop-v}"
+          CARGO_VER=$(grep '^version = ' desktop/Cargo.toml | head -1 | cut -d '"' -f 2)
+          echo "Tag version: ${TAG_VER}, Cargo.toml version: ${CARGO_VER}"
+          if [[ "${TAG_VER}" != "${CARGO_VER}" ]]; then
+            echo "::error::Tag version '${TAG_VER}' does not match desktop/Cargo.toml version '${CARGO_VER}'"
+            exit 1
+          fi
 
       - name: Generate & Sign Manifest
         env:

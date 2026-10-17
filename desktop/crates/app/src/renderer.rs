@@ -6,6 +6,7 @@
 
 use adult_hub_player::{Player, RenderContext};
 use glow::HasContext;
+use slint::ComponentHandle;
 use std::ffi::CStr;
 use std::num::NonZeroU32;
 use std::rc::Rc;
@@ -185,4 +186,73 @@ impl Drop for Renderer {
             unsafe { surface.destroy(&self.gl) };
         }
     }
+}
+
+pub fn install_renderer(
+    ui: &crate::MainWindow,
+    player: Rc<Player>,
+    frame_pending: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<(), slint::SetRenderingNotifierError> {
+    use std::sync::atomic::Ordering;
+    let ui_weak = ui.as_weak();
+    let frame_pending = frame_pending.clone();
+    let flip_y = std::env::var("ADULT_HUB_FLIP_Y")
+        .map(|value| value == "1" || value == "true")
+        .unwrap_or(false);
+    let mut renderer: Option<Renderer> = None;
+
+    ui.window()
+        .set_rendering_notifier(move |state, graphics_api| match state {
+            slint::RenderingState::RenderingSetup => {
+                let slint::GraphicsAPI::NativeOpenGL { get_proc_address } = graphics_api else {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        crate::playback::show_error(
+                            &ui,
+                            "the selected Slint renderer is not OpenGL",
+                        );
+                    }
+                    return;
+                };
+                match Renderer::new(Rc::clone(&player), get_proc_address, flip_y) {
+                    Ok(mut created) => {
+                        let pending = frame_pending.clone();
+                        let w = ui_weak.clone();
+                        created.set_update_callback(move || {
+                            if !pending.swap(true, Ordering::SeqCst) {
+                                let w = w.clone();
+                                let _ = slint::invoke_from_event_loop(move || {
+                                    if let Some(ui) = w.upgrade() {
+                                        ui.window().request_redraw();
+                                    }
+                                });
+                            }
+                        });
+                        renderer = Some(created);
+                    }
+                    Err(error) => {
+                        if let Some(ui) = ui_weak.upgrade() {
+                            crate::playback::show_error(&ui, error);
+                        }
+                    }
+                }
+            }
+            slint::RenderingState::BeforeRendering => {
+                frame_pending.store(false, Ordering::SeqCst);
+                let Some(renderer) = renderer.as_mut() else {
+                    return;
+                };
+                let Some(ui) = ui_weak.upgrade() else { return };
+                let width = ui.get_texture_width().max(2) as u32;
+                let height = ui.get_texture_height().max(2) as u32;
+                match renderer.render(width, height) {
+                    Ok(Some(image)) => ui.set_video_image(image),
+                    Ok(None) => {}
+                    Err(error) => crate::playback::show_error(&ui, error),
+                }
+            }
+            slint::RenderingState::RenderingTeardown => {
+                renderer = None;
+            }
+            _ => {}
+        })
 }

@@ -57,22 +57,24 @@ pub fn resolve_phash_duration_us(
     None
 }
 
-const SUPPORTED_DECODER_PROFILES: [&str; 2] =
-    ["resolver-ffmpeg-stash-v2", "resolver-ffmpeg-v1"];
+const SUPPORTED_DECODER_PROFILES: [&str; 2] = ["resolver-ffmpeg-stash-v2", "resolver-ffmpeg-v1"];
 
 fn is_active_state(state: &str) -> bool {
     let s = state.to_ascii_lowercase();
-    s == "submitting" || s == "queued" || s == "processing"
+    matches!(s.as_str(), "submitting" | "queued" | "processing")
 }
 
 fn is_success_state(state: &str) -> bool {
     let s = state.to_ascii_lowercase();
-    s == "done" || s == "completed" || s == "succeeded"
+    matches!(s.as_str(), "done" | "completed" | "succeeded")
 }
 
 fn is_terminal_state(state: &str) -> bool {
     let s = state.to_ascii_lowercase();
-    is_success_state(&s) || s == "failed" || s == "cancelled"
+    matches!(
+        s.as_str(),
+        "done" | "completed" | "succeeded" | "failed" | "cancelled"
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,9 +190,9 @@ impl PhashCoordinator {
         if let Ok(jobs) = self.store.get_all_phash_jobs() {
             for record in jobs {
                 self.set_status(&record.video_id, Self::status_for(&record));
-                if record.job_id.is_some() && is_active_state(&record.state) {
-                    self.start(record.video_id, None, None, record.duration_us);
-                } else if record.state == "submitting" && record.duration_us.is_some() {
+                if (record.job_id.is_some() && is_active_state(&record.state))
+                    || (record.state == "submitting" && record.duration_us.is_some())
+                {
                     self.start(record.video_id, None, None, record.duration_us);
                 }
             }
@@ -307,7 +309,9 @@ impl PhashCoordinator {
         let duration_us = duration_override_us
             .or_else(|| stored.as_ref().and_then(|s| s.duration_us))
             .or_else(|| {
-                item.and_then(|it| resolve_phash_duration_us(it.runtime_ticks, observed_duration_ms))
+                item.and_then(|it| {
+                    resolve_phash_duration_us(it.runtime_ticks, observed_duration_ms)
+                })
             });
 
         let Some(duration_us) = duration_us else {
@@ -569,9 +573,25 @@ impl PhashCoordinator {
     ) {
         let mut backoff = Duration::from_secs(5);
         let max_backoff = Duration::from_secs(60);
+        let mut poll_count = 0usize;
+        const MAX_POLLS: usize = 720; // ~1 hour maximum polling
 
         loop {
             if cancelled.load(Ordering::SeqCst) {
+                return;
+            }
+
+            poll_count += 1;
+            if poll_count > MAX_POLLS {
+                if let Ok(mut map) = statuses_mutex.write() {
+                    map.insert(
+                        video_id.to_string(),
+                        PhashUiStatus {
+                            message: "Resolver task timed out after 1 hour".into(),
+                            terminal: true,
+                        },
+                    );
+                }
                 return;
             }
 
@@ -644,8 +664,9 @@ impl PhashCoordinator {
                                 map.insert(
                                     video_id.to_string(),
                                     PhashUiStatus {
-                                        message: "Resolver task uses an unsupported decoder profile"
-                                            .into(),
+                                        message:
+                                            "Resolver task uses an unsupported decoder profile"
+                                                .into(),
                                         terminal: false,
                                     },
                                 );

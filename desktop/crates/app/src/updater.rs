@@ -8,7 +8,7 @@
 //! - Platform package handoff: Windows NSIS installer, Linux .deb or AppImage
 
 use ring::digest::{self, SHA256};
-use ring::signature::{UnparsedPublicKey, ED25519};
+use ring::signature::{ED25519, UnparsedPublicKey};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{Read, Write};
@@ -17,10 +17,8 @@ use thiserror::Error;
 
 /// Embedded release verification Ed25519 public key (32 bytes).
 pub const EMBEDDED_RELEASE_PUBLIC_KEY: [u8; 32] = [
-    0xc7, 0x20, 0x1f, 0xeb, 0xbc, 0x61, 0x25, 0x0b,
-    0x56, 0x27, 0x33, 0x78, 0x68, 0xea, 0xa3, 0xce,
-    0xbd, 0x36, 0x43, 0x9d, 0xa7, 0x27, 0x57, 0x39,
-    0xa4, 0x4f, 0x7f, 0xfc, 0xf0, 0x7a, 0x8e, 0x43,
+    0xc7, 0x20, 0x1f, 0xeb, 0xbc, 0x61, 0x25, 0x0b, 0x56, 0x27, 0x33, 0x78, 0x68, 0xea, 0xa3, 0xce,
+    0xbd, 0x36, 0x43, 0x9d, 0xa7, 0x27, 0x57, 0x39, 0xa4, 0x4f, 0x7f, 0xfc, 0xf0, 0x7a, 0x8e, 0x43,
 ];
 
 /// Default allowed release hosts for HTTPS downloads.
@@ -83,11 +81,11 @@ pub struct UpdateManifest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UpdatePackage {
-    pub platform: String,      // "windows" or "linux"
-    pub arch: String,          // "x86_64"
-    pub package_type: String,  // "installer", "zip", "deb", "appimage"
-    pub url: String,           // HTTPS download URL
-    pub sha256: String,        // 64-character lowercase hex string
+    pub platform: String,     // "windows" or "linux"
+    pub arch: String,         // "x86_64"
+    pub package_type: String, // "installer", "zip", "deb", "appimage"
+    pub url: String,          // HTTPS download URL
+    pub sha256: String,       // 64-character lowercase hex string
     pub size_bytes: u64,
 }
 
@@ -161,9 +159,12 @@ fn simple_base64_decode(input: &str) -> Result<Vec<u8>, ()> {
 }
 
 /// Verify an Ed25519 signature over manifest bytes.
-pub fn verify_signature(manifest_bytes: &[u8], signature_bytes: &[u8], public_key_bytes: &[u8]) -> Result<(), UpdateError> {
-    let raw_sig = decode_signature_bytes(signature_bytes)
-        .ok_or(UpdateError::InvalidSignature)?;
+pub fn verify_signature(
+    manifest_bytes: &[u8],
+    signature_bytes: &[u8],
+    public_key_bytes: &[u8],
+) -> Result<(), UpdateError> {
+    let raw_sig = decode_signature_bytes(signature_bytes).ok_or(UpdateError::InvalidSignature)?;
 
     if raw_sig.len() != 64 || public_key_bytes.len() != 32 {
         return Err(UpdateError::InvalidSignature);
@@ -176,7 +177,10 @@ pub fn verify_signature(manifest_bytes: &[u8], signature_bytes: &[u8], public_ke
 }
 
 /// Validate manifest URLs and hosts.
-pub fn validate_package_urls(manifest: &UpdateManifest, allowed_hosts: &[&str]) -> Result<(), UpdateError> {
+pub fn validate_package_urls(
+    manifest: &UpdateManifest,
+    allowed_hosts: &[&str],
+) -> Result<(), UpdateError> {
     // Release notes URL must be HTTPS
     if !manifest.release_notes_url.starts_with("https://") {
         return Err(UpdateError::InsecureUrl(manifest.release_notes_url.clone()));
@@ -191,9 +195,9 @@ pub fn validate_package_urls(manifest: &UpdateManifest, allowed_hosts: &[&str]) 
             .map_err(|e| UpdateError::InsecureUrl(format!("{}: {e}", package.url)))?;
 
         let host = parsed_url.host_str().unwrap_or("");
-        let is_allowed = allowed_hosts.iter().any(|allowed| {
-            host == *allowed || host.ends_with(&format!(".{allowed}"))
-        });
+        let is_allowed = allowed_hosts
+            .iter()
+            .any(|allowed| host == *allowed || host.ends_with(&format!(".{allowed}")));
 
         if !is_allowed {
             return Err(UpdateError::DisallowedHost(host.to_string()));
@@ -221,8 +225,8 @@ pub fn parse_and_verify_manifest(
     verify_signature(manifest_bytes, signature_bytes, public_key_bytes)?;
 
     // 2. Parse JSON
-    let manifest: UpdateManifest = serde_json::from_slice(manifest_bytes)
-        .map_err(|e| UpdateError::Json(e.to_string()))?;
+    let manifest: UpdateManifest =
+        serde_json::from_slice(manifest_bytes).map_err(|e| UpdateError::Json(e.to_string()))?;
 
     // 3. Check schema version
     if manifest.schema_version != 1 {
@@ -271,7 +275,9 @@ pub fn select_best_package<'a>(
 ) -> Option<&'a UpdatePackage> {
     let matching: Vec<&'a UpdatePackage> = packages
         .iter()
-        .filter(|p| p.platform.eq_ignore_ascii_case(target_os) && p.arch.eq_ignore_ascii_case(target_arch))
+        .filter(|p| {
+            p.platform.eq_ignore_ascii_case(target_os) && p.arch.eq_ignore_ascii_case(target_arch)
+        })
         .collect();
 
     if target_os == "windows" {
@@ -292,7 +298,12 @@ pub fn select_best_package<'a>(
                 .iter()
                 .find(|p| p.package_type == "deb")
                 .copied()
-                .or_else(|| matching.iter().find(|p| p.package_type == "appimage").copied())
+                .or_else(|| {
+                    matching
+                        .iter()
+                        .find(|p| p.package_type == "appimage")
+                        .copied()
+                })
         }
     } else {
         matching.first().copied()
@@ -300,9 +311,15 @@ pub fn select_best_package<'a>(
 }
 
 /// Check file size and SHA-256 integrity.
-pub fn verify_file_integrity(file_path: &Path, expected_sha256: &str, expected_size: u64) -> Result<(), UpdateError> {
+pub fn verify_file_integrity(
+    file_path: &Path,
+    expected_sha256: &str,
+    expected_size: u64,
+) -> Result<(), UpdateError> {
     let mut file = File::open(file_path).map_err(|e| UpdateError::Io(e.to_string()))?;
-    let metadata = file.metadata().map_err(|e| UpdateError::Io(e.to_string()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|e| UpdateError::Io(e.to_string()))?;
     if metadata.len() != expected_size {
         return Err(UpdateError::SizeMismatch {
             expected: expected_size,
@@ -313,7 +330,9 @@ pub fn verify_file_integrity(file_path: &Path, expected_sha256: &str, expected_s
     let mut context = digest::Context::new(&SHA256);
     let mut buffer = [0u8; 65536];
     loop {
-        let count = file.read(&mut buffer).map_err(|e| UpdateError::Io(e.to_string()))?;
+        let count = file
+            .read(&mut buffer)
+            .map_err(|e| UpdateError::Io(e.to_string()))?;
         if count == 0 {
             break;
         }
@@ -365,9 +384,9 @@ pub fn download_and_verify_package(
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
             // Ensure redirects remain HTTPS and within allowed hosts
             let host = attempt.url().host_str().unwrap_or("");
-            let is_allowed = DEFAULT_ALLOWED_HOSTS.iter().any(|allowed| {
-                host == *allowed || host.ends_with(&format!(".{allowed}"))
-            });
+            let is_allowed = DEFAULT_ALLOWED_HOSTS
+                .iter()
+                .any(|allowed| host == *allowed || host.ends_with(&format!(".{allowed}")));
             if !is_allowed || attempt.url().scheme() != "https" {
                 attempt.stop()
             } else {
@@ -383,7 +402,10 @@ pub fn download_and_verify_package(
         .map_err(|e| UpdateError::DownloadFailed(e.to_string()))?;
 
     if !response.status().is_success() {
-        return Err(UpdateError::DownloadFailed(format!("HTTP status {}", response.status())));
+        return Err(UpdateError::DownloadFailed(format!(
+            "HTTP status {}",
+            response.status()
+        )));
     }
 
     let total_size = response.content_length().unwrap_or(package.size_bytes);
@@ -422,7 +444,11 @@ pub fn download_and_verify_package(
 }
 
 /// Launch installation according to platform.
-pub fn launch_installation(package_type: &str, file_path: &Path, is_playback_active: bool) -> Result<(), UpdateError> {
+pub fn launch_installation(
+    package_type: &str,
+    file_path: &Path,
+    is_playback_active: bool,
+) -> Result<(), UpdateError> {
     if is_playback_active {
         return Err(UpdateError::PlaybackActive);
     }
@@ -456,17 +482,17 @@ pub fn launch_installation(package_type: &str, file_path: &Path, is_playback_act
                     let _ = std::fs::remove_file(&test_file);
                 }
 
-                // Prepare replacement script
+                // Prepare replacement script with safe POSIX shell escaping
                 let helper_script = std::env::temp_dir().join("adult-hub-appimage-replace.sh");
                 let pid = std::process::id();
+                let escape_arg = |p: &Path| -> String {
+                    format!("'{}'", p.to_string_lossy().replace('\'', "'\\''"))
+                };
+                let cur_esc = escape_arg(&current_path);
+                let cur_old_esc = escape_arg(&current_path.with_extension("AppImage.old"));
+                let file_esc = escape_arg(file_path);
                 let script_content = format!(
-                    "#!/bin/sh\nwhile kill -0 {pid} 2>/dev/null; do sleep 0.2; done\ncp -f \"{}\" \"{}.old\"\nmv -f \"{}\" \"{}\"\nchmod +x \"{}\"\nexec \"{}\" &\n",
-                    current_path.display(),
-                    current_path.display(),
-                    file_path.display(),
-                    current_path.display(),
-                    current_path.display(),
-                    current_path.display(),
+                    "#!/bin/sh\nwhile kill -0 {pid} 2>/dev/null; do sleep 0.2; done\ncp -f {cur_esc} {cur_old_esc}\nmv -f {file_esc} {cur_esc}\nchmod +x {cur_esc}\nexec {cur_esc} &\n"
                 );
                 std::fs::write(&helper_script, script_content)
                     .map_err(|e| UpdateError::Io(e.to_string()))?;
@@ -474,12 +500,13 @@ pub fn launch_installation(package_type: &str, file_path: &Path, is_playback_act
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(&helper_script, std::fs::Permissions::from_mode(0o755));
+                    let _ = std::fs::set_permissions(
+                        &helper_script,
+                        std::fs::Permissions::from_mode(0o755),
+                    );
                 }
 
-                let _ = std::process::Command::new("sh")
-                    .arg(&helper_script)
-                    .spawn();
+                let _ = std::process::Command::new("sh").arg(&helper_script).spawn();
 
                 std::process::exit(0);
             }
@@ -554,24 +581,28 @@ mod tests {
 
         // Tampered manifest must fail
         let tampered_json = manifest_json.replace("0.2.0", "0.3.0");
-        assert!(parse_and_verify_manifest(
-            tampered_json.as_bytes(),
-            sig_bytes,
-            public_key,
-            DEFAULT_ALLOWED_HOSTS
-        )
-        .is_err());
+        assert!(
+            parse_and_verify_manifest(
+                tampered_json.as_bytes(),
+                sig_bytes,
+                public_key,
+                DEFAULT_ALLOWED_HOSTS
+            )
+            .is_err()
+        );
 
         // Corrupted signature must fail
         let mut corrupted_sig = sig_bytes.to_vec();
         corrupted_sig[0] ^= 0xff;
-        assert!(parse_and_verify_manifest(
-            manifest_json.as_bytes(),
-            &corrupted_sig,
-            public_key,
-            DEFAULT_ALLOWED_HOSTS
-        )
-        .is_err());
+        assert!(
+            parse_and_verify_manifest(
+                manifest_json.as_bytes(),
+                &corrupted_sig,
+                public_key,
+                DEFAULT_ALLOWED_HOSTS
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -618,13 +649,15 @@ mod tests {
             "packages": []
         }"#;
         let sig = key_pair.sign(insecure_json.as_bytes());
-        assert!(parse_and_verify_manifest(
-            insecure_json.as_bytes(),
-            sig.as_ref(),
-            public_key,
-            DEFAULT_ALLOWED_HOSTS
-        )
-        .is_err());
+        assert!(
+            parse_and_verify_manifest(
+                insecure_json.as_bytes(),
+                sig.as_ref(),
+                public_key,
+                DEFAULT_ALLOWED_HOSTS
+            )
+            .is_err()
+        );
 
         // Disallowed external domain
         let disallowed_json = r#"{
@@ -722,7 +755,9 @@ mod tests {
         assert!(verify_file_integrity(&test_file, &digest_hex, content.len() as u64).is_ok());
 
         // Size mismatch
-        assert!(verify_file_integrity(&test_file, &digest_hex, (content.len() + 1) as u64).is_err());
+        assert!(
+            verify_file_integrity(&test_file, &digest_hex, (content.len() + 1) as u64).is_err()
+        );
 
         // Hash mismatch
         let wrong_hash = "0000000000000000000000000000000000000000000000000000000000000000";

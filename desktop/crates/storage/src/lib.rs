@@ -202,7 +202,7 @@ impl LocalStore {
             )?;
         }
 
-        let v2_needed: bool = conn
+        let v2_needed = current_version < 2 && conn
             .query_row(
                 "SELECT COUNT(*) FROM pragma_table_info('local_progress') WHERE name = 'is_played'",
                 [],
@@ -224,14 +224,15 @@ impl LocalStore {
             )?;
         }
 
-        let v3_needed: bool = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='phash_jobs'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .map(|count| count == 0)
-            .unwrap_or(false);
+        let v3_needed = current_version < 3
+            && conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='phash_jobs'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map(|count| count == 0)
+                .unwrap_or(false);
 
         if v3_needed {
             conn.execute_batch(
@@ -253,7 +254,6 @@ impl LocalStore {
 
         Ok(())
     }
-
 
     // Settings helpers
     pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
@@ -679,7 +679,10 @@ impl LocalStore {
 
     pub fn remove_phash_job(&self, video_id: &str) -> Result<()> {
         let conn = self.conn()?;
-        conn.execute("DELETE FROM phash_jobs WHERE video_id = ?1", params![video_id])?;
+        conn.execute(
+            "DELETE FROM phash_jobs WHERE video_id = ?1",
+            params![video_id],
+        )?;
         Ok(())
     }
 
@@ -759,7 +762,9 @@ impl LocalStore {
             )));
         }
         if config.cache_limit_mb < 0 {
-            return Err(StorageError::Custom("cacheLimitMb must be non-negative".into()));
+            return Err(StorageError::Custom(
+                "cacheLimitMb must be non-negative".into(),
+            ));
         }
         if config.seek_step_sec <= 0 {
             return Err(StorageError::Custom("seekStepSec must be positive".into()));
@@ -776,7 +781,9 @@ impl LocalStore {
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
 
-        if let (Some(lib_id), Some(lib_name)) = (&config.selected_library_id, &config.selected_library_name) {
+        if let (Some(lib_id), Some(lib_name)) =
+            (&config.selected_library_id, &config.selected_library_name)
+        {
             tx.execute(
                 "INSERT INTO settings (key, value) VALUES ('selected_library_id', ?1)
                  ON CONFLICT(key) DO UPDATE SET value = ?1",
@@ -814,7 +821,11 @@ impl LocalStore {
         tx.execute(
             "INSERT INTO settings (key, value) VALUES ('phash_on_playback', ?1)
              ON CONFLICT(key) DO UPDATE SET value = ?1",
-            params![if config.phash_on_playback { "true" } else { "false" }],
+            params![if config.phash_on_playback {
+                "true"
+            } else {
+                "false"
+            }],
         )?;
         tx.execute(
             "INSERT INTO settings (key, value) VALUES ('buffer_profile', ?1)
@@ -834,12 +845,20 @@ impl LocalStore {
         tx.execute(
             "INSERT INTO settings (key, value) VALUES ('autoplay_next', ?1)
              ON CONFLICT(key) DO UPDATE SET value = ?1",
-            params![if config.autoplay_next { "true" } else { "false" }],
+            params![if config.autoplay_next {
+                "true"
+            } else {
+                "false"
+            }],
         )?;
         tx.execute(
             "INSERT INTO settings (key, value) VALUES ('auto_update_enabled', ?1)
              ON CONFLICT(key) DO UPDATE SET value = ?1",
-            params![if config.auto_update_enabled { "true" } else { "false" }],
+            params![if config.auto_update_enabled {
+                "true"
+            } else {
+                "false"
+            }],
         )?;
 
         if let Some(cat_ids) = &config.selected_home_category_ids {
@@ -962,7 +981,6 @@ impl LocalStore {
         Ok(())
     }
 }
-
 
 pub fn default_db_path() -> std::path::PathBuf {
     #[cfg(windows)]
@@ -1179,7 +1197,10 @@ mod tests {
         assert_eq!(loaded.position_ms, 45_000);
         assert_eq!(loaded.duration_ms, 120_000);
         assert_eq!(loaded.title, "Test Scene 101");
-        assert_eq!(loaded.thumbnail_url.as_deref(), Some("http://thumb/101.jpg"));
+        assert_eq!(
+            loaded.thumbnail_url.as_deref(),
+            Some("http://thumb/101.jpg")
+        );
         assert!(!loaded.is_played);
 
         // Mark played
@@ -1287,16 +1308,28 @@ mod tests {
 
         let exported = store.export_non_secret_config().unwrap();
         assert_eq!(exported.version, 1);
-        assert_eq!(exported.selected_library_id.as_deref(), Some("lib_adult_4k"));
-        assert_eq!(exported.selected_library_name.as_deref(), Some("4K Ultra Adult"));
-        assert_eq!(exported.resolver_base_url.as_deref(), Some("https://resolver.example.org"));
+        assert_eq!(
+            exported.selected_library_id.as_deref(),
+            Some("lib_adult_4k")
+        );
+        assert_eq!(
+            exported.selected_library_name.as_deref(),
+            Some("4K Ultra Adult")
+        );
+        assert_eq!(
+            exported.resolver_base_url.as_deref(),
+            Some("https://resolver.example.org")
+        );
         assert_eq!(exported.cache_limit_mb, 512);
         assert!(exported.phash_on_playback);
         assert_eq!(exported.buffer_profile, "fast_start");
         assert!(exported.low_ram_mode);
         assert_eq!(exported.seek_step_sec, 30);
         assert!(exported.autoplay_next);
-        assert_eq!(exported.selected_home_category_ids, Some(vec!["cat1".into(), "cat2".into()]));
+        assert_eq!(
+            exported.selected_home_category_ids,
+            Some(vec!["cat1".into(), "cat2".into()])
+        );
         assert_eq!(exported.hidden_channel_ids, vec!["chan_hidden_9"]);
         assert_eq!(exported.excluded_tags, vec!["tag_a", "tag_b"]);
         assert!(!exported.auto_update_enabled);
@@ -1327,11 +1360,21 @@ mod tests {
 
         let res = store.import_non_secret_config_json(invalid_version_json);
         assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("Unsupported configuration version: 2"));
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("Unsupported configuration version: 2")
+        );
 
         // Settings must remain completely unmodified
-        assert_eq!(store.get_setting("cache_limit_mb").unwrap().as_deref(), Some("100"));
-        assert_eq!(store.get_setting("seek_step_sec").unwrap().as_deref(), Some("10"));
+        assert_eq!(
+            store.get_setting("cache_limit_mb").unwrap().as_deref(),
+            Some("100")
+        );
+        assert_eq!(
+            store.get_setting("seek_step_sec").unwrap().as_deref(),
+            Some("10")
+        );
     }
 
     #[test]
@@ -1347,7 +1390,10 @@ mod tests {
             "seekStepSec": 15
         }"#;
         assert!(store.import_non_secret_config_json(bad_profile).is_err());
-        assert_eq!(store.get_setting("buffer_profile").unwrap().as_deref(), Some("standard"));
+        assert_eq!(
+            store.get_setting("buffer_profile").unwrap().as_deref(),
+            Some("standard")
+        );
 
         // Negative cache limit
         let negative_cache = r#"{
@@ -1377,7 +1423,10 @@ mod tests {
         store.hide_channel("chan_1").unwrap();
         store.hide_channel("chan_2").unwrap();
         store.hide_channel("chan_1").unwrap(); // deduplication
-        assert_eq!(store.get_hidden_channels().unwrap(), vec!["chan_1", "chan_2"]);
+        assert_eq!(
+            store.get_hidden_channels().unwrap(),
+            vec!["chan_1", "chan_2"]
+        );
 
         store.unhide_channel("chan_1").unwrap();
         assert_eq!(store.get_hidden_channels().unwrap(), vec!["chan_2"]);
@@ -1393,4 +1442,3 @@ mod tests {
         assert_eq!(store.get_excluded_tags().unwrap(), vec!["Anal"]);
     }
 }
-

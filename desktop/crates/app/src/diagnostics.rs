@@ -27,7 +27,6 @@ static IDENTIFIER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
         .expect("valid identifier regex")
 });
 
-
 static TITLE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(title|filename|file[_-]?name)\b\s*[:=]\s*[^,;\n]+")
         .expect("valid title regex")
@@ -79,7 +78,11 @@ impl AppLog {
     fn write_entry(&self, level: &str, tag: &str, message: &str) {
         let safe_msg = redact(message);
         let truncated_msg = if safe_msg.len() > MAX_MESSAGE_LENGTH {
-            &safe_msg[..MAX_MESSAGE_LENGTH]
+            let mut boundary = MAX_MESSAGE_LENGTH;
+            while boundary > 0 && !safe_msg.is_char_boundary(boundary) {
+                boundary -= 1;
+            }
+            &safe_msg[..boundary]
         } else {
             &safe_msg
         };
@@ -193,7 +196,6 @@ mod tests {
         assert!(redacted2.contains("[ID]"));
         assert!(!redacted2.contains("6ba7b810-9dad-11d1-80b4-00c04fd430c8"));
     }
-
 
     #[test]
     fn buffer_bounding_and_export() {

@@ -66,9 +66,9 @@ pub fn discover_servers_with_socket(
                             .or(dto.endpoint_address)
                             .unwrap_or_else(|| format!("http://{}:8096", peer.ip()));
 
-                        let exists = servers
-                            .iter()
-                            .any(|s: &ServerInfo| (!id.is_empty() && s.id == id) || s.url == raw_url);
+                        let exists = servers.iter().any(|s: &ServerInfo| {
+                            (!id.is_empty() && s.id == id) || s.url == raw_url
+                        });
                         if !exists {
                             servers.push(ServerInfo {
                                 id,

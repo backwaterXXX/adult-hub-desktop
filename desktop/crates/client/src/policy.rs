@@ -25,7 +25,11 @@ impl ServiceUrlPolicy {
 
         let candidate_url = if !trimmed.contains("://") {
             let host_candidate = if trimmed.starts_with('[') {
-                trimmed.split(']').next().map(|s| &s[1..]).unwrap_or(trimmed)
+                trimmed
+                    .split(']')
+                    .next()
+                    .map(|s| &s[1..])
+                    .unwrap_or(trimmed)
             } else {
                 trimmed.split(['/', ':']).next().unwrap_or(trimmed)
             };
