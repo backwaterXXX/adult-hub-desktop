@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Package Adult Hub Desktop for Windows x64.
 # Builds the stripped release binary, bundles libmpv-2.dll, sample media,
-# and outputs dist/adult-hub-desktop-windows-x64/ and dist/adult-hub-desktop-windows-x64.zip.
+# and outputs directly to bin/ and bin/adult-hub-desktop-windows-x64.zip.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BIN_DIR="${ROOT_DIR}/bin"
 DIST_DIR="${ROOT_DIR}/dist"
-OUT_DIR="${DIST_DIR}/adult-hub-desktop-windows-x64"
+OUT_DIR="${BIN_DIR}/adult-hub-desktop-windows-x64"
 CACHE_DIR="${ROOT_DIR}/.cache/windows"
 TARGET="x86_64-pc-windows-gnu"
 MPV_VER="20261011-git-accb7b2821"
@@ -32,14 +33,21 @@ if [[ ! -f "${CACHE_DIR}/libmpv-2.dll" ]]; then
     rm -f "${CACHE_DIR}/mpv-dev.7z"
 fi
 
-echo "==> Staging distribution package in ${OUT_DIR}..."
+echo "==> Staging distribution package in ${BIN_DIR}..."
+mkdir -p "${BIN_DIR}"
 rm -rf "${OUT_DIR}"
 mkdir -p "${OUT_DIR}"
+
 cp "${EXE_PATH}" "${OUT_DIR}/"
 cp "${CACHE_DIR}/libmpv-2.dll" "${OUT_DIR}/"
 
+# Also place directly in bin/ for quick access
+cp "${EXE_PATH}" "${BIN_DIR}/adult-hub-desktop.exe"
+cp "${CACHE_DIR}/libmpv-2.dll" "${BIN_DIR}/libmpv-2.dll"
+
 if [[ -f "${ROOT_DIR}/desktop/sample.mp4" ]]; then
     cp "${ROOT_DIR}/desktop/sample.mp4" "${OUT_DIR}/"
+    cp "${ROOT_DIR}/desktop/sample.mp4" "${BIN_DIR}/sample.mp4"
 fi
 
 cat << 'EOF' > "${OUT_DIR}/README.txt"
@@ -57,8 +65,17 @@ Uruchomienie:
 
 Plik libmpv-2.dll musi znajdować się w tym samym folderze co adult-hub-desktop.exe.
 EOF
+cp "${OUT_DIR}/README.txt" "${BIN_DIR}/README.txt"
 
-echo "==> Creating ZIP archive..."
-(cd "${DIST_DIR}" && rm -f adult-hub-desktop-windows-x64.zip && zip -r adult-hub-desktop-windows-x64.zip adult-hub-desktop-windows-x64)
+echo "==> Creating ZIP archive in ${BIN_DIR}..."
+(cd "${BIN_DIR}" && rm -f adult-hub-desktop-windows-x64.zip && zip -r adult-hub-desktop-windows-x64.zip adult-hub-desktop-windows-x64)
 
-echo "==> Done! Output: ${DIST_DIR}/adult-hub-desktop-windows-x64.zip"
+# Also maintain dist/ for backwards compatibility
+mkdir -p "${DIST_DIR}"
+cp "${BIN_DIR}/adult-hub-desktop-windows-x64.zip" "${DIST_DIR}/"
+rm -rf "${DIST_DIR}/adult-hub-desktop-windows-x64"
+cp -r "${OUT_DIR}" "${DIST_DIR}/"
+
+echo "==> Done! Binaries available in: ${BIN_DIR}/"
+echo "    - ${BIN_DIR}/adult-hub-desktop.exe"
+echo "    - ${BIN_DIR}/adult-hub-desktop-windows-x64.zip"

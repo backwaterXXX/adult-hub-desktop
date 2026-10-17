@@ -3,6 +3,8 @@ target/
 **/target/
 
 # Generated packages and build artifacts
+bin/*
+!bin/.gitkeep
 dist/
 build/
 *.AppImage
