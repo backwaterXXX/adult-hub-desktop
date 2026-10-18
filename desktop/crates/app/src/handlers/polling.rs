@@ -2,17 +2,28 @@ use crate::MainWindow;
 use crate::context::AppContext;
 use crate::phash;
 use crate::playback::{
-    format_time, play_random_catalog_item, show_error, start_item_playback, stats_text,
-    update_texture_size,
+    format_time, show_error, start_item_playback, stats_text, update_texture_size,
 };
 use adult_hub_player::{Player, PlayerEvent};
 use slint::{ComponentHandle, Timer, TimerMode};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-pub fn install_polling(ui: &MainWindow, ctx: &AppContext, frame_pending: Arc<AtomicBool>) {
+const MAX_AUTOMATIC_RETRIES: u8 = 3;
+
+#[derive(Default)]
+struct PlaybackRecovery {
+    retries: u8,
+    retry_at: Option<Instant>,
+    position_seconds: f64,
+    retry_in_flight: bool,
+    loaded_at: Option<Instant>,
+    source_generation: u64,
+}
+
+pub fn install_polling(ui: &MainWindow, ctx: &AppContext, frame_pending: Arc<AtomicBool>) -> Timer {
     let ui_weak = ui.as_weak();
     let timer = Timer::default();
     let mut tick: u64 = 0;
@@ -21,7 +32,6 @@ pub fn install_polling(ui: &MainWindow, ctx: &AppContext, frame_pending: Arc<Ato
     let rep = ctx.reporter.clone();
     let sctrl = ctx.session_ctrl.clone();
     let cur_item = ctx.current_playing_item.clone();
-    let cat_ref = ctx.cached_catalog.clone();
     let ap_ref = ctx.autoplay_active.clone();
     let hd_ref = ctx.hwdec_active.clone();
     let hdrs = ctx.headers.clone();
@@ -29,6 +39,7 @@ pub fn install_polling(ui: &MainWindow, ctx: &AppContext, frame_pending: Arc<Ato
     let ls = ctx.local_store.clone();
     let jf = ctx.jellyfin.clone();
     let phash_ref = ctx.phash_coord.clone();
+    let mut recovery = PlaybackRecovery::default();
 
     timer.start(TimerMode::Repeated, Duration::from_millis(100), move || {
         let Some(ui) = ui_weak.upgrade() else { return };
@@ -39,15 +50,61 @@ pub fn install_polling(ui: &MainWindow, ctx: &AppContext, frame_pending: Arc<Ato
 
         for event in player.events().try_iter() {
             handle_event(
-                &ui, player, event, &rep, &sctrl, &cur_item, &cat_ref, &ap_ref, &hd_ref, &hdrs,
-                &cs, &ls, &jf, &phash_ref,
+                &ui,
+                player,
+                event,
+                &rep,
+                &sctrl,
+                &cur_item,
+                &ap_ref,
+                &hd_ref,
+                &hdrs,
+                &cs,
+                &ls,
+                &jf,
+                &phash_ref,
+                &mut recovery,
             );
+        }
+
+        if let Some(retry_at) = recovery.retry_at
+            && Instant::now() >= retry_at
+        {
+            recovery.retry_at = None;
+            if player.load_generation() != recovery.source_generation {
+                recovery = PlaybackRecovery::default();
+            } else {
+                recovery.retry_in_flight = true;
+                if let Err(error) = player.retry_current_at(recovery.position_seconds) {
+                    recovery.retry_in_flight = false;
+                    recovery.loaded_at = None;
+                    show_error(&ui, format!("Automatic playback retry failed: {error}"));
+                } else {
+                    ui.set_status(
+                        format!(
+                            "Retrying connection ({}/{MAX_AUTOMATIC_RETRIES})…",
+                            recovery.retries
+                        )
+                        .into(),
+                    );
+                    ui.set_status_color(slint::Color::from_rgb_u8(255, 180, 100));
+                }
+            }
         }
 
         let idle = player.get_string("idle-active").as_deref() == Some("yes");
         let paused = player.is_paused() || idle;
         if paused == ui.get_playing() {
             ui.set_playing(!paused);
+        }
+
+        if !paused
+            && recovery
+                .loaded_at
+                .is_some_and(|loaded_at| loaded_at.elapsed() >= Duration::from_secs(15))
+        {
+            recovery.retries = 0;
+            recovery.loaded_at = None;
         }
 
         if let Some(position) = player.position()
@@ -102,16 +159,19 @@ pub fn install_polling(ui: &MainWindow, ctx: &AppContext, frame_pending: Arc<Ato
             }
         }
     });
+
+    // Slint timers stop when their handle is dropped. Return it so the caller
+    // can keep polling alive for the lifetime of the window.
+    timer
 }
 
-pub fn handle_event(
+fn handle_event(
     ui: &MainWindow,
     player: &Player,
     event: PlayerEvent,
     reporter: &Arc<crate::reporter::PlaybackReporter>,
     session_ctrl: &Arc<crate::session::PlaybackSessionController>,
     current_item: &Arc<std::sync::Mutex<Option<adult_hub_client::TvItem>>>,
-    cached_catalog: &Arc<std::sync::Mutex<Vec<adult_hub_client::TvItem>>>,
     autoplay_active: &Arc<AtomicBool>,
     hwdec_active: &Arc<AtomicBool>,
     headers: &[String],
@@ -119,9 +179,20 @@ pub fn handle_event(
     local_store: &Arc<adult_hub_storage::LocalStore>,
     jellyfin: &Arc<adult_hub_client::JellyfinClient>,
     phash_coord: &Arc<phash::PhashCoordinator>,
+    recovery: &mut PlaybackRecovery,
 ) {
     match event {
         PlayerEvent::FileLoaded { width, height } => {
+            if recovery.retry_in_flight {
+                recovery.retry_in_flight = false;
+            } else {
+                recovery.retries = 0;
+                recovery.retry_at = None;
+            }
+            recovery.loaded_at = Some(Instant::now());
+            ui.set_player_media_loaded(true);
+            ui.set_playback_ended_visible(false);
+            ui.set_autoplay_countdown_sec(0);
             update_texture_size(ui, width, height);
             let name = player
                 .get_string("filename")
@@ -137,18 +208,26 @@ pub fn handle_event(
             ui.set_playing(!player.is_paused());
 
             let pos_ms = (player.position().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
-            reporter.report_start(pos_ms, !player.is_paused());
+            let current_item = current_item.lock().unwrap().clone();
+            let report_to_jellyfin = current_item
+                .as_ref()
+                .is_some_and(|item| uuid::Uuid::parse_str(&item.id).is_ok());
+            if report_to_jellyfin {
+                reporter.report_start(pos_ms, !player.is_paused());
+            }
 
             let dur_ms = (player.duration().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
             if dur_ms > 0 {
-                if let Some(item) = current_item.lock().unwrap().as_ref() {
+                if let Some(item) = current_item.as_ref() {
                     let phash_enabled = local_store
                         .get_setting("phash_on_playback")
                         .ok()
                         .flatten()
                         .map(|v| v == "true" || v == "1")
                         .unwrap_or(false);
-                    if phash_enabled {
+                    if phash_enabled
+                        && (uuid::Uuid::parse_str(&item.id).is_ok() || item.is_telegram())
+                    {
                         phash_coord.enqueue_generation(item, Some(dur_ms));
                     }
                 }
@@ -168,6 +247,7 @@ pub fn handle_event(
                     || err_lower.contains("hardware");
 
                 if hwdec_active.load(Ordering::SeqCst) && is_hwdec_err {
+                    *recovery = PlaybackRecovery::default();
                     hwdec_active.store(false, Ordering::SeqCst);
                     let _ = player.set_hwdec("no");
                     ui.set_hwdec_active(false);
@@ -191,10 +271,59 @@ pub fn handle_event(
                             phash_coord,
                         );
                         return;
+                    } else {
+                        // Direct URLs and local files have no catalog item to
+                        // resolve again. Retry the remembered libmpv request
+                        // after disabling hardware decode so original headers
+                        // and the current playback position are preserved.
+                        let position = player
+                            .position()
+                            .filter(|position| position.is_finite() && *position > 0.0)
+                            .unwrap_or(ui.get_position() as f64)
+                            .max(0.0);
+                        recovery.retries = 0;
+                        recovery.retry_in_flight = true;
+                        recovery.loaded_at = None;
+                        recovery.retry_at = None;
+                        if let Err(retry_error) = player.retry_current_at(position) {
+                            recovery.retry_in_flight = false;
+                            show_error(
+                                ui,
+                                format!("Software decode retry could not start: {retry_error}"),
+                            );
+                        }
+                        return;
                     }
                 }
+
+                if is_transient_network_error(&error) && recovery.retries < MAX_AUTOMATIC_RETRIES {
+                    recovery.retries += 1;
+                    recovery.retry_in_flight = false;
+                    recovery.position_seconds = player
+                        .position()
+                        .filter(|position| *position > 0.0)
+                        .unwrap_or(ui.get_position() as f64)
+                        .max(0.0);
+                    let delay_seconds = 1_u64 << (recovery.retries - 1);
+                    recovery.retry_at = Some(Instant::now() + Duration::from_secs(delay_seconds));
+                    recovery.source_generation = player.load_generation();
+                    recovery.loaded_at = None;
+                    ui.set_status(
+                        format!(
+                            "Connection interrupted · retry {}/{} in {}s",
+                            recovery.retries, MAX_AUTOMATIC_RETRIES, delay_seconds
+                        )
+                        .into(),
+                    );
+                    ui.set_status_color(slint::Color::from_rgb_u8(255, 180, 100));
+                    return;
+                }
+
+                recovery.retry_at = None;
+                recovery.retry_in_flight = false;
                 show_error(ui, format!("Playback error: {error}"));
             } else if eof {
+                *recovery = PlaybackRecovery::default();
                 crate::diagnostics::GLOBAL_LOG.i("Player", "Playback completed EOF");
                 let pos_ms = (player.position().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
                 let dur_ms = (player.duration().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
@@ -205,24 +334,60 @@ pub fn handle_event(
 
                 ui.set_status("Playback ended.".into());
                 ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
-
-                if autoplay_active.load(Ordering::SeqCst) {
-                    play_random_catalog_item(
-                        ui,
-                        player,
-                        headers,
-                        credential_store,
-                        local_store,
-                        jellyfin,
-                        reporter,
-                        session_ctrl,
-                        current_item,
-                        cached_catalog,
-                        phash_coord,
-                    );
-                }
+                ui.set_playback_ended_visible(true);
+                ui.set_autoplay_countdown_sec(if autoplay_active.load(Ordering::SeqCst) {
+                    10
+                } else {
+                    0
+                });
+            } else {
+                recovery.retry_at = None;
+                recovery.retry_in_flight = false;
+            }
+        }
+        PlayerEvent::LogMessage {
+            level,
+            prefix,
+            text,
+        } => {
+            let message = format!("{}: {}", prefix, text);
+            if matches!(level.as_str(), "fatal" | "error") {
+                crate::diagnostics::GLOBAL_LOG.e("libmpv", &message);
+            } else {
+                crate::diagnostics::GLOBAL_LOG.w("libmpv", &message);
             }
         }
         PlayerEvent::Shutdown => {}
     }
+}
+
+fn is_transient_network_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    if [
+        "timed out",
+        "timeout",
+        "connection reset",
+        "connection refused",
+        "network is unreachable",
+        "network unreachable",
+        "no route to host",
+        "host is unreachable",
+        "temporarily unavailable",
+        "temporary failure",
+        "resource temporarily unavailable",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+    {
+        return true;
+    }
+
+    if !(lower.contains("http") || lower.contains("status") || lower.contains("server")) {
+        return false;
+    }
+
+    lower
+        .split(|character: char| !character.is_ascii_digit())
+        .filter_map(|part| part.parse::<u16>().ok())
+        .any(|status| status == 408 || status == 429 || (500..=599).contains(&status))
 }

@@ -6,7 +6,9 @@ use crate::session::PlaybackSessionController;
 use adult_hub_client::{JellyfinClient, TvItem};
 use adult_hub_player::{PlaybackStats, Player};
 use adult_hub_storage::{CredentialStore, LocalStore};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(not(windows))]
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 pub fn format_time(seconds: f64) -> String {
@@ -26,6 +28,9 @@ pub fn format_time(seconds: f64) -> String {
 
 pub fn resolve_media_input(input: &str) -> String {
     let trimmed = input.trim();
+    if trimmed == "sample.mp4" || trimmed == "sample" {
+        return crate::options::resolve_sample_media();
+    }
     if trimmed.starts_with("http://")
         || trimmed.starts_with("https://")
         || trimmed.starts_with("rtsp://")
@@ -52,8 +57,31 @@ pub fn resolve_media_input(input: &str) -> String {
 pub fn show_error(ui: &MainWindow, message: impl Into<slint::SharedString>) {
     let msg = message.into();
     crate::diagnostics::GLOBAL_LOG.e("UI", msg.as_str());
+    if ui.get_active_screen() == "player" {
+        ui.set_player_media_loaded(false);
+        ui.set_player_controls_visible(true);
+        ui.set_player_more_controls_visible(false);
+        ui.set_player_error_message(msg.clone());
+    } else {
+        // Startup errors (for example, a missing system graphics runtime)
+        // must be visible even when the player screen is not open.
+        ui.set_toast_message(msg.clone());
+        ui.set_toast_type("error".into());
+        ui.set_toast_action_text("".into());
+        ui.set_toast_visible(true);
+    }
     ui.set_status(msg);
     ui.set_status_color(slint::Color::from_rgb_u8(255, 118, 118));
+}
+
+fn reset_playback_speed(ui: &MainWindow, player: &Player) {
+    if let Err(error) = player.set_speed(1.0) {
+        crate::diagnostics::GLOBAL_LOG.w(
+            "Player",
+            &format!("could not reset playback speed: {error}"),
+        );
+    }
+    ui.set_speed_label("1.0x".into());
 }
 
 pub fn stats_text(stats: &PlaybackStats) -> String {
@@ -77,11 +105,66 @@ pub fn update_texture_size(ui: &MainWindow, width: Option<u32>, height: Option<u
 
 pub fn load_media(ui: &MainWindow, player: &Player, input: &str, headers: &[String]) {
     let path = resolve_media_input(input);
+    reset_playback_speed(ui, player);
+    ui.set_player_controls_visible(true);
+    ui.set_player_more_controls_visible(false);
+    ui.set_player_media_loaded(false);
+    ui.set_player_error_message(String::new().into());
     ui.set_status(format!("Loading: {path}").into());
     ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
     if let Err(error) = player.load_with_start(&path, headers, None) {
         show_error(ui, error.to_string());
     }
+}
+
+/// Save the current item's final position and release playback when leaving the player screen.
+pub fn stop_active_playback_for_navigation(
+    ui: &MainWindow,
+    player: Option<&Player>,
+    reporter: &PlaybackReporter,
+    session_ctrl: &PlaybackSessionController,
+    current_item: &Arc<Mutex<Option<TvItem>>>,
+) {
+    let position = player
+        .and_then(Player::position)
+        .unwrap_or_else(|| ui.get_position() as f64)
+        .max(0.0);
+    let duration = player
+        .and_then(Player::duration)
+        .unwrap_or_else(|| ui.get_duration() as f64)
+        .max(0.0);
+    let position_ms = (position * 1000.0) as u64;
+    let duration_ms = (duration * 1000.0) as u64;
+
+    if let Some(item) = current_item.lock().unwrap().take() {
+        session_ctrl.checkpoint_progress(
+            &item,
+            position_ms,
+            duration_ms,
+            ui.get_playback_ended_visible(),
+        );
+    }
+    reporter.stop_session(position_ms);
+    if let Some(player) = player {
+        let _ = player.stop();
+    }
+
+    ui.set_playing(false);
+    ui.set_player_controls_visible(true);
+    ui.set_player_more_controls_visible(false);
+    ui.set_player_media_loaded(false);
+    ui.set_position(0.0);
+    ui.set_duration(0.0);
+    ui.set_position_text("0:00".into());
+    ui.set_duration_text("0:00".into());
+    ui.set_resume_prompt_visible(false);
+    ui.set_playback_ended_visible(false);
+    ui.set_autoplay_countdown_sec(0);
+    ui.set_player_error_message("".into());
+    ui.set_hud_visible(false);
+    ui.set_hud_text("".into());
+    ui.set_status("Ready".into());
+    ui.set_status_color(slint::Color::from_rgb_u8(158, 158, 158));
 }
 
 pub fn start_item_playback(
@@ -120,7 +203,7 @@ pub fn start_item_playback_with_resume(
     headers: &[String],
     credential_store: &Arc<CredentialStore>,
     local_store: &Arc<LocalStore>,
-    _jellyfin: &Arc<JellyfinClient>,
+    jellyfin: &Arc<JellyfinClient>,
     reporter: &Arc<PlaybackReporter>,
     session_ctrl: &Arc<PlaybackSessionController>,
     current_item: &Arc<Mutex<Option<TvItem>>>,
@@ -146,21 +229,70 @@ pub fn start_item_playback_with_resume(
         .or_else(|| local_store.get_setting("resolver_url").ok().flatten())
         .or_else(|| session.as_ref().map(|s| s.server_url.clone()));
 
-    let (stream_url, play_method) = match PlaybackSessionController::resolve_stream_url(
-        &item,
-        session.as_ref().map(|s| s.server_url.as_str()),
-        resolver_url.as_deref(),
-        session.as_ref().map(|s| s.access_token.as_str()),
-    ) {
-        Ok(res) => res,
-        Err(err) => {
-            show_error(ui, err);
-            return;
-        }
-    };
+    let mut resolved_media_source_id = item.media_source_id.clone();
+    let mut play_session_id = None;
+    let (stream_url, play_method, required_headers) =
+        if item.is_telegram() || item.id == "sample" || uuid::Uuid::parse_str(&item.id).is_err() {
+            match PlaybackSessionController::resolve_stream_url(
+                &item,
+                session.as_ref().map(|s| s.server_url.as_str()),
+                resolver_url.as_deref(),
+                session.as_ref().map(|s| s.access_token.as_str()),
+            ) {
+                Ok((url, method)) => (url, method, Vec::new()),
+                Err(err) => {
+                    if item.is_telegram()
+                        && (resolver_url.is_none()
+                            || resolver_url.as_deref().unwrap_or("").trim().is_empty())
+                    {
+                        ui.set_resolver_prompt_dialog_visible(true);
+                        ui.set_toast_message(
+                        "Resolver URL required to stream Telegram videos. Click here to configure."
+                            .into(),
+                    );
+                        ui.set_toast_type("warning".into());
+                        ui.set_toast_action_text("Configure".into());
+                        ui.set_toast_visible(true);
+                    } else {
+                        show_error(ui, err.clone());
+                        ui.set_toast_message(err.into());
+                        ui.set_toast_type("error".into());
+                        ui.set_toast_action_text("".into());
+                        ui.set_toast_visible(true);
+                    }
+                    return;
+                }
+            }
+        } else {
+            let Some(session) = session.as_ref() else {
+                show_error(ui, "Sign in to Jellyfin before playing this item.");
+                return;
+            };
+            match jellyfin.resolve_playback(
+                &session.server_url,
+                &session.user_id,
+                &session.access_token,
+                &item.id,
+            ) {
+                Ok(resolution) => {
+                    resolved_media_source_id = resolution.media_source_id;
+                    play_session_id = resolution.play_session_id;
+                    (
+                        resolution.stream_url,
+                        resolution.play_method,
+                        resolution.required_headers,
+                    )
+                }
+                Err(err) => {
+                    show_error(ui, format!("Could not resolve Jellyfin playback: {err}"));
+                    return;
+                }
+            }
+        };
 
     let mut stream_headers = headers.to_vec();
-    if !item.is_telegram() {
+    stream_headers.extend(required_headers);
+    if uuid::Uuid::parse_str(&item.id).is_ok() {
         if let Some(sess) = &session {
             if !sess.access_token.is_empty() {
                 stream_headers.push(format!("X-Emby-Token: {}", sess.access_token));
@@ -218,6 +350,12 @@ pub fn start_item_playback_with_resume(
 
     // 4. Update UI & current item
     *current_item.lock().unwrap() = Some(item.clone());
+    ui.set_player_is_favorite(item.is_favorite);
+    ui.set_player_favorite_enabled(!item.is_telegram() && uuid::Uuid::parse_str(&item.id).is_ok());
+    ui.set_player_error_message(String::new().into());
+    ui.set_player_controls_visible(true);
+    ui.set_player_more_controls_visible(false);
+    ui.set_player_media_loaded(false);
     ui.set_url_text(stream_url.clone().into());
     ui.set_status(format!("Loading: {}", item.title).into());
     ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
@@ -230,18 +368,39 @@ pub fn start_item_playback_with_resume(
         None
     };
     let path = resolve_media_input(&stream_url);
+    reset_playback_speed(ui, player);
     if let Err(e) = player.load_with_start(&path, &stream_headers, start_pos_opt) {
         show_error(ui, e.to_string());
         return;
     }
 
-    reporter.start_session(
-        &item.id,
-        item.media_source_id.clone(),
-        None,
-        play_method,
-        (start_pos_secs * 1000.0) as u64,
-    );
+    if !item.is_direct_media() {
+        match serde_json::to_string(&item) {
+            Ok(item_json) => {
+                if let Err(error) = local_store.record_watch_history(&item.id, &item_json) {
+                    crate::diagnostics::GLOBAL_LOG.w(
+                        "WatchHistory",
+                        &format!("Could not save watch history: {error}"),
+                    );
+                }
+            }
+            Err(error) => crate::diagnostics::GLOBAL_LOG.w(
+                "WatchHistory",
+                &format!("Could not serialize watch history item: {error}"),
+            ),
+        }
+    }
+
+    let is_jellyfin_item = uuid::Uuid::parse_str(&item.id).is_ok();
+    if is_jellyfin_item {
+        reporter.start_session(
+            &item.id,
+            resolved_media_source_id,
+            play_session_id,
+            play_method,
+            (start_pos_secs * 1000.0) as u64,
+        );
+    }
 
     // 6. Enqueue pHash video matching if enabled
     let phash_enabled = local_store
@@ -250,7 +409,7 @@ pub fn start_item_playback_with_resume(
         .flatten()
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false);
-    if phash_enabled {
+    if phash_enabled && (is_jellyfin_item || item.is_telegram()) {
         phash_coord.enqueue_generation(&item, None);
     }
 }
@@ -364,9 +523,11 @@ pub fn pick_media_file() -> Option<String> {
     rfd::FileDialog::new()
         .set_title("Open media")
         .add_filter(
-            "Video",
+            "Media",
             &[
-                "mp4", "mkv", "webm", "mov", "avi", "ts", "m4v", "mpg", "mpeg",
+                "3g2", "3gp", "asf", "avi", "divx", "f4v", "flv", "m2ts", "m2v", "m3u", "m3u8",
+                "m4v", "mkv", "mov", "mp4", "mpe", "mpeg", "mpg", "mts", "ogm", "ogv", "rm",
+                "rmvb", "ts", "vob", "webm", "wmv",
             ],
         )
         .pick_file()

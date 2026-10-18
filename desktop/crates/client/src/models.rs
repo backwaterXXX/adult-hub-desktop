@@ -48,6 +48,9 @@ pub struct TvPersonRole {
 pub struct TvItem {
     pub id: String,
     pub title: String,
+    /// Origin reported by a Resolver DTO. Jellyfin API items leave this empty.
+    #[serde(default)]
+    pub source_provider: Option<String>,
     pub overview: Option<String>,
     pub year: Option<i32>,
     pub runtime_ticks: Option<i64>,
@@ -58,6 +61,7 @@ pub struct TvItem {
     pub primary_image_tag: Option<String>,
     pub backdrop_image_tag: Option<String>,
     pub thumb_image_tag: Option<String>,
+    pub child_count: Option<u32>,
     pub is_favorite: bool,
     pub playback_position_ticks: i64,
     pub played_percentage: Option<f64>,
@@ -80,10 +84,18 @@ impl TvItem {
     }
 
     pub fn is_telegram(&self) -> bool {
-        self.provider_video_id
-            .as_deref()
-            .is_some_and(|id| !id.trim().is_empty())
-            || self.id.starts_with("telegram:")
+        self.id.starts_with("telegram:")
+            || match self.source_provider.as_deref() {
+                Some(provider) => provider.eq_ignore_ascii_case("telegram"),
+                None => self
+                    .provider_video_id
+                    .as_deref()
+                    .is_some_and(|id| !id.trim().is_empty()),
+            }
+    }
+
+    pub fn is_direct_media(&self) -> bool {
+        self.id.starts_with("direct:")
     }
 
     pub fn runtime_minutes(&self) -> Option<i64> {
@@ -166,15 +178,18 @@ fn default_provider() -> String {
 
 impl From<VideoDto> for TvItem {
     fn from(v: VideoDto) -> Self {
+        let is_telegram = v.provider.eq_ignore_ascii_case("telegram");
         let prov_id = if v.provider_video_id.is_empty() {
             v.id.clone()
         } else {
             v.provider_video_id
         };
-        let full_id = if v.provider == "telegram" && !prov_id.starts_with("telegram:") {
+        let full_id = if is_telegram && !prov_id.starts_with("telegram:") {
             format!("telegram:{prov_id}")
-        } else {
+        } else if is_telegram {
             prov_id.clone()
+        } else {
+            v.id.clone()
         };
         let people = v
             .performers
@@ -191,6 +206,7 @@ impl From<VideoDto> for TvItem {
         TvItem {
             id: full_id,
             title: v.title,
+            source_provider: Some(v.provider),
             overview: v.description,
             year: None,
             runtime_ticks: if v.duration > 0.0 {
@@ -205,11 +221,12 @@ impl From<VideoDto> for TvItem {
             primary_image_tag: v.thumbnail,
             backdrop_image_tag: None,
             thumb_image_tag: None,
+            child_count: None,
             is_favorite: false,
             playback_position_ticks: 0,
             played_percentage: None,
             is_played: false,
-            provider_video_id: Some(prov_id),
+            provider_video_id: is_telegram.then_some(prov_id),
             media_source_id: None,
             container: Some("mp4".into()),
             file_size_bytes: v.file_size,
@@ -248,6 +265,16 @@ pub enum PlayMethod {
     DirectPlay,
     DirectStream,
     Transcode,
+}
+
+/// Server-selected stream and session metadata returned by Jellyfin PlaybackInfo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaybackResolution {
+    pub stream_url: String,
+    pub media_source_id: Option<String>,
+    pub play_session_id: Option<String>,
+    pub required_headers: Vec<String>,
+    pub play_method: PlayMethod,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -404,5 +431,31 @@ mod tests {
         );
         assert_eq!(item.provider_video_id.as_deref(), Some("channel_4k:999"));
         assert!(item.is_telegram());
+    }
+
+    #[test]
+    fn non_telegram_resolver_provider_is_not_misclassified_as_telegram() {
+        let item: TvItem = VideoDto {
+            id: "jellyfin-item-id".into(),
+            provider: "jellyfin".into(),
+            provider_video_id: "remote-provider-id".into(),
+            title: "A real library title".into(),
+            slug: String::new(),
+            url: String::new(),
+            thumbnail: Some("/admin/artwork/poster.jpg".into()),
+            duration: 0.0,
+            performers: Vec::new(),
+            categories: Vec::new(),
+            views: None,
+            published: None,
+            description: None,
+            file_size: None,
+        }
+        .into();
+
+        assert_eq!(item.id, "jellyfin-item-id");
+        assert_eq!(item.source_provider.as_deref(), Some("jellyfin"));
+        assert_eq!(item.provider_video_id, None);
+        assert!(!item.is_telegram());
     }
 }

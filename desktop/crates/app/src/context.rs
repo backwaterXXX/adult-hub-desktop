@@ -22,6 +22,7 @@ pub struct AppContext {
     pub phash_coord: Arc<PhashCoordinator>,
     pub current_playing_item: Arc<Mutex<Option<TvItem>>>,
     pub cached_catalog: Arc<Mutex<Vec<TvItem>>>,
+    pub home_catalog: Arc<Mutex<Vec<TvItem>>>,
     pub autoplay_active: Arc<AtomicBool>,
     pub hwdec_active: Arc<AtomicBool>,
 }

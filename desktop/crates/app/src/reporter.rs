@@ -261,10 +261,15 @@ fn worker_loop(
     rx: Receiver<ReportCommand>,
     stop_signal: Arc<AtomicBool>,
 ) {
-    while !stop_signal.load(Ordering::SeqCst) {
+    loop {
         let cmd = match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(cmd) => cmd,
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if stop_signal.load(Ordering::SeqCst) {
+                    break;
+                }
+                continue;
+            }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
 

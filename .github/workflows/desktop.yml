@@ -100,18 +100,18 @@ jobs:
             bin/adult-hub-desktop
 
   build-windows:
-    name: Build Windows Packages (ZIP & NSIS Installer)
+    name: Build Windows EXE and Runtime DLL
     runs-on: ubuntu-24.04
     needs: lint-and-test
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install MinGW and NSIS
+      - name: Install MinGW and archive tools
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            mingw-w64 nsis p7zip-full zip curl
+            mingw-w64 p7zip-full curl
 
       - name: Setup Rust toolchain for Windows target
         uses: dtolnay/rust-toolchain@master
@@ -124,11 +124,8 @@ jobs:
         with:
           workspaces: "desktop -> desktop/target"
 
-      - name: Build Windows release binary and ZIP
+      - name: Build Windows release files
         run: ./scripts/package-windows.sh
-
-      - name: Compile Windows NSIS Installer
-        run: ./scripts/package-windows-installer.sh
 
       - name: Upload Windows Artifacts
         uses: actions/upload-artifact@v4
@@ -136,8 +133,7 @@ jobs:
           name: windows-packages
           path: |
             bin/adult-hub-desktop.exe
-            bin/adult-hub-desktop-windows-x64.zip
-            bin/adult-hub-desktop-setup.exe
+            bin/libmpv-2.dll
 
   release:
     name: Publish Release & Manifest
@@ -185,12 +181,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            bin/adult-hub-desktop-setup.exe
-            bin/adult-hub-desktop-windows-x64.zip
             bin/adult-hub-desktop_*.deb
             bin/Adult_Hub_Desktop-*.AppImage
             bin/adult-hub-desktop
             bin/adult-hub-desktop.exe
+            bin/libmpv-2.dll
             bin/adult-hub-update-manifest.json
             bin/adult-hub-update-manifest.json.sig
           draft: false

@@ -5,7 +5,7 @@
 //! - Detached Ed25519 signature verification against embedded public key
 //! - HTTPS-only downloads from configured release hosts
 //! - SHA-256 digest and package size verification in a staging file before install
-//! - Platform package handoff: Windows NSIS installer, Linux .deb or AppImage
+//! - Platform package handoff: Windows EXE plus runtime DLL, Linux .deb or AppImage
 
 use ring::digest::{self, SHA256};
 use ring::signature::{ED25519, UnparsedPublicKey};
@@ -66,6 +66,7 @@ pub enum UpdateError {
     PlaybackActive,
 
     #[error("AppImage installation path is read-only: {0}")]
+    #[allow(dead_code)]
     AppImageReadOnly(String),
 }
 
@@ -83,10 +84,13 @@ pub struct UpdateManifest {
 pub struct UpdatePackage {
     pub platform: String,     // "windows" or "linux"
     pub arch: String,         // "x86_64"
-    pub package_type: String, // "installer", "zip", "deb", "appimage"
+    pub package_type: String, // "exe", "runtime-dll", "deb", "appimage"
     pub url: String,          // HTTPS download URL
     pub sha256: String,       // 64-character lowercase hex string
     pub size_bytes: u64,
+    /// Optional sidecar needed by a Windows executable, verified and installed together.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_dll: Option<Box<UpdatePackage>>,
 }
 
 /// Helper to decode signature bytes from either raw binary (64 bytes), hex string, or base64.
@@ -186,7 +190,11 @@ pub fn validate_package_urls(
         return Err(UpdateError::InsecureUrl(manifest.release_notes_url.clone()));
     }
 
-    for package in &manifest.packages {
+    for package in manifest
+        .packages
+        .iter()
+        .flat_map(|package| std::iter::once(package).chain(package.runtime_dll.as_deref()))
+    {
         if !package.url.starts_with("https://") {
             return Err(UpdateError::InsecureUrl(package.url.clone()));
         }
@@ -281,11 +289,7 @@ pub fn select_best_package<'a>(
         .collect();
 
     if target_os == "windows" {
-        matching
-            .iter()
-            .find(|p| p.package_type == "installer")
-            .copied()
-            .or_else(|| matching.iter().find(|p| p.package_type == "zip").copied())
+        matching.iter().find(|p| p.package_type == "exe").copied()
     } else if target_os == "linux" {
         if is_appimage {
             matching
@@ -369,9 +373,10 @@ pub fn download_and_verify_package(
     let file_stem = format!("adult-hub-update-{}", package.package_type);
     let staging_path = temp_dir.join(format!("{file_stem}.staging"));
     let final_ext = match package.package_type.as_str() {
-        "installer" => "exe",
+        "exe" => "exe",
         "deb" => "deb",
         "appimage" => "AppImage",
+        "runtime-dll" => "dll",
         "zip" => "zip",
         _ => "bin",
     };
@@ -447,19 +452,77 @@ pub fn download_and_verify_package(
 pub fn launch_installation(
     package_type: &str,
     file_path: &Path,
+    runtime_dll_path: Option<&Path>,
     is_playback_active: bool,
 ) -> Result<(), UpdateError> {
+    #[cfg(not(windows))]
+    let _ = runtime_dll_path;
+
     if is_playback_active {
         return Err(UpdateError::PlaybackActive);
     }
 
     #[cfg(windows)]
     {
-        if package_type == "installer" {
-            std::process::Command::new(file_path)
+        if package_type == "exe" {
+            let current_exe = std::env::current_exe()
+                .map_err(|e| UpdateError::Io(format!("cannot locate current executable: {e}")))?;
+            let parent = current_exe.parent().ok_or_else(|| {
+                UpdateError::Io("current executable has no parent directory".into())
+            })?;
+            let write_probe = parent.join(format!(".adult-hub-update-{}.tmp", std::process::id()));
+            std::fs::write(&write_probe, b"update-write-check").map_err(|e| {
+                UpdateError::Io(format!(
+                    "application directory is not writable for the update: {e}"
+                ))
+            })?;
+            let _ = std::fs::remove_file(write_probe);
+
+            let quote_ps = |path: &Path| path.to_string_lossy().replace('\'', "''");
+            let executable = quote_ps(&current_exe);
+            let downloaded = quote_ps(file_path);
+            let runtime_install = runtime_dll_path.map_or_else(String::new, |path| {
+                let source = quote_ps(path);
+                let destination = quote_ps(&parent.join("libmpv-2.dll"));
+                format!("$runtimeSrc='{}'; $runtimeDst='{}'; $runtimeStage=$runtimeDst+'.update'; $runtimeBackup=$runtimeDst+'.previous'; Copy-Item -LiteralPath $runtimeSrc -Destination $runtimeStage -Force; if (Test-Path -LiteralPath $runtimeDst) {{ Move-Item -LiteralPath $runtimeDst -Destination $runtimeBackup -Force }}; Move-Item -LiteralPath $runtimeStage -Destination $runtimeDst -Force;", source, destination)
+            });
+            let runtime_cleanup = if runtime_dll_path.is_some() {
+                "if (Test-Path -LiteralPath $runtimeBackup) { Remove-Item -LiteralPath $runtimeBackup -Force }; Remove-Item -LiteralPath $runtimeSrc -Force;"
+            } else {
+                ""
+            };
+            let runtime_rollback = if runtime_dll_path.is_some() {
+                "if (Test-Path -LiteralPath $runtimeBackup) { Remove-Item -LiteralPath $runtimeDst -Force -ErrorAction SilentlyContinue; Move-Item -LiteralPath $runtimeBackup -Destination $runtimeDst -Force }"
+            } else {
+                ""
+            };
+            let wait_and_replace = format!(
+                "$ErrorActionPreference='Stop'; $appPid={}; $src='{}'; $dst='{}'; $stage=$dst+'.update'; $backup=$dst+'.previous'; {}; try {{ Wait-Process -Id $appPid; Copy-Item -LiteralPath $src -Destination $stage -Force; Move-Item -LiteralPath $dst -Destination $backup -Force; try {{ {} Move-Item -LiteralPath $stage -Destination $dst -Force; $updated=Start-Process -FilePath $dst -PassThru; Start-Sleep -Seconds 5; if ($updated.HasExited) {{ throw 'Updated process exited during startup' }}; Remove-Item -LiteralPath $backup -Force; {}; Remove-Item -LiteralPath $src -Force }} catch {{ if (Test-Path -LiteralPath $backup) {{ Remove-Item -LiteralPath $dst -Force -ErrorAction SilentlyContinue; Move-Item -LiteralPath $backup -Destination $dst -Force }}; {}; throw }} }} catch {{ if ((Test-Path -LiteralPath $backup) -and !(Test-Path -LiteralPath $dst)) {{ Move-Item -LiteralPath $backup -Destination $dst -Force }}; {} }}",
+                std::process::id(),
+                downloaded,
+                executable,
+                "",
+                runtime_install,
+                runtime_cleanup,
+                runtime_rollback,
+                runtime_rollback
+            );
+            std::process::Command::new("powershell.exe")
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-WindowStyle",
+                    "Hidden",
+                    "-Command",
+                    &wait_and_replace,
+                ])
                 .spawn()
-                .map_err(|e| UpdateError::Io(format!("failed to spawn installer: {e}")))?;
+                .map_err(|e| UpdateError::Io(format!("failed to schedule EXE replacement: {e}")))?;
             std::process::exit(0);
+        } else {
+            return Err(UpdateError::DownloadFailed(format!(
+                "Windows updates require an EXE package, got package type '{package_type}'"
+            )));
         }
     }
 
@@ -511,9 +574,9 @@ pub fn launch_installation(
                 std::process::exit(0);
             }
         }
-    }
 
-    Ok(())
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -548,8 +611,8 @@ mod tests {
                 {
                     "platform": "windows",
                     "arch": "x86_64",
-                    "package_type": "installer",
-                    "url": "https://github.com/adult-hub/adult-hub-desktop/releases/download/v0.2.0/adult-hub-desktop-setup.exe",
+                    "package_type": "exe",
+                    "url": "https://github.com/adult-hub/adult-hub-desktop/releases/download/v0.2.0/adult-hub-desktop.exe",
                     "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
                     "size_bytes": 62000000
                 },
@@ -668,7 +731,7 @@ mod tests {
                 {
                     "platform": "windows",
                     "arch": "x86_64",
-                    "package_type": "installer",
+                    "package_type": "exe",
                     "url": "https://malicious-server.example.com/download.exe",
                     "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
                     "size_bytes": 100
@@ -700,14 +763,16 @@ mod tests {
                 url: "https://github.com/adult-hub/adult-hub-desktop/releases/download/v0.2.0/win.zip".into(),
                 sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
                 size_bytes: 100,
+                runtime_dll: None,
             },
             UpdatePackage {
                 platform: "windows".into(),
                 arch: "x86_64".into(),
-                package_type: "installer".into(),
-                url: "https://github.com/adult-hub/adult-hub-desktop/releases/download/v0.2.0/win-setup.exe".into(),
+                package_type: "exe".into(),
+                url: "https://github.com/adult-hub/adult-hub-desktop/releases/download/v0.2.0/adult-hub-desktop.exe".into(),
                 sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
                 size_bytes: 200,
+                runtime_dll: None,
             },
             UpdatePackage {
                 platform: "linux".into(),
@@ -716,6 +781,7 @@ mod tests {
                 url: "https://github.com/adult-hub/adult-hub-desktop/releases/download/v0.2.0/linux.deb".into(),
                 sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
                 size_bytes: 300,
+                runtime_dll: None,
             },
             UpdatePackage {
                 platform: "linux".into(),
@@ -724,12 +790,13 @@ mod tests {
                 url: "https://github.com/adult-hub/adult-hub-desktop/releases/download/v0.2.0/linux.AppImage".into(),
                 sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
                 size_bytes: 400,
+                runtime_dll: None,
             },
         ];
 
-        // Windows selects installer over zip
+        // Windows selects the executable; its optional runtime sidecar stays attached.
         let win = select_best_package(&packages, "windows", "x86_64", false).unwrap();
-        assert_eq!(win.package_type, "installer");
+        assert_eq!(win.package_type, "exe");
 
         // Linux non-appimage selects deb
         let linux_deb = select_best_package(&packages, "linux", "x86_64", false).unwrap();

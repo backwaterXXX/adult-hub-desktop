@@ -1,6 +1,6 @@
 # Adult Hub Desktop — General Plan
 
-Status: Stages 1–5 completed. Verified with end-to-end evidence.
+Status: Core implementation and Windows packaging are in place. Release acceptance remains open pending native Windows installation, playback, and integration checks, plus the platform coverage listed below.
 
 ## Goal and agreed defaults
 
@@ -10,7 +10,7 @@ Create a functional port of Adult Hub TV and Mobile for desktop computers, with 
 - Platforms: Windows 10 22H2 and Windows 11 on x86_64; Ubuntu 24.04 LTS and a Fedora release supported at release time on x86_64.
 - Linux window systems: X11 and Wayland. Record the exact Fedora release in release validation.
 - Display output: SDR, including tone mapping of HDR sources to SDR; native HDR output is deferred.
-- Distribution: GitHub Releases with a Windows installer and Linux AppImage and `.deb` packages.
+- Distribution: Windows is delivered as the EXE and the adjacent pinned libmpv runtime DLL, without an installer or archive; Linux retains AppImage and `.deb` package options.
 - One desktop interface. A separate TV mode, ARM64, macOS, Microsoft Store and Flathub are deferred.
 - Android remains Kotlin + Compose + Media3. A shared Rust core may be considered later when concrete duplication justifies the integration cost.
 
@@ -60,7 +60,7 @@ API clients map transport DTOs into application models. Playback resolution crea
 
 Network and storage work must not block the UI. Cancel superseded work and reject stale responses when a user changes screens, search terms or videos. Isolate libmpv unsafe FFI and keep render-context ownership explicit.
 
-Use SQLite with versioned migrations for local data. Scope account-specific data by server/user; scope pHash records by Resolver origin and account. Preserve the Android non-secret configuration JSON version 1; credentials are excluded from export and HTTP consent is managed locally.
+Use SQLite with versioned migrations for local data. Scope account-specific data by server/user; pHash records are scoped by normalized Resolver origin and a SHA-256 account-token fingerprint, without persisting the token itself. Preserve the Android non-secret configuration JSON version 1; credentials are excluded from export and HTTP consent is managed locally.
 
 Protect tokens and saved session metadata with encryption using a key held by Windows Credential Manager or Linux Secret Service. If the secure store is unavailable, offer a non-persistent session; never silently save credentials in plaintext.
 
@@ -80,7 +80,7 @@ Each stage document defines its deliverables, failure handling, validation and e
 
 Bundle pinned native playback dependencies. Keep project-owned code under Apache-2.0 and use Slint's royalty-free desktop route with the required attribution. Select libmpv/FFmpeg builds with license terms compatible with the intended distribution, and ship the applicable notices, source/build information and replacement materials required by those builds. Do not assume an arbitrary prebuilt library has the same licensing configuration.
 
-Desktop CI and release tags are independent of Android. Updates provide release notes, download verification and user-confirmed installation. Windows hands off to its installer; `.deb` installation uses the system package mechanism; AppImage replacement occurs after exit through a helper.
+Desktop CI and release tags are independent of Android. Updates provide release notes, download verification and user-confirmed installation. Windows replaces the single EXE after the application exits; `.deb` installation uses the system package mechanism; AppImage replacement occurs after exit through a helper.
 
 ## Validation and release criteria
 

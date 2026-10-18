@@ -17,7 +17,8 @@ use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread::JoinHandle;
 
@@ -46,6 +47,11 @@ pub type Result<T> = std::result::Result<T, PlayerError>;
 
 #[derive(Debug, Clone)]
 pub enum PlayerEvent {
+    LogMessage {
+        level: String,
+        prefix: String,
+        text: String,
+    },
     FileLoaded {
         width: Option<u32>,
         height: Option<u32>,
@@ -219,6 +225,8 @@ pub struct Player {
     events: Receiver<PlayerEvent>,
     event_thread: Option<JoinHandle<()>>,
     quit: Arc<AtomicBool>,
+    last_load: Mutex<Option<LoadRequest>>,
+    load_generation: AtomicU64,
 }
 
 // SAFETY: libmpv client API is documented as safe to call from multiple threads.
@@ -251,6 +259,7 @@ impl Player {
             ("vo", "libmpv"),
             ("gpu-api", "opengl"),
             ("hwdec", "auto-safe"),
+            ("audio-fallback-to-null", "yes"),
             ("keep-open", "no"),
             ("audio-client-name", "Adult Hub Desktop"),
             ("title", "Adult Hub Desktop"),
@@ -279,6 +288,11 @@ impl Player {
             return Err(PlayerError::Mpv(message));
         }
 
+        let log_level = CString::new("warn").expect("static log level has no NUL bytes");
+        unsafe {
+            (api.mpv_request_log_messages)(handle, log_level.as_ptr());
+        }
+
         let (sender, events) = mpsc::channel();
         let quit = Arc::new(AtomicBool::new(false));
         let event_thread = {
@@ -297,6 +311,8 @@ impl Player {
             events,
             event_thread: Some(event_thread),
             quit,
+            last_load: Mutex::new(None),
+            load_generation: AtomicU64::new(0),
         })
     }
 
@@ -317,13 +333,48 @@ impl Player {
         if url.trim().is_empty() {
             return Err(PlayerError::InvalidArgument("empty media URL".into()));
         }
-        let header_value = headers.join(",");
-        self.set_property_string("http-header-fields", &header_value)?;
-        match start_position {
-            Some(seconds) if seconds > 0.0 => {
-                self.command(&["loadfile", url, "replace", &format!("start={seconds:.3}")])
-            }
-            _ => self.command(&["loadfile", url, "replace"]),
+        let request = LoadRequest {
+            url: url.to_owned(),
+            headers: headers.to_vec(),
+            start_position,
+        };
+        self.issue_load(&request)?;
+        *self.last_load.lock().unwrap() = Some(request);
+        self.load_generation.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub fn load_generation(&self) -> u64 {
+        self.load_generation.load(Ordering::SeqCst)
+    }
+
+    /// Reload the current source with its original headers, resuming at the
+    /// supplied position. This deliberately does not replace the remembered
+    /// source request, so repeated retries keep the same URL and credentials.
+    pub fn retry_current_at(&self, position_seconds: f64) -> Result<()> {
+        let mut request = self
+            .last_load
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| PlayerError::InvalidArgument("no media source to retry".into()))?;
+        request.start_position = Some(position_seconds.max(0.0));
+        self.issue_load(&request)
+    }
+
+    fn issue_load(&self, request: &LoadRequest) -> Result<()> {
+        if request.url.trim().is_empty() {
+            return Err(PlayerError::InvalidArgument("empty media URL".into()));
+        }
+        self.set_property_string("http-header-fields", &request.headers.join(","))?;
+        match request.start_position {
+            Some(seconds) if seconds > 0.0 => self.command(&[
+                "loadfile",
+                &request.url,
+                "replace",
+                &format!("start={seconds:.3}"),
+            ]),
+            _ => self.command(&["loadfile", &request.url, "replace"]),
         }
     }
 
@@ -463,6 +514,76 @@ impl Player {
             .or_else(|| self.get_string("hwdec").filter(|s| s != "no"))
     }
 
+    /// Reports whether the bundled libmpv build contains common video decoders.
+    /// This is codec availability, not a probe of the machine's GPU capabilities.
+    pub fn common_video_decoder_support(&self) -> Option<[bool; 4]> {
+        const CODECS: [&[u8]; 4] = [b"h264", b"hevc", b"vp9", b"av1"];
+        let property = CString::new("decoder-list").ok()?;
+        let mut node: sys::mpv_node = unsafe { std::mem::zeroed() };
+        let status = unsafe {
+            (self.api.mpv_get_property)(
+                self.handle,
+                property.as_ptr(),
+                sys::MPV_FORMAT_NODE,
+                (&mut node as *mut sys::mpv_node).cast(),
+            )
+        };
+        if status < 0 {
+            return None;
+        }
+
+        let support = unsafe {
+            if node.format != sys::MPV_FORMAT_NODE_ARRAY || node.u.list.is_null() {
+                None
+            } else {
+                let list = &*node.u.list;
+                if list.num < 0 || (list.num > 0 && list.values.is_null()) {
+                    None
+                } else {
+                    let mut support = [false; 4];
+                    for index in 0..(list.num as usize).min(4096) {
+                        let entry = &*list.values.add(index);
+                        if entry.format != sys::MPV_FORMAT_NODE_MAP || entry.u.list.is_null() {
+                            continue;
+                        }
+
+                        let map = &*entry.u.list;
+                        if map.num < 0
+                            || (map.num > 0 && (map.values.is_null() || map.keys.is_null()))
+                        {
+                            continue;
+                        }
+
+                        let mut codec_name: Option<&[u8]> = None;
+                        for field_index in 0..(map.num as usize).min(64) {
+                            let key = *map.keys.add(field_index);
+                            let value = &*map.values.add(field_index);
+                            if key.is_null()
+                                || CStr::from_ptr(key).to_bytes() != b"codec"
+                                || value.format != sys::MPV_FORMAT_STRING
+                                || value.u.string.is_null()
+                            {
+                                continue;
+                            }
+                            codec_name = Some(CStr::from_ptr(value.u.string).to_bytes());
+                            break;
+                        }
+
+                        if let Some(codec_name) = codec_name {
+                            for (codec_index, codec) in CODECS.iter().enumerate() {
+                                support[codec_index] |= codec_name.eq_ignore_ascii_case(codec);
+                            }
+                        }
+                    }
+                    Some(support)
+                }
+            }
+        };
+
+        unsafe { (self.api.mpv_free_node_contents)(&mut node) };
+        support
+    }
+
     pub fn stats(&self) -> PlaybackStats {
         let width = self.get_u32("width");
         let height = self.get_u32("height");
@@ -594,6 +715,28 @@ fn event_loop(
         let event_id = unsafe { (*event).event_id };
         match event_id {
             sys::MPV_EVENT_NONE => {}
+            sys::MPV_EVENT_LOG_MESSAGE => {
+                let data = unsafe { (*event).data.cast::<sys::mpv_event_log_message>() };
+                if data.is_null() {
+                    continue;
+                }
+                let message = unsafe { &*data };
+                let copy = |value: *const c_char| {
+                    if value.is_null() {
+                        String::new()
+                    } else {
+                        unsafe { CStr::from_ptr(value) }
+                            .to_string_lossy()
+                            .trim()
+                            .to_owned()
+                    }
+                };
+                let _ = sender.send(PlayerEvent::LogMessage {
+                    level: copy(message.level),
+                    prefix: copy(message.prefix),
+                    text: copy(message.text),
+                });
+            }
             sys::MPV_EVENT_SHUTDOWN => {
                 let _ = sender.send(PlayerEvent::Shutdown);
                 break;
@@ -791,6 +934,8 @@ impl Drop for RenderContext {
 impl sys::MpvApi {
     fn load() -> Result<Self> {
         let mut candidates: Vec<PathBuf> = Vec::new();
+        let mut errors = Vec::new();
+
         if let Ok(executable) = std::env::current_exe()
             && let Some(directory) = executable.parent()
         {
@@ -816,20 +961,27 @@ impl sys::MpvApi {
             }
         }
 
-        let mut errors = Vec::new();
         for candidate in candidates {
             match unsafe { libloading::Library::new(&candidate) } {
                 Ok(library) => match unsafe { Self::from_library(library) } {
                     Ok(api) => return Ok(api),
                     Err(error) => errors.push(error.to_string()),
                 },
-                Err(error) => errors.push(format!("{}: {error}", candidate.display())),
+                Err(error) => {
+                    let mut detail = format!("{}: {error}", candidate.display());
+                    if cfg!(windows) && candidate.is_file() {
+                        detail.push_str(
+                            " (the DLL exists but Windows could not load it; check its dependent DLLs and update the graphics driver for the Vulkan loader)",
+                        );
+                    }
+                    errors.push(detail);
+                }
             }
         }
 
         Err(PlayerError::Library(format!(
-            "no usable libmpv found ({}). Place libmpv-2.dll next to the executable on Windows, \
-             or install the libmpv package on Linux.",
+            "no usable libmpv found ({}). Windows builds require libmpv-2.dll beside the executable; \
+             on Linux, install the libmpv package.",
             errors.join("; ")
         )))
     }
@@ -880,6 +1032,19 @@ impl sys::MpvApi {
                 "mpv_get_property_string",
                 unsafe extern "C" fn(*mut sys::mpv_handle, *const c_char) -> *mut c_char
             ),
+            mpv_get_property: symbol!(
+                "mpv_get_property",
+                unsafe extern "C" fn(
+                    *mut sys::mpv_handle,
+                    *const c_char,
+                    c_int,
+                    *mut c_void,
+                ) -> c_int
+            ),
+            mpv_free_node_contents: symbol!(
+                "mpv_free_node_contents",
+                unsafe extern "C" fn(*mut sys::mpv_node)
+            ),
             mpv_free: symbol!("mpv_free", unsafe extern "C" fn(*mut c_void)),
             mpv_command: symbol!(
                 "mpv_command",
@@ -888,6 +1053,10 @@ impl sys::MpvApi {
             mpv_wait_event: symbol!(
                 "mpv_wait_event",
                 unsafe extern "C" fn(*mut sys::mpv_handle, f64) -> *mut sys::mpv_event
+            ),
+            mpv_request_log_messages: symbol!(
+                "mpv_request_log_messages",
+                unsafe extern "C" fn(*mut sys::mpv_handle, *const c_char) -> c_int
             ),
             mpv_error_string: symbol!(
                 "mpv_error_string",

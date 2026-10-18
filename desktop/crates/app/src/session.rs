@@ -118,7 +118,20 @@ impl PlaybackSessionController {
         access_token: Option<&str>,
     ) -> Result<(String, PlayMethod), String> {
         if item.id == "sample" {
-            return Ok(("sample.mp4".into(), PlayMethod::DirectPlay));
+            return Ok((
+                crate::options::resolve_sample_media(),
+                PlayMethod::DirectPlay,
+            ));
+        }
+
+        if item.is_direct_media() {
+            return Ok((
+                item.id
+                    .strip_prefix("direct:")
+                    .unwrap_or(&item.id)
+                    .to_owned(),
+                PlayMethod::DirectPlay,
+            ));
         }
 
         if item.is_telegram() {
@@ -241,11 +254,13 @@ mod tests {
             primary_image_tag: None,
             backdrop_image_tag: None,
             thumb_image_tag: None,
+            child_count: None,
             is_favorite: false,
             playback_position_ticks: 0,
             played_percentage: None,
             is_played: false,
             provider_video_id: None,
+            source_provider: None,
             media_source_id: None,
             container: None,
             file_size_bytes: None,

@@ -1,0 +1,496 @@
+import { HubTheme, KeyboardState } from "theme.slint";
+
+// Shared controls for view components. A view owns domain behavior and binds
+// these callbacks to its existing handlers.
+export component Button inherits Rectangle {
+    in property <string> text;
+    in property <string> accessible-name: root.text;
+    in property <bool> primary: false;
+    in property <bool> disabled: false;
+    in property <bool> loading: false;
+    out property <bool> has-focus: focus-target.has-focus;
+    callback clicked();
+
+    forward-focus: focus-target;
+    accessible-role: button;
+    accessible-label: root.accessible-name;
+    accessible-action-default => {
+        if (!root.disabled && !root.loading) { root.clicked(); }
+    }
+
+    width: max(88px, label.preferred-width + 32px);
+    height: HubTheme.control-height;
+    border-radius: HubTheme.control-radius;
+    border-width: 2px;
+    border-color: root.has-focus ? HubTheme.focus-ring : (root.primary ? HubTheme.accent-outline : HubTheme.control-border);
+    background: root.disabled ? HubTheme.navigation-background
+        : (touch.pressed ? HubTheme.accent-pressed
+        : (touch.has-hover ? (root.primary ? HubTheme.accent-hover : HubTheme.surface-hover)
+        : (root.primary ? HubTheme.accent : HubTheme.surface)));
+    opacity: root.disabled ? 0.58 : 1.0;
+
+    animate background { duration: 150ms; }
+
+    label := Text {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        text: root.loading ? "Loading…" : root.text;
+        color: HubTheme.text-primary;
+        font-size: HubTheme.body-size;
+        font-weight: 600;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    touch := TouchArea {
+        enabled: !root.disabled && !root.loading;
+        clicked => { root.clicked(); }
+    }
+
+    focus-target := FocusScope {
+        width: 0px;
+        height: 0px;
+        key-pressed(event) => {
+            if (!root.disabled && !root.loading && (event.text == Key.Space || event.text == Key.Return)) {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+}
+
+export component IconButton inherits Rectangle {
+    in property <string> icon;
+    in property <string> accessible-name;
+    in property <bool> disabled: false;
+    out property <bool> has-focus: focus-target.has-focus;
+    callback clicked();
+
+    forward-focus: focus-target;
+    accessible-role: button;
+    accessible-label: root.accessible-name;
+    accessible-action-default => {
+        if (!root.disabled) { root.clicked(); }
+    }
+
+    width: 40px;
+    height: 40px;
+    border-radius: HubTheme.control-radius;
+    border-width: 2px;
+    border-color: root.has-focus ? HubTheme.focus-ring : HubTheme.control-border;
+    background: root.disabled ? HubTheme.navigation-background
+        : (touch.pressed ? HubTheme.accent-pressed : (touch.has-hover ? HubTheme.surface-hover : HubTheme.surface));
+    opacity: root.disabled ? 0.58 : 1.0;
+
+    Text {
+        text: root.icon;
+        color: HubTheme.text-primary;
+        font-size: 18px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        enabled: !root.disabled;
+        clicked => { root.clicked(); }
+    }
+
+    focus-target := FocusScope {
+        width: 0px;
+        height: 0px;
+        key-pressed(event) => {
+            if (!root.disabled && (event.text == Key.Space || event.text == Key.Return)) {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+}
+
+export component TextField inherits Rectangle {
+    in-out property <string> text;
+    in property <string> placeholder;
+    in property <string> accessible-name;
+    in property <bool> enabled: true;
+    out property <bool> has-focus: editor.has-focus;
+    callback accepted();
+
+    accessible-label: root.accessible-name;
+    height: HubTheme.control-height;
+    border-radius: HubTheme.control-radius;
+    border-width: 1px;
+    border-color: root.has-focus ? HubTheme.focus-ring : HubTheme.control-border;
+    background: HubTheme.surface;
+
+    editor := TextInput {
+        x: 12px;
+        y: 0px;
+        width: parent.width - 24px;
+        height: parent.height;
+        text <=> root.text;
+        enabled: root.enabled;
+        color: HubTheme.text-primary;
+        selection-background-color: HubTheme.accent;
+        font-size: HubTheme.body-size;
+        vertical-alignment: center;
+        accessible-label: root.accessible-name;
+        changed has-focus => { KeyboardState.text-input-focused = editor.has-focus; }
+        key-pressed(event) => {
+            if (event.text == Key.Return) {
+                root.accepted();
+                return accept;
+            }
+            reject
+        }
+    }
+    if root.text == "" && !root.has-focus && root.placeholder != "" : Text {
+        x: 12px;
+        width: parent.width - 24px;
+        height: parent.height;
+        text: root.placeholder;
+        color: HubTheme.text-muted;
+        font-size: HubTheme.body-size;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+}
+
+// Select provides the shared closed-state appearance and activation callback;
+// the owning view supplies its existing options popup and selection model.
+export component Select inherits Rectangle {
+    in property <string> value;
+    in property <string> accessible-name;
+    in property <bool> disabled: false;
+    out property <bool> has-focus: focus-target.has-focus;
+    callback activated();
+
+    forward-focus: focus-target;
+    accessible-role: button;
+    accessible-label: root.accessible-name;
+    accessible-action-default => { if (!root.disabled) { root.activated(); } }
+    height: HubTheme.control-height;
+    min-width: 140px;
+    border-radius: HubTheme.control-radius;
+    border-width: 2px;
+    border-color: root.has-focus ? HubTheme.focus-ring : HubTheme.control-border;
+    background: touch.has-hover ? HubTheme.surface-hover : HubTheme.surface;
+    opacity: root.disabled ? 0.58 : 1.0;
+
+    Text {
+        x: 12px;
+        width: parent.width - 36px;
+        height: parent.height;
+        text: root.value;
+        color: HubTheme.text-primary;
+        font-size: HubTheme.body-size;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    Text {
+        x: parent.width - 28px;
+        width: 20px;
+        height: parent.height;
+        text: "▾";
+        color: HubTheme.text-secondary;
+        font-size: 16px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        enabled: !root.disabled;
+        clicked => { root.activated(); }
+    }
+    focus-target := FocusScope {
+        width: 0px;
+        height: 0px;
+        key-pressed(event) => {
+            if (!root.disabled && (event.text == Key.Space || event.text == Key.Return)) {
+                root.activated();
+                return accept;
+            }
+            reject
+        }
+    }
+}
+
+export component NavigationItem inherits Rectangle {
+    in property <string> icon;
+    in property <string> text;
+    in property <string> accessible-name: root.text;
+    in property <bool> selected: false;
+    in property <bool> compact: false;
+    out property <bool> has-focus: focus-target.has-focus;
+    callback clicked();
+
+    forward-focus: focus-target;
+    accessible-role: button;
+    accessible-label: root.accessible-name;
+    accessible-action-default => { root.clicked(); }
+    height: 44px;
+    min-width: root.compact ? 48px : 180px;
+    border-radius: HubTheme.control-radius;
+    border-width: 2px;
+    border-color: root.has-focus ? HubTheme.focus-ring : transparent;
+    background: root.selected ? #BE185D24 : (touch.has-hover ? HubTheme.surface-hover : transparent);
+
+    Text {
+        x: root.compact ? (parent.width - 24px) / 2 : 12px;
+        width: 24px;
+        height: parent.height;
+        text: root.icon;
+        color: root.selected ? HubTheme.text-primary : HubTheme.text-secondary;
+        font-size: 18px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    if !root.compact : Text {
+        x: 48px;
+        width: parent.width - 60px;
+        height: parent.height;
+        text: root.text;
+        color: root.selected ? HubTheme.text-primary : HubTheme.text-secondary;
+        font-size: HubTheme.body-size;
+        font-weight: root.selected ? 600 : 500;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+    focus-target := FocusScope {
+        width: 0px;
+        height: 0px;
+        key-pressed(event) => {
+            if (event.text == Key.Space || event.text == Key.Return) {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+}
+
+export component Tab inherits Rectangle {
+    in property <string> text;
+    in property <string> accessible-name: root.text;
+    in property <bool> selected: false;
+    out property <bool> has-focus: focus-target.has-focus;
+    callback clicked();
+
+    forward-focus: focus-target;
+    accessible-role: button;
+    accessible-label: root.accessible-name;
+    accessible-action-default => { root.clicked(); }
+    width: max(72px, label.preferred-width + 24px);
+    height: 42px;
+    border-radius: HubTheme.control-radius;
+    border-width: 2px;
+    border-color: root.has-focus ? HubTheme.focus-ring : transparent;
+    background: touch.has-hover ? HubTheme.surface-hover : (root.selected ? #BE185D20 : transparent);
+
+    label := Text {
+        x: (parent.width - self.width) / 2;
+        y: 0px;
+        height: parent.height - 3px;
+        text: root.text;
+        color: root.selected ? HubTheme.text-primary : HubTheme.text-secondary;
+        font-size: HubTheme.body-size;
+        font-weight: root.selected ? 600 : 500;
+        vertical-alignment: center;
+    }
+    Rectangle {
+        x: 10px;
+        y: parent.height - 3px;
+        width: parent.width - 20px;
+        height: 3px;
+        border-radius: 2px;
+        background: root.selected ? HubTheme.accent : transparent;
+    }
+    touch := TouchArea { clicked => { root.clicked(); } }
+    focus-target := FocusScope {
+        width: 0px;
+        height: 0px;
+        key-pressed(event) => {
+            if (event.text == Key.Space || event.text == Key.Return) {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+}
+
+export component StatusBadge inherits Rectangle {
+    in property <string> text;
+    in property <string> status: "neutral";
+    in property <string> accessible-name: root.text;
+
+    accessible-label: root.accessible-name;
+    height: 26px;
+    min-width: label.preferred-width + 20px;
+    border-radius: 13px;
+    border-width: 1px;
+    border-color: root.status == "success" ? #4ADE8066
+        : (root.status == "warning" ? #FBBF2466
+        : (root.status == "error" ? #FB718566 : HubTheme.separator));
+    background: root.status == "success" ? #4ADE8018
+        : (root.status == "warning" ? #FBBF2418
+        : (root.status == "error" ? #FB718518 : HubTheme.navigation-background));
+    label := Text {
+        x: 10px;
+        width: parent.width - 20px;
+        height: parent.height;
+        text: root.text;
+        color: root.status == "success" ? HubTheme.success
+            : (root.status == "warning" ? HubTheme.warning
+            : (root.status == "error" ? HubTheme.error : HubTheme.text-secondary));
+        font-size: HubTheme.metadata-size;
+        font-weight: 600;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+}
+
+export component EmptyState inherits VerticalLayout {
+    in property <string> icon: "•";
+    in property <string> title;
+    in property <string> description;
+    in property <string> action-text;
+    callback action();
+
+    alignment: center;
+    spacing: HubTheme.space-3;
+    Rectangle {
+        width: 48px;
+        height: 48px;
+        border-radius: 24px;
+        background: HubTheme.surface-hover;
+        Text {
+            text: root.icon;
+            color: HubTheme.text-secondary;
+            font-size: 22px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    Text {
+        text: root.title;
+        color: HubTheme.text-primary;
+        font-size: HubTheme.section-title-size;
+        font-weight: 600;
+        horizontal-alignment: center;
+        wrap: word-wrap;
+    }
+    Text {
+        text: root.description;
+        color: HubTheme.text-secondary;
+        font-size: HubTheme.body-size;
+        horizontal-alignment: center;
+        wrap: word-wrap;
+    }
+    if root.action-text != "" : Button {
+        text: root.action-text;
+        primary: true;
+        clicked => { root.action(); }
+    }
+}
+
+export component ErrorState inherits VerticalLayout {
+    in property <string> title;
+    in property <string> description;
+    in property <string> retry-text: "Try again";
+    in property <string> details;
+    callback retry();
+
+    alignment: center;
+    spacing: HubTheme.space-3;
+    StatusBadge { text: "Error"; status: "error"; }
+    Text {
+        text: root.title;
+        color: HubTheme.text-primary;
+        font-size: HubTheme.section-title-size;
+        font-weight: 600;
+        horizontal-alignment: center;
+        wrap: word-wrap;
+    }
+    Text {
+        text: root.description;
+        color: HubTheme.text-secondary;
+        font-size: HubTheme.body-size;
+        horizontal-alignment: center;
+        wrap: word-wrap;
+    }
+    Button {
+        text: root.retry-text;
+        primary: true;
+        clicked => { root.retry(); }
+    }
+    if root.details != "" : Text {
+        text: root.details;
+        color: HubTheme.text-muted;
+        font-size: HubTheme.metadata-size;
+        horizontal-alignment: center;
+        wrap: word-wrap;
+    }
+}
+
+export component Dialog inherits Rectangle {
+    in property <bool> open: false;
+    in property <string> title;
+    in property <string> message;
+    in property <string> confirm-text: "Confirm";
+    in property <string> cancel-text: "Cancel";
+    in property <string> accessible-name: root.title;
+    callback confirmed();
+    callback cancelled();
+
+    visible: root.open;
+    z: 1000;
+    width: 440px;
+    height: 240px;
+    border-radius: HubTheme.dialog-radius;
+    border-width: 1px;
+    border-color: HubTheme.separator;
+    background: HubTheme.surface;
+    accessible-role: groupbox;
+    accessible-label: root.accessible-name;
+
+    focus-scope := FocusScope {
+        width: parent.width;
+        height: parent.height;
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.cancelled();
+                return accept;
+            }
+            reject
+        }
+        VerticalLayout {
+            padding: HubTheme.form-card-padding;
+            spacing: HubTheme.space-3;
+            Text {
+                text: root.title;
+                color: HubTheme.text-primary;
+                font-size: HubTheme.section-title-size;
+                font-weight: 600;
+                wrap: word-wrap;
+            }
+            Text {
+                text: root.message;
+                color: HubTheme.text-secondary;
+                font-size: HubTheme.body-size;
+                vertical-stretch: 1;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                alignment: end;
+                spacing: HubTheme.space-2;
+                Button { text: root.cancel-text; clicked => { root.cancelled(); } }
+                Button { text: root.confirm-text; primary: true; clicked => { root.confirmed(); } }
+            }
+        }
+    }
+}

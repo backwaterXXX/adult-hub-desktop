@@ -1,14 +1,14 @@
-# Stage 4 Validation Evidence — Desktop UI and Supporting Features
+# Stage 4 Implementation Notes — Desktop UI and Supporting Features
 
-**Date**: 2026-10-17  
-**Branch**: `main`  
-**Status**: Verified & Passing
+**Date**: 2026-10-18
+**Branch**: `main`
+**Status**: Core screens and supporting features are implemented; end-to-end parity acceptance remains open.
 
 ---
 
 ## 1. Overview of Deliverables
 
-Stage 4 achieves full desktop UI parity with Android TV, comprehensive privacy & emergency controls, transactional non-secret configuration import/export, redacted diagnostics export, and background Resolver pHash video matching coordination:
+Stage 4 implementation includes desktop-adapted Android TV screens, privacy and emergency controls, transactional non-secret configuration import/export, redacted diagnostics export, and background Resolver pHash video matching coordination. This list describes implementation scope; it is not evidence of complete platform parity:
 
 1. **Android TV Visual Parity & Desktop UX**:
    - Dark OLED palette (`#08080a`, `#121212`, `#1e1e1e`), neon pink primary accents (`#e91e63`), and clear hierarchy.
@@ -54,6 +54,15 @@ Stage 4 achieves full desktop UI parity with Android TV, comprehensive privacy &
 ---
 
 ## 2. Test Execution & Verification
+
+The test output below is a historical run from 2026-10-17. It documents those source revisions only and does not establish current native Windows acceptance.
+
+### Current visual evidence
+
+- Linux Xvfb at 800×520: the logged-out home hero hides its large illustration, reduces its title size, and keeps both actions within the window without clipping.
+- Current Linux Xvfb at 1280×820: cold-launch navigation and the logged-out hero render with both primary actions visible; no clipping or overflow was observed.
+- Linux Xvfb at 1180×760: the bundled sample video renders visible frames with the playback timeline and controls on screen (see `stage-01-evidence.md`).
+- Native Windows installation, video rendering, and interactive feature parity remain unverified.
 
 ### Complete Cargo Test Suite
 

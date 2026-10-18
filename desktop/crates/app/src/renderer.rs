@@ -24,6 +24,47 @@ struct Surface {
     height: u32,
 }
 
+/// Slint's renderer shares this OpenGL context with the embedded mpv renderer.
+/// Preserve the bindings and viewport that were active before touching it.
+struct OpenGlStateGuard<'a> {
+    gl: &'a glow::Context,
+    framebuffer: Option<glow::Framebuffer>,
+    viewport: [i32; 4],
+    active_texture: i32,
+    texture_2d: Option<glow::Texture>,
+}
+
+impl<'a> OpenGlStateGuard<'a> {
+    unsafe fn capture(gl: &'a glow::Context) -> Self {
+        let mut viewport = [0; 4];
+        unsafe { gl.get_parameter_i32_slice(glow::VIEWPORT, &mut viewport) };
+        Self {
+            gl,
+            framebuffer: unsafe { gl.get_parameter_framebuffer(glow::FRAMEBUFFER_BINDING) },
+            viewport,
+            active_texture: unsafe { gl.get_parameter_i32(glow::ACTIVE_TEXTURE) },
+            texture_2d: unsafe { gl.get_parameter_texture(glow::TEXTURE_BINDING_2D) },
+        }
+    }
+}
+
+impl Drop for OpenGlStateGuard<'_> {
+    fn drop(&mut self) {
+        unsafe {
+            self.gl
+                .bind_framebuffer(glow::FRAMEBUFFER, self.framebuffer);
+            self.gl.viewport(
+                self.viewport[0],
+                self.viewport[1],
+                self.viewport[2],
+                self.viewport[3],
+            );
+            self.gl.active_texture(self.active_texture as u32);
+            self.gl.bind_texture(glow::TEXTURE_2D, self.texture_2d);
+        }
+    }
+}
+
 impl Renderer {
     /// Must be called while Slint's OpenGL context is current.
     pub fn new(
@@ -48,6 +89,7 @@ impl Renderer {
     /// Renders the current mpv frame and, when the surface was (re)created,
     /// returns a new borrowed texture image for the UI.
     pub fn render(&mut self, width: u32, height: u32) -> Result<Option<slint::Image>, String> {
+        let _state = unsafe { OpenGlStateGuard::capture(&self.gl) };
         let width = width.clamp(2, 8192);
         let height = height.clamp(2, 8192);
 
@@ -78,8 +120,6 @@ impl Renderer {
             surface.width,
             surface.height,
         );
-
-        unsafe { self.gl.bind_framebuffer(glow::FRAMEBUFFER, None) };
 
         result.map_err(|error| format!("libmpv render failed: {error}"))?;
 
@@ -192,6 +232,7 @@ pub fn install_renderer(
     ui: &crate::MainWindow,
     player: Rc<Player>,
     frame_pending: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    on_renderer_ready: impl FnOnce() + 'static,
 ) -> Result<(), slint::SetRenderingNotifierError> {
     use std::sync::atomic::Ordering;
     let ui_weak = ui.as_weak();
@@ -200,6 +241,7 @@ pub fn install_renderer(
         .map(|value| value == "1" || value == "true")
         .unwrap_or(false);
     let mut renderer: Option<Renderer> = None;
+    let mut on_renderer_ready = Some(on_renderer_ready);
 
     ui.window()
         .set_rendering_notifier(move |state, graphics_api| match state {
@@ -228,6 +270,9 @@ pub fn install_renderer(
                             }
                         });
                         renderer = Some(created);
+                        if let Some(on_ready) = on_renderer_ready.take() {
+                            on_ready();
+                        }
                     }
                     Err(error) => {
                         if let Some(ui) = ui_weak.upgrade() {

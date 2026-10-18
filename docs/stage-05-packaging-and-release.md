@@ -1,16 +1,16 @@
 # Stage 5 — Packaging and Release
 
-Status: completed. Verified in docs/stage-05-evidence.md. Depends on Stages 1–4 acceptance.
+Status: in progress. Cross-build artifacts exist, but native installation, startup, playback, update handoff, and clean-system acceptance remain open. See `docs/feature-parity-checklist.md` and `docs/stage-05-evidence.md`. Depends on Stages 1–4 acceptance.
 
 ## Objective
 
-Deliver installable Windows and Linux packages, verified updates and evidence that the complete port meets its release criteria.
+Deliver Windows app files, Linux packages, verified updates and evidence that the complete port meets its release criteria.
 
 ## Deliverables and tasks
 
 - Add desktop CI for Rust checks, meaningful tests, release builds and package creation. Keep desktop jobs/tags independent of Android workflows.
-- Produce a per-user Windows x64 installer, a Linux x64 AppImage and a `.deb` package for Ubuntu 24.04 LTS. Validate the AppImage on the selected Fedora release too.
-- Bundle pinned libmpv and required native dependencies. Resolve bundled libraries from the application package, not arbitrary current working directories.
+- Produce a Windows x64 EXE beside the pinned libmpv runtime DLL, plus a Linux x64 AppImage and a `.deb` package for Ubuntu 24.04 LTS. The Windows output has no installer or archive. Validate the AppImage on the selected Fedora release too.
+- Load `libmpv-2.dll` from beside the Windows executable; keep both files together when moving or updating the app. Video playback also requires the Vulkan Runtime supplied by the graphics driver. Do not bundle an app-local Vulkan loader; the app checks loader availability in Settings → System and reports driver-related playback startup errors.
 - Record native dependency versions, build options, checksums and redistribution requirements. Include project and third-party notices and required source/build/replacement materials.
 - Use Slint's royalty-free desktop route with attribution; retain Apache-2.0 for project-owned code. Verify the actual libmpv/FFmpeg build licensing configuration before packaging it.
 - Add application identity, icons, shortcuts, normal uninstall behavior and English release notes.
@@ -24,7 +24,7 @@ Use a desktop-specific manifest with a schema version, application version, rele
 
 Reject invalid signatures, mismatched platform/package records, unexpected redirects outside configured release hosts and hash mismatches. Download into a temporary file, verify it and only then offer installation. Keep signing private keys in release secrets, outside source control.
 
-Windows launches the verified installer after bounded playback/application shutdown. `.deb` updates hand off to the system package installer and its authorization flow. AppImage updates use a replacement helper after exit, retain a rollback copy until the replacement launches successfully and report read-only locations without attempting an unsafe overwrite.
+Windows verifies and downloads the EXE and its signed runtime DLL, checks that its application directory is writable, waits for application shutdown, replaces both files, and retains rollback copies until the new process starts. `.deb` updates hand off to the system package installer and its authorization flow. AppImage updates use a replacement helper after exit, retain a rollback copy until the replacement launches successfully and report read-only locations without attempting an unsafe overwrite.
 
 Updates preserve existing application data. Schema migrations must preserve data and handle failure safely. Installation is never started during active playback without first confirming interruption.
 
@@ -45,14 +45,14 @@ Run the final parity checklist and representative codec/resolution/subtitle/tone
 
 ## Acceptance checklist
 
-- [x] All prior stages and parity checklist entries pass.
-- [x] Windows installer, AppImage and `.deb` run on clean supported systems.
-- [x] Bundled native dependencies are pinned, discoverable and accompanied by required materials.
-- [x] Update authenticity, download failure and installation recovery scenarios pass.
-- [x] Upgrades preserve settings, histories and secure sessions where the platform store remains available.
-- [x] Exact platform/GPU coverage and known limitations are documented.
-- [x] A release candidate passes validation before stable promotion.
-- [x] Stable publication is explicitly authorized at execution time; these planning documents do not publish anything.
+- [ ] All prior stages and parity checklist entries pass.
+- [ ] The Windows EXE and adjacent runtime DLL, AppImage and `.deb` run on clean supported systems.
+- [ ] Bundled native dependencies are pinned, discoverable and accompanied by required materials.
+- [ ] Update authenticity, download failure and installation recovery scenarios pass.
+- [ ] Upgrades preserve settings, histories and secure sessions where the platform store remains available.
+- [ ] Exact platform/GPU coverage and known limitations are documented.
+- [ ] A release candidate passes validation before stable promotion.
+- [ ] Stable publication is explicitly authorized at execution time; these planning documents do not publish anything.
 
 ## Post-release handling
 

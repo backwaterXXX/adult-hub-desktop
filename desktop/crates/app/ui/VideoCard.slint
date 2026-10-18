@@ -1,0 +1,365 @@
+import { HubTheme } from "theme.slint";
+
+export struct VideoCardData {
+    id: string,
+    title: string,
+    genre: string,
+    duration: string,
+    year: string,
+    is_played: bool,
+    provider: string,
+    is_favorite: bool,
+    studio: string,
+    progress: float,
+    has_thumbnail: bool,
+    thumbnail_state: string,
+    thumbnail: image,
+    card_index: int,
+    thumbnail_url: string,
+    fallback_thumbnail_url: string,
+    alternate_thumbnail_url: string,
+}
+
+export struct VideoCardRowData {
+    has_0: bool,
+    card_0: VideoCardData,
+    has_1: bool,
+    card_1: VideoCardData,
+    has_2: bool,
+    card_2: VideoCardData,
+    has_3: bool,
+    card_3: VideoCardData,
+}
+
+export component VideoCard inherits Rectangle {
+    in property <VideoCardData> item;
+    in property <bool> is-focused: false;
+    in property <length> card-width: 250px;
+    in property <bool> fixed-width: false;
+    in property <bool> retry-enabled: true;
+    out property <bool> has-focus: focus-scope.has-focus;
+    callback clicked();
+    callback play();
+    callback open-detail();
+    callback thumbnail-retry(string);
+
+    forward-focus: focus-scope;
+    accessible-role: button;
+    accessible-label: root.item.title;
+    accessible-action-default => { root.open-detail(); }
+
+    property <length> artwork-height: min(220px, root.width * 0.5625);
+    property <bool> active: root.is-focused || root.has-focus || touch.has-hover;
+    property <string> source-label: root.item.studio != "" ? root.item.studio : (root.item.provider == "telegram" ? "Telegram" : (root.item.provider == "local" ? "Local" : (root.item.provider == "performer" ? "Performer" : (root.item.provider == "studio" ? "Studio" : (root.item.provider == "genre" ? "Category" : "Jellyfin")))));
+
+    horizontal-stretch: root.fixed-width ? 0 : 1;
+    preferred-width: root.card-width;
+    min-width: root.fixed-width ? root.card-width : 160px;
+    height: root.artwork-height + 78px;
+    border-radius: 12px;
+    background: root.active ? #202837 : #171c26;
+    border-width: 1px;
+    border-color: root.has-focus || root.is-focused ? #f9a8d4 : (touch.has-hover ? #64748b : #2b3445);
+    clip: true;
+
+    animate background { duration: 150ms; }
+    animate border-color { duration: 150ms; }
+
+    touch := TouchArea {
+        clicked => { root.open-detail(); }
+    }
+
+    focus-scope := FocusScope {
+        width: 0px;
+        height: 0px;
+        key-pressed(event) => {
+            if (event.text == Key.Space) {
+                root.play();
+                return accept;
+            }
+            if (event.text == Key.Return) {
+                root.open-detail();
+                return accept;
+            }
+            reject
+        }
+    }
+
+    VerticalLayout {
+        padding: 0px;
+        spacing: 0px;
+
+        Rectangle {
+            height: root.artwork-height;
+            background: #10141c;
+            clip: true;
+
+            if root.item.has-thumbnail : Image {
+                source: root.item.thumbnail;
+                width: 100%;
+                height: 100%;
+                image-fit: cover;
+            }
+
+            if !root.item.has-thumbnail : Rectangle {
+                width: 100%;
+                height: 100%;
+                background: root.item.thumbnail_state == "loading" ? #151c28 : #10141c;
+
+                if root.item.thumbnail_state == "loading" : Rectangle {
+                    x: 12px;
+                    y: parent.height - 14px;
+                    width: parent.width - 24px;
+                    height: 4px;
+                    border-radius: 2px;
+                    background: #2b3445;
+                    Rectangle {
+                        width: parent.width * 0.42;
+                        height: 100%;
+                        border-radius: 2px;
+                        background: #64748b;
+                    }
+                }
+
+                Rectangle {
+                    x: (parent.width - 44px) / 2;
+                    y: (parent.height - 44px) / 2 - 8px;
+                    width: 44px;
+                    height: 32px;
+                    border-radius: 6px;
+                    border-width: 1px;
+                    border-color: #64748b;
+                    background: #171c26;
+
+                    Rectangle {
+                        x: 8px;
+                        y: 8px;
+                        width: 6px;
+                        height: 6px;
+                        border-radius: 3px;
+                        background: #94a3b8;
+                    }
+                    Rectangle {
+                        x: 7px;
+                        y: 20px;
+                        width: 30px;
+                        height: 1px;
+                        background: #64748b;
+                    }
+                }
+
+                Text {
+                    x: 8px;
+                    y: parent.height / 2 + 18px;
+                    width: parent.width - 16px;
+                    text: root.item.thumbnail_state == "loading"
+                        ? "Loading artwork…"
+                        : (root.item.thumbnail_state == "failed" ? "Couldn’t load artwork" : "No artwork available");
+                    color: #94a3b8;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+
+                if root.item.thumbnail_state == "failed" && root.retry-enabled : Rectangle {
+                    x: (parent.width - 84px) / 2;
+                    y: parent.height / 2 + 38px;
+                    width: 84px;
+                    height: 28px;
+                    border-radius: 6px;
+                    background: HubTheme.surface-hover;
+                    border-width: 2px;
+                    border-color: HubTheme.control-border;
+                    forward-focus: retry-focus;
+                    accessible-role: button;
+                    accessible-label: "Retry artwork download";
+                    accessible-action-default => { root.thumbnail-retry(root.item.id); }
+
+                    Text {
+                        text: "Retry";
+                        color: HubTheme.text-primary;
+                        font-size: 12px;
+                        font-weight: 600;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    retry-touch := TouchArea {
+                        clicked => { root.thumbnail-retry(root.item.id); }
+                    }
+
+                    retry-focus := FocusScope {
+                        width: 0px;
+                        height: 0px;
+                        key-pressed(event) => {
+                            if (event.text == Key.Return || event.text == Key.Space) {
+                                root.thumbnail-retry(root.item.id);
+                                return accept;
+                            }
+                            reject
+                        }
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                x: 8px;
+                y: 8px;
+                spacing: 4px;
+
+                if root.item.is_favorite : Rectangle {
+                    height: 22px;
+                    border-radius: 5px;
+                    background: #0b0d12e8;
+                    border-width: 1px;
+                    border-color: #2b3445;
+                    HorizontalLayout {
+                        padding-left: 7px;
+                        padding-right: 7px;
+                        Text {
+                            text: "FAVORITE";
+                            color: #f3f4f6;
+                            font-size: 10px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                if root.item.is_played || root.item.progress >= 0.90 : Rectangle {
+                    height: 22px;
+                    border-radius: 5px;
+                    background: #0b0d12e8;
+                    border-width: 1px;
+                    border-color: #2b3445;
+                    HorizontalLayout {
+                        padding-left: 7px;
+                        padding-right: 7px;
+                        Text {
+                            text: "WATCHED";
+                            color: #f3f4f6;
+                            font-size: 10px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            if root.item.duration != "" : Rectangle {
+                x: parent.width - self.width - 8px;
+                y: parent.height - self.height - 8px;
+                height: 22px;
+                border-radius: 5px;
+                background: #0b0d12e8;
+                border-width: 1px;
+                border-color: #2b3445;
+
+                HorizontalLayout {
+                    padding-left: 7px;
+                    padding-right: 7px;
+                    Text {
+                        text: root.item.duration;
+                        color: #f3f4f6;
+                        font-size: 12px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            if root.active : Rectangle {
+                width: 40px;
+                height: 40px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                border-radius: 8px;
+                background: #be185d;
+                border-width: 1px;
+                border-color: #f9a8d4;
+                accessible-role: button;
+                accessible-label: "Play";
+                accessible-action-default => { root.play(); }
+
+                Image {
+                    source: @image-url("../../../assets/icons/play.svg");
+                    x: (parent.width - 18px) / 2;
+                    y: (parent.height - 18px) / 2;
+                    width: 18px;
+                    height: 18px;
+                    image-fit: contain;
+                }
+
+                TouchArea {
+                    clicked => { root.play(); }
+                }
+            }
+
+            if root.item.progress > 0.0 && !root.item.is_played && root.item.progress < 0.90 : Rectangle {
+                x: 0px;
+                y: parent.height - 4px;
+                width: 100%;
+                height: 4px;
+                background: #0b0d12;
+
+                Rectangle {
+                    x: 0px;
+                    y: 0px;
+                    width: parent.width * max(0.0, min(1.0, root.item.progress));
+                    height: 100%;
+                    background: #be185d;
+                }
+            }
+        }
+
+        VerticalLayout {
+            height: 78px;
+            padding-left: 12px;
+            padding-right: 12px;
+            padding-top: 8px;
+            padding-bottom: 8px;
+            spacing: 4px;
+
+            Text {
+                text: root.item.title;
+                color: #f3f4f6;
+                font-size: 15px;
+                font-weight: 600;
+                vertical-alignment: center;
+                wrap: word-wrap;
+                overflow: elide;
+                width: 100%;
+                height: 38px;
+            }
+
+            HorizontalLayout {
+                height: 16px;
+                spacing: 6px;
+
+                if root.item.year != "" : Text {
+                    text: root.item.year;
+                    color: #b6c0cf;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+
+                if root.item.year != "" && root.source-label != "" : Rectangle {
+                    width: 3px;
+                    height: 3px;
+                    border-radius: 2px;
+                    background: #64748b;
+                }
+
+                Text {
+                    text: root.source-label;
+                    color: #94a3b8;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+            }
+        }
+    }
+}

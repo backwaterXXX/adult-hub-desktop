@@ -4,6 +4,8 @@ A high-performance, privacy-focused native desktop media player and browser for 
 
 Available for **Windows 10/11 (x86_64)** and **Linux (x86_64; AppImage & Debian/Ubuntu `.deb`)**.
 
+The Windows build is delivered as `adult-hub-desktop.exe` plus the adjacent `libmpv-2.dll`. Video playback also requires a current graphics driver that provides the system Vulkan Runtime; the app reports its availability in Settings → System.
+
 ---
 
 ## Architecture Overview
@@ -75,9 +77,8 @@ Packaging scripts are available in `scripts/`:
 ./scripts/package-deb.sh
 ./scripts/package-appimage.sh
 
-# Cross-compile Windows binary, ZIP, and NSIS installer
+# Cross-compile Windows EXE and runtime DLL (no installer or archive)
 ./scripts/package-windows.sh
-./scripts/package-windows-installer.sh
 
 # Generate and sign release manifest
 ./scripts/sign-release.sh "0.1.0"

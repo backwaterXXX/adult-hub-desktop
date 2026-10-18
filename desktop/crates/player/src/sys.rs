@@ -33,6 +33,14 @@ pub struct mpv_event_end_file {
 }
 
 #[repr(C)]
+pub struct mpv_event_log_message {
+    pub prefix: *const c_char,
+    pub level: *const c_char,
+    pub text: *const c_char,
+    pub log_level: c_int,
+}
+
+#[repr(C)]
 pub struct mpv_opengl_init_params {
     pub get_proc_address: Option<unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_void>,
     pub get_proc_address_ctx: *mut c_void,
@@ -52,12 +60,47 @@ pub struct mpv_render_param {
     pub data: *mut c_void,
 }
 
+#[repr(C)]
+pub struct mpv_node {
+    pub u: mpv_node_union,
+    pub format: c_int,
+}
+
+#[repr(C)]
+pub union mpv_node_union {
+    pub string: *mut c_char,
+    pub flag: c_int,
+    pub int64: i64,
+    pub double_: f64,
+    pub list: *mut mpv_node_list,
+    pub byte_array: *mut mpv_byte_array,
+}
+
+#[repr(C)]
+pub struct mpv_node_list {
+    pub num: c_int,
+    pub values: *mut mpv_node,
+    pub keys: *mut *mut c_char,
+}
+
+#[repr(C)]
+pub struct mpv_byte_array {
+    pub data: *mut c_void,
+    pub size: usize,
+}
+
 pub const MPV_EVENT_NONE: c_int = 0;
 pub const MPV_EVENT_SHUTDOWN: c_int = 1;
+pub const MPV_EVENT_LOG_MESSAGE: c_int = 2;
 pub const MPV_EVENT_END_FILE: c_int = 7;
 pub const MPV_EVENT_FILE_LOADED: c_int = 8;
 pub const MPV_EVENT_VIDEO_RECONFIG: c_int = 17;
 pub const MPV_EVENT_PLAYBACK_RESTART: c_int = 21;
+
+pub const MPV_FORMAT_NODE: c_int = 6;
+pub const MPV_FORMAT_NODE_ARRAY: c_int = 7;
+pub const MPV_FORMAT_NODE_MAP: c_int = 8;
+pub const MPV_FORMAT_STRING: c_int = 1;
 
 pub const MPV_END_FILE_REASON_EOF: c_int = 0;
 pub const MPV_END_FILE_REASON_STOP: c_int = 2;
@@ -83,9 +126,13 @@ pub struct MpvApi {
         unsafe extern "C" fn(*mut mpv_handle, *const c_char, *const c_char) -> c_int,
     pub mpv_get_property_string:
         unsafe extern "C" fn(*mut mpv_handle, *const c_char) -> *mut c_char,
+    pub mpv_get_property:
+        unsafe extern "C" fn(*mut mpv_handle, *const c_char, c_int, *mut c_void) -> c_int,
+    pub mpv_free_node_contents: unsafe extern "C" fn(*mut mpv_node),
     pub mpv_free: unsafe extern "C" fn(*mut c_void),
     pub mpv_command: unsafe extern "C" fn(*mut mpv_handle, *const *const c_char) -> c_int,
     pub mpv_wait_event: unsafe extern "C" fn(*mut mpv_handle, f64) -> *mut mpv_event,
+    pub mpv_request_log_messages: unsafe extern "C" fn(*mut mpv_handle, *const c_char) -> c_int,
     pub mpv_error_string: unsafe extern "C" fn(c_int) -> *const c_char,
     pub mpv_client_api_version: unsafe extern "C" fn() -> u64,
     pub mpv_render_context_create: unsafe extern "C" fn(

@@ -30,6 +30,9 @@ docker_args=(
     --env HOME=/home/dev
     --env CARGO_HOME=/home/dev/.cargo
     --env RUST_BACKTRACE=1
+    # GCC 14 in the build image hits an ICE with SQLite at -O3; -O2 keeps the
+    # bundled SQLite build reliable while retaining release optimization.
+    --env "CFLAGS_x86_64_pc_windows_gnu=${CFLAGS_x86_64_pc_windows_gnu:--O2}"
 )
 
 if [[ -t 0 && -t 1 ]]; then

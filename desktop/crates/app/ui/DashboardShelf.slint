@@ -1,0 +1,331 @@
+import { ScrollView } from "std-widgets.slint";
+import { VideoCard, VideoCardData } from "VideoCard.slint";
+
+export component PerformerCard inherits Rectangle {
+    in property <VideoCardData> item;
+    in property <bool> is-focused: false;
+    out property <bool> has-focus: focus-scope.has-focus;
+    callback clicked();
+
+    forward-focus: focus-scope;
+    accessible-role: button;
+    accessible-label: root.item.title;
+    accessible-action-default => { root.clicked(); }
+
+    width: 140px;
+    height: 258px;
+    border-radius: 8px;
+    background: root.is-focused || root.has-focus || touch.has-hover ? #1c1b20 : #141419;
+    border-width: root.is-focused || root.has-focus || touch.has-hover ? 1px : 0px;
+    border-color: #e91e63;
+    drop-shadow-blur: root.is-focused || root.has-focus || touch.has-hover ? 9px : 0px;
+    drop-shadow-color: #e91e6318;
+    clip: true;
+
+    VerticalLayout {
+        spacing: 0px;
+
+        Rectangle {
+            height: 200px;
+            background: #19181d;
+            clip: true;
+
+            if root.item.has-thumbnail : Image {
+                source: root.item.thumbnail;
+                width: 100%;
+                height: 100%;
+                image-fit: cover;
+            }
+
+            if !root.item.has-thumbnail : Rectangle {
+                width: 100%;
+                height: 100%;
+                background: #19181d;
+                Rectangle {
+                    x: (parent.width - 34px) / 2;
+                    y: 54px;
+                    width: 34px;
+                    height: 34px;
+                    border-radius: 17px;
+                    background: #ffffff0c;
+                }
+                Rectangle {
+                    x: (parent.width - 62px) / 2;
+                    y: 98px;
+                    width: 62px;
+                    height: 42px;
+                    border-radius: 22px;
+                    background: #ffffff0c;
+                }
+            }
+        }
+
+        VerticalLayout {
+            height: 58px;
+            padding-left: 5px;
+            padding-right: 5px;
+            spacing: 1px;
+            alignment: center;
+
+            Text {
+                text: root.item.title;
+                color: root.is-focused || root.has-focus || touch.has-hover ? #ffffff : #eeeeee;
+                font-size: 12px;
+                font-weight: 600;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                overflow: elide;
+                width: 100%;
+            }
+
+            if root.item.studio != "" : Text {
+                text: root.item.studio;
+                color: #92909a;
+                font-size: 10px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                overflow: elide;
+                width: 100%;
+            }
+        }
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+
+    focus-scope := FocusScope {
+        width: 0px;
+        height: 0px;
+        key-pressed(event) => {
+            if (event.text == Key.Space || event.text == Key.Return) {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+}
+
+component DashboardSkeletonCard inherits Rectangle {
+    width: 250px;
+    height: 210px;
+    border-radius: 8px;
+    background: #141419;
+    clip: true;
+
+    VerticalLayout {
+        spacing: 0px;
+        Rectangle {
+            height: 140px;
+            background: #1a191f;
+        }
+
+        VerticalLayout {
+            padding-left: 12px;
+            padding-right: 12px;
+            padding-top: 12px;
+            spacing: 8px;
+            Rectangle {
+                width: 145px;
+                height: 8px;
+                border-radius: 3px;
+                background: #ffffff16;
+            }
+            Rectangle {
+                width: 82px;
+                height: 6px;
+                border-radius: 3px;
+                background: #ffffff0d;
+            }
+        }
+    }
+}
+
+export component DashboardShelf inherits VerticalLayout {
+    in property <string> title;
+    in property <[VideoCardData]> items;
+    in property <string> action-label: "See all";
+    in property <string> category-name: "";
+    in property <bool> performer-cards: false;
+    in property <string> empty-message: "";
+    in property <bool> loading: false;
+    in property <string> error-message: "";
+
+    callback play-item(string);
+    callback open-item(string);
+    callback thumbnail-retry(string);
+    callback open-performer(string);
+    callback show-all(string);
+    callback retry();
+
+        if root.items.length > 0 || root.empty-message != "" || root.loading || root.error-message != "" : VerticalLayout {
+        spacing: 16px;
+
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: center;
+
+            Text {
+                text: root.title;
+                color: #ffffff;
+                font-size: 16px;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+
+            Rectangle { horizontal-stretch: 1; }
+
+            Rectangle {
+                height: 26px;
+                border-radius: 5px;
+                background: action-touch.has-hover ? #ffffff0c : #00000000;
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    Text {
+                        text: root.action-label;
+                        color: action-touch.has-hover ? #ffffff : #aaa5b0;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                    }
+                }
+                accessible-role: button;
+                accessible-label: root.action-label + " " + root.title;
+                accessible-action-default => { root.show-all(root.category-name); }
+                action-touch := TouchArea {
+                    clicked => { root.show-all(root.category-name); }
+                }
+            }
+        }
+
+        if root.error-message != "" : Rectangle {
+            height: 54px;
+            border-radius: 9px;
+            background: #21151a;
+            border-width: 1px;
+            border-color: #e91e6355;
+            HorizontalLayout {
+                padding-left: 14px;
+                padding-right: 10px;
+                spacing: 10px;
+                alignment: center;
+                Text {
+                    text: "!";
+                    width: 20px;
+                    color: #ff7398;
+                    font-size: 15px;
+                    font-weight: 800;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: root.error-message;
+                    color: #e5d9df;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                Rectangle {
+                    height: 30px;
+                    border-radius: 6px;
+                    background: retry-touch.has-hover ? #34202a : #281a21;
+                    border-width: 1px;
+                    border-color: #e91e6370;
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        Text {
+                            text: "Retry";
+                            color: #ffffff;
+                            font-size: 11px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                    }
+                        accessible-role: button;
+                        accessible-label: "Retry " + root.title;
+                        accessible-action-default => { root.retry(); }
+                    retry-touch := TouchArea {
+                        clicked => { root.retry(); }
+                    }
+                }
+            }
+        }
+
+        if root.items.length > 0 : ScrollView {
+                height: root.performer-cards ? 284px : 240px;
+                vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+                horizontal-scrollbar-policy: ScrollBarPolicy.as-needed;
+                mouse-drag-pan-enabled: true;
+
+                if root.performer-cards : HorizontalLayout {
+                    width: max(root.width, root.items.length * (root.performer-cards ? 154px : 262px));
+                    height: root.performer-cards ? 270px : 218px;
+                    spacing: 14px;
+
+                    for card in root.items : PerformerCard {
+                        item: card;
+                        clicked => { root.open-performer(card.title); }
+                    }
+                }
+
+                if !root.performer-cards : HorizontalLayout {
+                    width: max(root.width, root.items.length * 264px - 14px);
+                    height: 224px;
+                    spacing: 14px;
+
+                    for card in root.items : VideoCard {
+                        item: card;
+                        card-width: 250px;
+                        fixed-width: true;
+                        play => { root.play-item(card.id); }
+                        open-detail => { root.open-item(card.id); }
+                        thumbnail-retry(id) => { root.thumbnail-retry(id); }
+                    }
+                }
+            }
+
+        if root.items.length == 0 && root.loading : ScrollView {
+                height: 240px;
+                vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+                horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+
+                HorizontalLayout {
+                    width: max(root.width, 4 * 262px);
+                    height: 224px;
+                    spacing: 14px;
+
+                    DashboardSkeletonCard {}
+                    DashboardSkeletonCard {}
+                    DashboardSkeletonCard {}
+                    DashboardSkeletonCard {}
+                }
+        }
+
+        if root.items.length == 0 && !root.loading && root.error-message == "" && root.empty-message != "" : Rectangle {
+            height: 54px;
+            border-radius: 8px;
+            background: #141419;
+            border-width: 1px;
+            border-color: #ffffff12;
+
+            HorizontalLayout {
+                padding-left: 14px;
+                padding-right: 14px;
+                spacing: 10px;
+                alignment: center;
+
+                Text {
+                    text: root.empty-message;
+                    color: #aaa5b0;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+            }
+        }
+    }
+}

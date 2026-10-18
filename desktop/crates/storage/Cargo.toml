@@ -12,3 +12,6 @@ serde_json.workspace = true
 rusqlite.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true

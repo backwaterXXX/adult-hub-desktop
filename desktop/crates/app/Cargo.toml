@@ -20,6 +20,9 @@ serde_json.workspace = true
 reqwest.workspace = true
 thiserror.workspace = true
 url.workspace = true
+sysinfo.workspace = true
+libloading = "0.9"
+image = { version = "0.25.10", default-features = false, features = ["ico", "jpeg", "png", "webp"] }
 
 
 [target.'cfg(windows)'.dependencies]

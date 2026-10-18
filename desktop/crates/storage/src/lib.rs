@@ -41,6 +41,7 @@ impl TelegramProgressRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StoredPhashJob {
+    pub resolver_scope: String,
     pub video_id: String,
     pub job_id: Option<String>,
     pub state: String,
@@ -252,6 +253,45 @@ impl LocalStore {
             )?;
         }
 
+        if current_version < 4 {
+            conn.execute_batch(
+                "
+                BEGIN;
+                CREATE TABLE IF NOT EXISTS watch_history (
+                    item_id TEXT PRIMARY KEY,
+                    watched_at INTEGER NOT NULL,
+                    item_json TEXT NOT NULL
+                );
+                INSERT INTO schema_version (version) VALUES (4);
+                COMMIT;
+                ",
+            )?;
+        }
+
+        if current_version < 5 {
+            conn.execute_batch(
+                "
+                BEGIN;
+                ALTER TABLE phash_jobs RENAME TO phash_jobs_v4;
+                CREATE TABLE phash_jobs (
+                    resolver_scope TEXT NOT NULL,
+                    video_id TEXT NOT NULL,
+                    job_id TEXT,
+                    state TEXT NOT NULL,
+                    error_code TEXT,
+                    duration_us INTEGER,
+                    updated_at INTEGER NOT NULL,
+                    PRIMARY KEY (resolver_scope, video_id)
+                );
+                INSERT INTO phash_jobs (resolver_scope, video_id, job_id, state, error_code, duration_us, updated_at)
+                    SELECT '', video_id, job_id, state, error_code, duration_us, updated_at FROM phash_jobs_v4;
+                DROP TABLE phash_jobs_v4;
+                INSERT INTO schema_version (version) VALUES (5);
+                COMMIT;
+                ",
+            )?;
+        }
+
         Ok(())
     }
 
@@ -280,6 +320,41 @@ impl LocalStore {
         let conn = self.conn()?;
         conn.execute("DELETE FROM settings WHERE key = ?1", params![key])?;
         Ok(())
+    }
+
+    pub fn approved_cleartext_origins(&self) -> Result<Vec<String>> {
+        let Some(raw) = self.get_setting("approved_cleartext_origins")? else {
+            return Ok(Vec::new());
+        };
+        let mut origins = serde_json::from_str::<Vec<String>>(&raw).unwrap_or_default();
+        origins.sort();
+        origins.dedup();
+        Ok(origins)
+    }
+
+    pub fn approve_cleartext_origin(&self, origin: &str) -> Result<()> {
+        let origin = origin.trim().trim_end_matches('/');
+        if origin.is_empty() {
+            return Err(StorageError::Custom("HTTP origin cannot be empty".into()));
+        }
+        let mut origins = self.approved_cleartext_origins()?;
+        if !origins.iter().any(|existing| existing == origin) {
+            origins.push(origin.to_string());
+            origins.sort();
+        }
+        self.set_setting(
+            "approved_cleartext_origins",
+            &serde_json::to_string(&origins)?,
+        )
+    }
+
+    pub fn revoke_cleartext_origin(&self, origin: &str) -> Result<()> {
+        let mut origins = self.approved_cleartext_origins()?;
+        origins.retain(|existing| existing != origin);
+        self.set_setting(
+            "approved_cleartext_origins",
+            &serde_json::to_string(&origins)?,
+        )
     }
 
     // Search history helpers
@@ -526,17 +601,49 @@ impl LocalStore {
         Ok(())
     }
 
-    // Session persistence helpers
-    pub fn save_session(&self, session: &Session) -> Result<()> {
-        self.set_setting("session_server_url", &session.server_url)?;
-        self.set_setting("session_user_id", &session.user_id)?;
-        self.set_setting("session_username", &session.username)?;
-        self.set_setting("session_access_token", &session.access_token)?;
-        self.set_setting("session_server_name", &session.server_name)?;
+    pub fn clear_played_history(&self) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute_batch(
+            "DELETE FROM watch_history; DELETE FROM local_progress WHERE is_played = 1;",
+        )?;
         Ok(())
     }
 
-    pub fn load_session(&self) -> Result<Option<Session>> {
+    pub fn record_watch_history(&self, item_id: &str, item_json: &str) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO watch_history (item_id, watched_at, item_json) VALUES (?1, ?2, ?3)
+             ON CONFLICT(item_id) DO UPDATE SET watched_at = ?2, item_json = ?3",
+            params![item_id, now, item_json],
+        )?;
+        conn.execute(
+            "DELETE FROM watch_history WHERE item_id IN (
+                SELECT item_id FROM watch_history ORDER BY watched_at DESC LIMIT -1 OFFSET 100
+            )",
+            [],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_watch_history(&self, limit: usize) -> Result<Vec<String>> {
+        let conn = self.conn()?;
+        let mut stmt =
+            conn.prepare("SELECT item_json FROM watch_history ORDER BY watched_at DESC LIMIT ?1")?;
+        let rows = stmt.query_map(params![limit as i64], |row| row.get(0))?;
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row?);
+        }
+        Ok(items)
+    }
+
+    // Read only for one-time migration from releases that stored session
+    // tokens in SQLite. New sessions are persisted by CredentialStore.
+    pub fn load_legacy_session(&self) -> Result<Option<Session>> {
         let Some(server_url) = self.get_setting("session_server_url")? else {
             return Ok(None);
         };
@@ -580,7 +687,7 @@ impl LocalStore {
         Ok(new_id)
     }
 
-    // pHash Jobs persistence (schema v3, matches Android PhashJobStore)
+    // pHash jobs are scoped by normalized Resolver origin and account.
     pub fn save_phash_job(&self, job: &StoredPhashJob) -> Result<()> {
         let now = if job.updated_at > 0 {
             job.updated_at as i64
@@ -593,15 +700,16 @@ impl LocalStore {
 
         let conn = self.conn()?;
         conn.execute(
-            "INSERT INTO phash_jobs (video_id, job_id, state, error_code, duration_us, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(video_id) DO UPDATE SET
-                job_id = ?2,
-                state = ?3,
-                error_code = ?4,
-                duration_us = ?5,
-                updated_at = ?6",
+            "INSERT INTO phash_jobs (resolver_scope, video_id, job_id, state, error_code, duration_us, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(resolver_scope, video_id) DO UPDATE SET
+                job_id = ?3,
+                state = ?4,
+                error_code = ?5,
+                duration_us = ?6,
+                updated_at = ?7",
             params![
+                job.resolver_scope,
                 job.video_id,
                 job.job_id,
                 job.state,
@@ -613,29 +721,35 @@ impl LocalStore {
 
         // Trim to MAX_JOBS (200), matching Android PhashJobStore
         conn.execute(
-            "DELETE FROM phash_jobs WHERE video_id NOT IN (
-                SELECT video_id FROM phash_jobs ORDER BY updated_at DESC LIMIT 200
+            "DELETE FROM phash_jobs WHERE (resolver_scope, video_id) NOT IN (
+                SELECT resolver_scope, video_id FROM phash_jobs ORDER BY updated_at DESC LIMIT 200
             )",
             [],
         )?;
         Ok(())
     }
 
-    pub fn get_phash_job(&self, video_id: &str) -> Result<Option<StoredPhashJob>> {
+    pub fn get_phash_job(
+        &self,
+        resolver_scope: &str,
+        video_id: &str,
+    ) -> Result<Option<StoredPhashJob>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT video_id, job_id, state, error_code, duration_us, updated_at
-             FROM phash_jobs WHERE video_id = ?1",
+            "SELECT resolver_scope, video_id, job_id, state, error_code, duration_us, updated_at
+             FROM phash_jobs WHERE resolver_scope = ?1 AND video_id = ?2",
         )?;
-        let mut rows = stmt.query(params![video_id])?;
+        let mut rows = stmt.query(params![resolver_scope, video_id])?;
         if let Some(row) = rows.next()? {
-            let video_id: String = row.get(0)?;
-            let job_id: Option<String> = row.get(1)?;
-            let state: String = row.get(2)?;
-            let error_code: Option<String> = row.get(3)?;
-            let dur: Option<i64> = row.get(4)?;
-            let updated: i64 = row.get(5)?;
+            let resolver_scope: String = row.get(0)?;
+            let video_id: String = row.get(1)?;
+            let job_id: Option<String> = row.get(2)?;
+            let state: String = row.get(3)?;
+            let error_code: Option<String> = row.get(4)?;
+            let dur: Option<i64> = row.get(5)?;
+            let updated: i64 = row.get(6)?;
             Ok(Some(StoredPhashJob {
+                resolver_scope,
                 video_id,
                 job_id,
                 state,
@@ -648,20 +762,22 @@ impl LocalStore {
         }
     }
 
-    pub fn get_all_phash_jobs(&self) -> Result<Vec<StoredPhashJob>> {
+    pub fn get_phash_jobs_for_scope(&self, resolver_scope: &str) -> Result<Vec<StoredPhashJob>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT video_id, job_id, state, error_code, duration_us, updated_at
-             FROM phash_jobs ORDER BY updated_at DESC",
+            "SELECT resolver_scope, video_id, job_id, state, error_code, duration_us, updated_at
+             FROM phash_jobs WHERE resolver_scope = ?1 ORDER BY updated_at DESC",
         )?;
-        let rows = stmt.query_map([], |row| {
-            let video_id: String = row.get(0)?;
-            let job_id: Option<String> = row.get(1)?;
-            let state: String = row.get(2)?;
-            let error_code: Option<String> = row.get(3)?;
-            let dur: Option<i64> = row.get(4)?;
-            let updated: i64 = row.get(5)?;
+        let rows = stmt.query_map(params![resolver_scope], |row| {
+            let resolver_scope: String = row.get(0)?;
+            let video_id: String = row.get(1)?;
+            let job_id: Option<String> = row.get(2)?;
+            let state: String = row.get(3)?;
+            let error_code: Option<String> = row.get(4)?;
+            let dur: Option<i64> = row.get(5)?;
+            let updated: i64 = row.get(6)?;
             Ok(StoredPhashJob {
+                resolver_scope,
                 video_id,
                 job_id,
                 state,
@@ -677,11 +793,11 @@ impl LocalStore {
         Ok(results)
     }
 
-    pub fn remove_phash_job(&self, video_id: &str) -> Result<()> {
+    pub fn remove_phash_job(&self, resolver_scope: &str, video_id: &str) -> Result<()> {
         let conn = self.conn()?;
         conn.execute(
-            "DELETE FROM phash_jobs WHERE video_id = ?1",
-            params![video_id],
+            "DELETE FROM phash_jobs WHERE resolver_scope = ?1 AND video_id = ?2",
+            params![resolver_scope, video_id],
         )?;
         Ok(())
     }
@@ -1005,7 +1121,7 @@ pub fn default_db_path() -> std::path::PathBuf {
 }
 
 /// CredentialStore handles active session tokens and user identity.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Session {
     pub server_url: String,
     pub user_id: String,
@@ -1027,7 +1143,7 @@ impl Default for CredentialStore {
 impl CredentialStore {
     pub fn new() -> Self {
         Self {
-            in_memory: std::sync::RwLock::new(None),
+            in_memory: std::sync::RwLock::new(load_platform_session()),
         }
     }
 
@@ -1036,8 +1152,8 @@ impl CredentialStore {
             .in_memory
             .write()
             .map_err(|_| StorageError::Custom("lock error".into()))?;
-        *lock = Some(session);
-        Ok(())
+        *lock = Some(session.clone());
+        persist_platform_session(&session)
     }
 
     pub fn get(&self) -> Result<Option<Session>> {
@@ -1045,7 +1161,18 @@ impl CredentialStore {
             .in_memory
             .read()
             .map_err(|_| StorageError::Custom("lock error".into()))?;
-        Ok(lock.clone())
+        if lock.is_some() {
+            return Ok(lock.clone());
+        }
+        drop(lock);
+        let loaded = load_platform_session();
+        if loaded.is_some() {
+            *self
+                .in_memory
+                .write()
+                .map_err(|_| StorageError::Custom("lock error".into()))? = loaded.clone();
+        }
+        Ok(loaded)
     }
 
     pub fn clear(&self) -> Result<()> {
@@ -1054,8 +1181,115 @@ impl CredentialStore {
             .write()
             .map_err(|_| StorageError::Custom("lock error".into()))?;
         *lock = None;
-        Ok(())
+        clear_platform_session()
     }
+}
+
+#[cfg(windows)]
+fn load_platform_session() -> Option<Session> {
+    use std::ffi::c_void;
+    use windows_sys::Win32::Security::Credentials::{
+        CRED_TYPE_GENERIC, CREDENTIALW, CredFree, CredReadW,
+    };
+
+    let target: Vec<u16> = "AdultHubDesktop/session"
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let mut credential: *mut CREDENTIALW = std::ptr::null_mut();
+    let ok = unsafe { CredReadW(target.as_ptr(), CRED_TYPE_GENERIC, 0, &mut credential) };
+    if ok == 0 || credential.is_null() {
+        return None;
+    }
+    let value = unsafe {
+        let blob = (*credential).CredentialBlob;
+        let len = (*credential).CredentialBlobSize as usize;
+        if blob.is_null() || len == 0 {
+            None
+        } else {
+            serde_json::from_slice(std::slice::from_raw_parts(blob, len)).ok()
+        }
+    };
+    unsafe { CredFree(credential.cast::<c_void>()) };
+    value
+}
+
+#[cfg(not(windows))]
+fn load_platform_session() -> Option<Session> {
+    None
+}
+
+#[cfg(windows)]
+fn persist_platform_session(session: &Session) -> Result<()> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::Security::Credentials::{
+        CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC, CREDENTIALW, CredWriteW,
+    };
+
+    let serialized = serde_json::to_vec(session)?;
+    let blob_size = u32::try_from(serialized.len())
+        .map_err(|_| StorageError::Custom("session data is too large".into()))?;
+    let target: Vec<u16> = "AdultHubDesktop/session"
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let username: Vec<u16> = session.username.encode_utf16().chain(Some(0)).collect();
+    let credential = CREDENTIALW {
+        Flags: 0,
+        Type: CRED_TYPE_GENERIC,
+        TargetName: target.as_ptr().cast_mut(),
+        Comment: std::ptr::null_mut(),
+        LastWritten: FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        },
+        CredentialBlobSize: blob_size,
+        CredentialBlob: serialized.as_ptr().cast_mut(),
+        Persist: CRED_PERSIST_LOCAL_MACHINE,
+        AttributeCount: 0,
+        Attributes: std::ptr::null_mut(),
+        TargetAlias: std::ptr::null_mut(),
+        UserName: username.as_ptr().cast_mut(),
+    };
+    let ok = unsafe { CredWriteW(&credential, 0) };
+    if ok == 0 {
+        return Err(StorageError::Custom(format!(
+            "Windows Credential Manager rejected the session (error {})",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn persist_platform_session(_session: &Session) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn clear_platform_session() -> Result<()> {
+    use windows_sys::Win32::Foundation::GetLastError;
+    use windows_sys::Win32::Security::Credentials::{CRED_TYPE_GENERIC, CredDeleteW};
+
+    let target: Vec<u16> = "AdultHubDesktop/session"
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let ok = unsafe { CredDeleteW(target.as_ptr(), CRED_TYPE_GENERIC, 0) };
+    if ok == 0 {
+        let error = unsafe { GetLastError() };
+        if error != 1168 {
+            return Err(StorageError::Custom(format!(
+                "cannot clear saved session (Windows error {error})"
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn clear_platform_session() -> Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1143,7 +1377,7 @@ mod tests {
     #[test]
     fn local_store_session_and_device_id() {
         let store = LocalStore::open_in_memory().unwrap();
-        assert!(store.load_session().unwrap().is_none());
+        assert!(store.load_legacy_session().unwrap().is_none());
 
         let session = Session {
             server_url: "https://my.server.local:8920".into(),
@@ -1152,9 +1386,26 @@ mod tests {
             access_token: "secret-token-xyz".into(),
             server_name: "My Server".into(),
         };
-        store.save_session(&session).unwrap();
+        store
+            .set_setting("session_server_url", &session.server_url)
+            .unwrap();
+        store
+            .set_setting("session_user_id", &session.user_id)
+            .unwrap();
+        store
+            .set_setting("session_username", &session.username)
+            .unwrap();
+        store
+            .set_setting("session_access_token", &session.access_token)
+            .unwrap();
+        store
+            .set_setting("session_server_name", &session.server_name)
+            .unwrap();
 
-        let loaded = store.load_session().unwrap().expect("session loaded");
+        let loaded = store
+            .load_legacy_session()
+            .unwrap()
+            .expect("legacy session loaded");
         assert_eq!(loaded.server_url, "https://my.server.local:8920");
         assert_eq!(loaded.user_id, "user-abc");
         assert_eq!(loaded.username, "adult_fan");
@@ -1162,7 +1413,7 @@ mod tests {
         assert_eq!(loaded.server_name, "My Server");
 
         store.clear_session().unwrap();
-        assert!(store.load_session().unwrap().is_none());
+        assert!(store.load_legacy_session().unwrap().is_none());
 
         let dev_id1 = store.get_or_create_device_id().unwrap();
         assert!(!dev_id1.is_empty());
@@ -1230,9 +1481,15 @@ mod tests {
     #[test]
     fn phash_jobs_persistence() {
         let store = LocalStore::open_in_memory().unwrap();
-        assert!(store.get_phash_job("telegram:-1001:2:3").unwrap().is_none());
+        assert!(
+            store
+                .get_phash_job("resolver-a:user-a", "telegram:-1001:2:3")
+                .unwrap()
+                .is_none()
+        );
 
         let job1 = StoredPhashJob {
+            resolver_scope: "resolver-a:user-a".into(),
             video_id: "telegram:-1001:2:3".into(),
             job_id: Some("job_abc".into()),
             state: "queued".into(),
@@ -1243,7 +1500,7 @@ mod tests {
         store.save_phash_job(&job1).unwrap();
 
         let loaded = store
-            .get_phash_job("telegram:-1001:2:3")
+            .get_phash_job("resolver-a:user-a", "telegram:-1001:2:3")
             .unwrap()
             .expect("job loaded");
         assert_eq!(loaded.job_id.as_deref(), Some("job_abc"));
@@ -1252,6 +1509,7 @@ mod tests {
 
         // Update state to done
         let job_updated = StoredPhashJob {
+            resolver_scope: "resolver-a:user-a".into(),
             video_id: "telegram:-1001:2:3".into(),
             job_id: Some("job_abc".into()),
             state: "done".into(),
@@ -1261,17 +1519,29 @@ mod tests {
         };
         store.save_phash_job(&job_updated).unwrap();
         let loaded2 = store
-            .get_phash_job("telegram:-1001:2:3")
+            .get_phash_job("resolver-a:user-a", "telegram:-1001:2:3")
             .unwrap()
             .expect("job updated");
         assert_eq!(loaded2.state, "done");
 
-        let all = store.get_all_phash_jobs().unwrap();
+        let all = store.get_phash_jobs_for_scope("resolver-a:user-a").unwrap();
         assert_eq!(all.len(), 1);
 
-        store.remove_phash_job("telegram:-1001:2:3").unwrap();
-        assert!(store.get_phash_job("telegram:-1001:2:3").unwrap().is_none());
-        assert!(store.get_all_phash_jobs().unwrap().is_empty());
+        store
+            .remove_phash_job("resolver-a:user-a", "telegram:-1001:2:3")
+            .unwrap();
+        assert!(
+            store
+                .get_phash_job("resolver-a:user-a", "telegram:-1001:2:3")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .get_phash_jobs_for_scope("resolver-a:user-a")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

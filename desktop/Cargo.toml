@@ -9,7 +9,7 @@ license = "Apache-2.0"
 rust-version = "1.85"
 
 [workspace.dependencies]
-slint = { version = "=1.18.1", features = ["backend-winit", "renderer-femtovg"] }
+slint = { version = "=1.18.1", features = ["backend-winit", "renderer-femtovg", "unstable-winit-030"] }
 slint-build = "=1.18.1"
 glow = "0.16"
 libloading = "0.9"
@@ -22,4 +22,6 @@ uuid = { version = "1.10", features = ["v4"] }
 thiserror = "2.0"
 regex = "1.11"
 ring = "0.17"
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security_Credentials"] }
+sysinfo = { version = "0.35.2", default-features = false, features = ["system"] }
 

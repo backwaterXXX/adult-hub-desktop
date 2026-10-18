@@ -12,6 +12,13 @@ const MAX_MESSAGE_LENGTH: usize = 1_000;
 static URL_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)https?://[^\s\x22'<>]+").expect("valid url regex"));
 
+static WINDOWS_PATH_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)(^|[\s'"(])([a-z]:\\[^'"<>|]+)"#).expect("valid Windows path regex")
+});
+
+static UNIX_PATH_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(^|[\s'"(])(/[^'"<>|]+)"#).expect("valid Unix path regex"));
+
 static UUID_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b")
         .expect("valid uuid regex")
@@ -34,11 +41,12 @@ static TITLE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 
 pub fn redact(message: &str) -> String {
     let s1 = URL_REGEX.replace_all(message, "[URL]");
-    let s2 = SECRET_REGEX.replace_all(&s1, "${1}=[REDACTED]");
-    let s3 = IDENTIFIER_REGEX.replace_all(&s2, "${1}=[REDACTED]");
-    let s4 = TITLE_REGEX.replace_all(&s3, "${1}=[REDACTED]");
-    let s5 = UUID_REGEX.replace_all(&s4, "[ID]");
-    s5.into_owned()
+    let s2 = WINDOWS_PATH_REGEX.replace_all(&s1, "${1}[PATH]");
+    let s3 = UNIX_PATH_REGEX.replace_all(&s2, "${1}[PATH]");
+    let s4 = SECRET_REGEX.replace_all(&s3, "${1}=[REDACTED]");
+    let s5 = IDENTIFIER_REGEX.replace_all(&s4, "${1}=[REDACTED]");
+    let s6 = TITLE_REGEX.replace_all(&s5, "${1}=[REDACTED]");
+    UUID_REGEX.replace_all(&s6, "[ID]").into_owned()
 }
 
 pub struct AppLog {

@@ -1,0 +1,2336 @@
+import { HubTheme, KeyboardState } from "theme.slint";
+import { ScrollView } from "std-widgets.slint";
+
+// =============================================================================
+// SettingsView.slint - Isolated Desktop Settings Component for Adult Hub
+// Target: Slint 1.18.1
+//
+// This component encapsulates the settings and server configuration interface.
+// It maintains full parity with current settings semantics while providing:
+// - Explicit UI state and callbacks
+// - Left-aligned compact responsive form layout
+// - Category navigation with a dedicated narrow-window selector
+// - 40-44px touch/click friendly controls
+// - Dark neutral theme with pink accent (#BE185D / #F9A8D4)
+// - Comprehensive keyboard focus support and accessible labels
+// =============================================================================
+
+export struct DiscoveredServerItem {
+    id: string,
+    name: string,
+    url: string,
+}
+
+export struct LibraryOptionData {
+    id: string,
+    name: string,
+    selected: bool,
+}
+
+export struct HomeCategoryOption {
+    id: string,
+    name: string,
+    selected: bool,
+}
+
+// -----------------------------------------------------------------------------
+// Internal Subcomponents & Helpers
+// -----------------------------------------------------------------------------
+
+component PersonPlaceholder inherits Rectangle {
+    background: transparent;
+
+    Rectangle {
+        x: (parent.width - min(parent.width, parent.height)) / 2 + min(parent.width, parent.height) * 0.36;
+        y: (parent.height - min(parent.width, parent.height)) / 2 + min(parent.width, parent.height) * 0.20;
+        width: min(parent.width, parent.height) * 0.28;
+        height: min(parent.width, parent.height) * 0.28;
+        border-radius: min(parent.width, parent.height) * 0.14;
+        background: #ff9abc;
+    }
+
+    Rectangle {
+        x: (parent.width - min(parent.width, parent.height)) / 2 + min(parent.width, parent.height) * 0.20;
+        y: (parent.height - min(parent.width, parent.height)) / 2 + min(parent.width, parent.height) * 0.54;
+        width: min(parent.width, parent.height) * 0.60;
+        height: min(parent.width, parent.height) * 0.30;
+        border-radius: min(parent.width, parent.height) * 0.15;
+        background: #ff9abc;
+    }
+}
+
+component DiagnosticCodecBadge inherits Rectangle {
+    in property <string> codec-name;
+    in property <string> codec-status;
+
+    height: 32px;
+    border-radius: 7px;
+    background: HubTheme.surface;
+    border-width: 1px;
+    border-color: root.codec-status == "Available" ? #BE185D88 : #F3F4F620;
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 8px;
+        alignment: center;
+
+        Text {
+            text: root.codec-name;
+            color: HubTheme.text-primary;
+            font-size: 12px;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+
+        Text {
+            text: root.codec-status;
+            color: root.codec-status == "Available" ? #ff5c91 : HubTheme.text-muted;
+            font-size: 12px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+component SettingsStatusBadge inherits Rectangle {
+    in property <string> text;
+    in property <string> status: "neutral"; // "success", "warning", "error", "neutral"
+    in property <string> accessible-name: root.text;
+
+    accessible-role: none;
+    accessible-label: root.accessible-name;
+    height: 30px;
+    min-width: badge-label.preferred-width + 20px;
+    border-radius: 15px;
+    border-width: 1px;
+    border-color: root.status == "success" ? #4ADE8066
+        : (root.status == "warning" ? #FBBF2466
+        : (root.status == "error" ? #FB718566 : HubTheme.separator));
+    background: root.status == "success" ? #4ADE8018
+        : (root.status == "warning" ? #FBBF2418
+        : (root.status == "error" ? #FB718518 : HubTheme.navigation-background));
+
+    badge-label := Text {
+        x: 10px;
+        width: parent.width - 20px;
+        height: parent.height;
+        text: root.text;
+        color: root.status == "success" ? HubTheme.success
+            : (root.status == "warning" ? HubTheme.warning
+            : (root.status == "error" ? HubTheme.error : HubTheme.text-secondary));
+        font-size: HubTheme.metadata-size;
+        font-weight: 600;
+        vertical-alignment: center;
+        horizontal-alignment: center;
+        overflow: elide;
+    }
+}
+
+component SettingsButton inherits Rectangle {
+    in property <string> text;
+    in property <string> accessible-name: root.text;
+    in property <bool> primary: false;
+    in property <bool> active: false;
+    in property <bool> disabled: false;
+    in property <bool> danger: false;
+    in property <length> custom-height: 42px;
+    in property <length> custom-width: 0px;
+    out property <bool> has-focus: focus-target.has-focus;
+    callback clicked();
+
+    forward-focus: focus-target;
+    accessible-role: button;
+    accessible-label: root.accessible-name;
+    accessible-action-default => {
+        if (!root.disabled) { root.clicked(); }
+    }
+
+    height: root.custom-height;
+    width: root.custom-width > 0px ? root.custom-width : max(90px, btn-label.preferred-width + 28px);
+    border-radius: HubTheme.control-radius;
+    border-width: 2px;
+    border-color: root.has-focus ? HubTheme.focus-ring
+        : (root.danger ? HubTheme.error
+        : (root.primary || root.active ? HubTheme.accent
+        : (touch.has-hover ? #BE185D88 : #F3F4F624)));
+    background: root.disabled ? #171C2688
+        : (touch.pressed ? (root.danger ? #7F1D1D : HubTheme.accent-pressed)
+        : (touch.has-hover ? (root.danger ? #991B1B : (root.primary ? HubTheme.accent-hover : HubTheme.surface-hover))
+        : (root.danger ? #BE185D33 : (root.primary ? HubTheme.accent : (root.active ? #BE185D33 : HubTheme.surface)))));
+    opacity: root.disabled ? 0.55 : 1.0;
+
+    animate background { duration: 120ms; }
+    animate border-color { duration: 120ms; }
+
+    btn-label := Text {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        text: root.text;
+        color: root.disabled ? HubTheme.text-muted : HubTheme.text-primary;
+        font-size: HubTheme.body-size;
+        font-weight: root.primary || root.active ? 700 : 600;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    touch := TouchArea {
+        enabled: !root.disabled;
+        clicked => { root.clicked(); }
+    }
+
+    focus-target := FocusScope {
+        width: 0px;
+        height: 0px;
+        enabled: !root.disabled;
+        key-pressed(event) => {
+            if (!root.disabled && (event.text == Key.Space || event.text == Key.Return)) {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+}
+
+component SettingsTextInput inherits Rectangle {
+    in-out property <string> text;
+    in property <string> placeholder: "";
+    in property <string> accessible-name: "";
+    in property <bool> password-field: false;
+    in property <bool> enabled: true;
+    out property <bool> has-focus: input.has-focus;
+    callback edited(string);
+    callback accepted(string);
+
+    forward-focus: input;
+    height: 44px;
+    border-radius: HubTheme.control-radius;
+    background: root.enabled ? #141418 : #19191e;
+    border-width: 2px;
+    border-color: input.has-focus ? HubTheme.focus-ring : (root.enabled ? #F3F4F624 : #F3F4F612);
+    clip: true;
+    animate border-color { duration: 120ms; }
+
+    input := TextInput {
+        x: 14px;
+        y: 0px;
+        width: parent.width - 28px;
+        height: parent.height;
+        enabled: root.enabled;
+        text <=> root.text;
+        input-type: root.password-field ? InputType.password : InputType.text;
+        color: root.enabled ? HubTheme.text-primary : HubTheme.text-muted;
+        selection-background-color: #BE185D80;
+        selection-foreground-color: HubTheme.text-primary;
+        vertical-alignment: center;
+        font-size: HubTheme.body-size;
+        accessible-label: root.accessible-name;
+        changed has-focus => { KeyboardState.text-input-focused = input.has-focus; }
+        edited => { root.edited(input.text); }
+        accepted => { root.accepted(input.text); }
+    }
+
+    if root.text == "" && root.placeholder != "" : Text {
+        x: 14px;
+        y: 0px;
+        width: parent.width - 28px;
+        height: parent.height;
+        text: root.placeholder;
+        color: root.enabled ? HubTheme.text-muted : #55555e;
+        font-size: HubTheme.body-size;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+}
+
+component SettingsCategoryTab inherits Rectangle {
+    in property <string> text;
+    in property <string> icon: "";
+    in property <string> accessible-name: root.text;
+    in property <bool> selected: false;
+    out property <bool> has-focus: focus-target.has-focus;
+    callback clicked();
+
+    forward-focus: focus-target;
+    accessible-role: button;
+    accessible-label: "Settings category: " + root.accessible-name;
+    accessible-action-default => { root.clicked(); }
+
+    height: 42px;
+    min-width: max(88px, tab-label.preferred-width + 24px);
+    border-radius: HubTheme.control-radius;
+    border-width: 2px;
+    border-color: root.has-focus ? HubTheme.focus-ring : (root.selected ? HubTheme.accent-outline : transparent);
+    background: root.selected ? #BE185D24 : (touch.has-hover ? HubTheme.surface-hover : transparent);
+
+    animate background { duration: 120ms; }
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: 8px;
+        alignment: center;
+
+        if root.icon != "" : Text {
+            text: root.icon;
+            color: root.selected ? HubTheme.focus-ring : (touch.has-hover ? HubTheme.text-primary : HubTheme.text-secondary);
+            font-size: 14px;
+            vertical-alignment: center;
+        }
+
+        tab-label := Text {
+            text: root.text;
+            color: root.selected ? HubTheme.text-primary : (touch.has-hover ? HubTheme.text-primary : HubTheme.text-secondary);
+            font-size: HubTheme.body-size;
+            font-weight: root.selected ? 700 : 500;
+            vertical-alignment: center;
+        }
+    }
+
+    Rectangle {
+        x: 8px;
+        y: parent.height - 3px;
+        width: parent.width - 16px;
+        height: 3px;
+        border-radius: 1.5px;
+        background: root.selected ? HubTheme.accent : transparent;
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+
+    focus-target := FocusScope {
+        width: 0px;
+        height: 0px;
+        key-pressed(event) => {
+            if (event.text == Key.Space || event.text == Key.Return) {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+}
+
+component SettingsCategorySelector inherits Rectangle {
+    in property <string> active-category;
+    in-out property <bool> is-open: false;
+    out property <bool> has-focus: focus-target.has-focus;
+    callback category-selected(string);
+
+    forward-focus: focus-target;
+    accessible-role: button;
+    accessible-label: "Settings category selector: currently " + root.active-category;
+    accessible-action-default => { root.is-open = !root.is-open; }
+
+    height: 44px;
+    border-radius: HubTheme.control-radius;
+    border-width: root.has-focus ? 2px : 1px;
+    border-color: root.has-focus ? HubTheme.focus-ring : (root.is-open ? HubTheme.accent-outline : #F3F4F624);
+    background: touch.has-hover ? HubTheme.surface-hover : HubTheme.surface;
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: 10px;
+        alignment: center;
+
+        Text {
+            text: "Category:";
+            color: HubTheme.text-muted;
+            font-size: HubTheme.body-size;
+            vertical-alignment: center;
+        }
+
+        Text {
+            text: root.active-category == "connection" ? "Connection & Server"
+                : (root.active-category == "playback" ? "Playback & Engine"
+                : (root.active-category == "integrations" ? "Integrations & Resolver"
+                : (root.active-category == "content" ? "Content & Filters"
+                : (root.active-category == "storage" ? "Cache & Storage"
+                : (root.active-category == "privacy" ? "Data & Privacy" : "System & Diagnostics")))));
+            color: HubTheme.text-primary;
+            font-size: HubTheme.body-size;
+            font-weight: 700;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+
+        Text {
+            text: root.is-open ? "▲" : "▼";
+            color: HubTheme.text-secondary;
+            font-size: 13px;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        clicked => { root.is-open = !root.is-open; }
+    }
+
+    focus-target := FocusScope {
+        width: 0px;
+        height: 0px;
+        key-pressed(event) => {
+            if (event.text == Key.Space || event.text == Key.Return) {
+                root.is-open = !root.is-open;
+                return accept;
+            }
+            if (event.text == Key.Escape && root.is-open) {
+                root.is-open = false;
+                return accept;
+            }
+            reject
+        }
+    }
+}
+
+component SettingsCategoryOptionItem inherits Rectangle {
+    in property <string> title;
+    in property <bool> selected: false;
+    out property <bool> has-focus: focus-target.has-focus;
+    callback clicked();
+
+    forward-focus: focus-target;
+    accessible-role: button;
+    accessible-label: root.title;
+    accessible-action-default => { root.clicked(); }
+
+    height: 42px;
+    border-radius: HubTheme.control-radius;
+    border-width: root.has-focus ? 2px : 1px;
+    border-color: root.has-focus ? HubTheme.focus-ring : (root.selected ? HubTheme.accent-outline : transparent);
+    background: root.selected ? #BE185D33 : (touch.has-hover ? HubTheme.surface-hover : transparent);
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: 10px;
+        alignment: center;
+
+        Text {
+            text: root.selected ? "●" : "○";
+            color: root.selected ? HubTheme.focus-ring : HubTheme.text-muted;
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+
+        Text {
+            text: root.title;
+            color: root.selected ? HubTheme.text-primary : HubTheme.text-secondary;
+            font-size: HubTheme.body-size;
+            font-weight: root.selected ? 700 : 500;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+
+        if root.selected : Text {
+            text: "✓";
+            color: HubTheme.focus-ring;
+            font-size: 14px;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+
+    focus-target := FocusScope {
+        width: 0px;
+        height: 0px;
+        key-pressed(event) => {
+            if (event.text == Key.Space || event.text == Key.Return) {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Exported Main Settings View Component
+// -----------------------------------------------------------------------------
+
+export component SettingsView inherits Rectangle {
+    background: HubTheme.app-background;
+    forward-focus: main-scope;
+
+    // View state & Category navigation
+    in-out property <string> active-category: "connection";
+    in-out property <bool> is-narrow: root.width < 920px;
+    in-out property <bool> category-dropdown-open: false;
+
+    // Feedback & System notification state
+    in property <string> status-message: "";
+    in property <color> status-color: HubTheme.text-secondary;
+    in property <string> error-message: "";
+    in property <string> app-version: "0.1.0";
+
+    // Authentication & Jellyfin Server state
+    in property <bool> is-logged-in: false;
+    in property <string> logged-in-user: "";
+    in-out property <string> server-url-input: "http://localhost:8096";
+    in-out property <string> username-input: "";
+    in-out property <string> password-input: "";
+    in-out property <string> quick-connect-code: "";
+    in-out property <bool> quick-connect-active: false;
+    in-out property <bool> quick-connect-expired: false;
+    in-out property <bool> quick-connect-authenticating: false;
+    in property <[DiscoveredServerItem]> discovered-servers: [];
+    in property <bool> is-scanning-servers: false;
+    in property <string> current-library: "All Videos";
+    in property <[LibraryOptionData]> library-options: [];
+    in property <[string]> approved-http-origins: [];
+
+    // Integrations & Resolver API state
+    in-out property <string> resolver-url-input: "";
+    in property <string> jellyfin-connection-status: "Not checked";
+    in property <string> resolver-connection-status: "Not checked";
+    in property <string> thumbnail-check-status: "Artwork not checked";
+    in property <bool> thumbnail-check-failed: true;
+    in property <bool> checking-connections: false;
+    in property <bool> phash-active: false;
+    in property <string> phash-status-text: "";
+
+    // Playback Preferences state
+    in property <string> buffer-profile-label: "Buffer: Standard";
+    in property <string> seek-step-label: "Seek: 15s";
+    in property <int> seek-step-sec: 15;
+    in property <bool> hwdec-active: true;
+    in property <bool> autoplay-active: false;
+    in property <bool> low-ram-active: false;
+
+    // Content & Filters state
+    in property <[HomeCategoryOption]> home-category-options: [];
+    in-out property <string> new-tag-input: "";
+    in property <[string]> excluded-tags-list: [];
+    in property <[string]> hidden-channels-list: [];
+
+    // Storage & Cache state
+    in property <string> cache-limit-label: "Cache Limit: 256 MB";
+
+    // Hardware Diagnostics state
+    in property <string> system-os-name: "Unknown";
+    in property <string> system-os-version: "Unknown";
+    in property <string> system-cpu-brand: "Unknown processor";
+    in property <string> system-logical-processors: "Unknown";
+    in property <string> system-total-memory: "Unknown";
+    in property <string> system-available-memory: "Unknown";
+    in property <string> system-vulkan-loader: "Unknown";
+    in property <string> system-codec-h264: "Unavailable";
+    in property <string> system-codec-hevc: "Unavailable";
+    in property <string> system-codec-vp9: "Unavailable";
+    in property <string> system-codec-av1: "Unavailable";
+
+    // Application Updates & Release state
+    in property <bool> auto-update-enabled: true;
+    in property <bool> update-checking: false;
+    in property <string> update-status: "";
+    in property <bool> update-available: false;
+    in property <string> update-version: "";
+    in property <string> update-release-notes: "";
+    in property <bool> update-downloading: false;
+    in property <float> update-progress: 0.0;
+    in property <bool> update-ready: false;
+
+    // Dialog & Licenses Modal state
+    in-out property <bool> licenses-visible: false;
+    in property <string> licenses-text: "";
+    in-out property <bool> confirm-dialog-visible: false;
+    in-out property <string> confirm-dialog-title: "";
+    in-out property <string> confirm-dialog-message: "";
+    in-out property <string> confirm-dialog-action: "";
+
+    // -------------------------------------------------------------------------
+    // Callbacks Contract
+    // -------------------------------------------------------------------------
+    callback category-changed(string);
+    callback perform-login(string, string, string);
+    callback perform-logout();
+    callback start-quick-connect();
+    callback cancel-quick-connect();
+    callback scan-servers();
+    callback select-discovered-server(string);
+    callback refresh-library-list();
+    callback select-library(string);
+    callback revoke-cleartext-http-origin(string);
+
+    callback save-resolver-url(string);
+    callback test-resolver-connection();
+    callback check-connections();
+    callback toggle-phash();
+
+    callback cycle-buffer-profile();
+    callback cycle-seek-step();
+    callback toggle-hwdec();
+    callback toggle-autoplay();
+    callback toggle-low-ram();
+
+    callback toggle-home-category(string);
+    callback refresh-home-categories();
+    callback add-excluded-tag(string);
+    callback remove-excluded-tag(string);
+    callback unhide-channel(string);
+    callback unhide-all-channels();
+
+    callback cycle-cache-limit();
+    callback clear-image-cache();
+
+    callback clear-search-history();
+    callback clear-watch-history();
+    callback clear-progress-history();
+    callback panic-exit();
+
+    callback refresh-system-info();
+    callback export-config();
+    callback import-config();
+    callback export-diagnostics();
+
+    callback toggle-auto-update();
+    callback check-for-updates();
+    callback start-update-download();
+    callback install-update();
+    callback view-licenses();
+
+    callback confirm-action(string);
+
+    main-scope := FocusScope {
+        width: 100%;
+        height: 100%;
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                if (root.licenses-visible) {
+                    root.licenses-visible = false;
+                    return accept;
+                }
+                if (root.confirm-dialog-visible) {
+                    root.confirm-dialog-visible = false;
+                    return accept;
+                }
+                if (root.category-dropdown-open) {
+                    root.category-dropdown-open = false;
+                    return accept;
+                }
+            }
+            reject
+        }
+
+        ScrollView {
+            width: 100%;
+            height: 100%;
+
+            VerticalLayout {
+                padding-left: root.is-narrow ? HubTheme.compact-content-padding : HubTheme.content-padding;
+                padding-right: root.is-narrow ? HubTheme.compact-content-padding : HubTheme.content-padding;
+                padding-top: 24px;
+                padding-bottom: 40px;
+                spacing: HubTheme.space-4;
+                alignment: start;
+
+                // -------------------------------------------------------------
+                // 1. Header & Version Banner
+                // -------------------------------------------------------------
+                HorizontalLayout {
+                    spacing: HubTheme.space-3;
+                    alignment: center;
+
+                    Text {
+                        text: "Settings & Preferences";
+                        color: HubTheme.text-primary;
+                        font-size: HubTheme.section-title-size;
+                        font-weight: 700;
+                        horizontal-stretch: 1;
+                    }
+
+                    Text {
+                        text: "Adult Hub Desktop v" + root.app-version;
+                        color: HubTheme.accent-text;
+                        font-size: HubTheme.metadata-size;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                }
+
+                // -------------------------------------------------------------
+                // 2. Status & Error Feedback Banners
+                // -------------------------------------------------------------
+                if root.status-message != "" && root.status-message != "Ready" : Rectangle {
+                    height: 44px;
+                    border-radius: HubTheme.control-radius;
+                    background: HubTheme.surface;
+                    border-width: 1px;
+                    border-color: root.status-color;
+
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        spacing: 10px;
+                        alignment: center;
+
+                        Text {
+                            text: "●";
+                            color: root.status-color;
+                            font-size: 13px;
+                            vertical-alignment: center;
+                        }
+
+                        Text {
+                            text: root.status-message;
+                            color: root.status-color;
+                            font-size: HubTheme.body-size;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+                    }
+                }
+
+                if root.error-message != "" : Rectangle {
+                    height: 44px;
+                    border-radius: HubTheme.control-radius;
+                    background: #FB718518;
+                    border-width: 1px;
+                    border-color: HubTheme.error;
+
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        spacing: 10px;
+                        alignment: center;
+
+                        Text {
+                            text: "⚠";
+                            color: HubTheme.error;
+                            font-size: 15px;
+                            vertical-alignment: center;
+                        }
+
+                        Text {
+                            text: root.error-message;
+                            color: HubTheme.error;
+                            font-size: HubTheme.body-size;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+                    }
+                }
+
+                // -------------------------------------------------------------
+                // 3. Category Navigation (Wide Tabs vs Narrow Selector)
+                // -------------------------------------------------------------
+                if !root.is-narrow : HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+
+                    SettingsCategoryTab {
+                        text: "Connection";
+                        selected: root.active-category == "connection";
+                        clicked => {
+                            root.active-category = "connection";
+                            root.category-changed("connection");
+                        }
+                    }
+
+                    SettingsCategoryTab {
+                        text: "Playback";
+                        selected: root.active-category == "playback";
+                        clicked => {
+                            root.active-category = "playback";
+                            root.category-changed("playback");
+                        }
+                    }
+
+                    SettingsCategoryTab {
+                        text: "Integrations";
+                        selected: root.active-category == "integrations";
+                        clicked => {
+                            root.active-category = "integrations";
+                            root.category-changed("integrations");
+                        }
+                    }
+
+                    SettingsCategoryTab {
+                        text: "Content";
+                        selected: root.active-category == "content";
+                        clicked => {
+                            root.active-category = "content";
+                            root.category-changed("content");
+                        }
+                    }
+
+                    SettingsCategoryTab {
+                        text: "Storage";
+                        selected: root.active-category == "storage";
+                        clicked => {
+                            root.active-category = "storage";
+                            root.category-changed("storage");
+                        }
+                    }
+
+                    SettingsCategoryTab {
+                        text: "Privacy";
+                        selected: root.active-category == "privacy";
+                        clicked => {
+                            root.active-category = "privacy";
+                            root.category-changed("privacy");
+                        }
+                    }
+
+                    SettingsCategoryTab {
+                        text: "System";
+                        selected: root.active-category == "system";
+                        clicked => {
+                            root.active-category = "system";
+                            root.category-changed("system");
+                        }
+                    }
+                }
+
+                if root.is-narrow : VerticalLayout {
+                    spacing: 6px;
+
+                    SettingsCategorySelector {
+                        active-category: root.active-category;
+                        is-open <=> root.category-dropdown-open;
+                    }
+
+                    if root.category-dropdown-open : Rectangle {
+                        border-radius: HubTheme.control-radius;
+                        background: HubTheme.navigation-background;
+                        border-width: 1px;
+                        border-color: HubTheme.separator;
+                        clip: true;
+
+                        VerticalLayout {
+                            padding: 6px;
+                            spacing: 4px;
+
+                            SettingsCategoryOptionItem {
+                                title: "Connection & Server";
+                                selected: root.active-category == "connection";
+                                clicked => {
+                                    root.active-category = "connection";
+                                    root.category-dropdown-open = false;
+                                    root.category-changed("connection");
+                                }
+                            }
+
+                            SettingsCategoryOptionItem {
+                                title: "Playback & Engine";
+                                selected: root.active-category == "playback";
+                                clicked => {
+                                    root.active-category = "playback";
+                                    root.category-dropdown-open = false;
+                                    root.category-changed("playback");
+                                }
+                            }
+
+                            SettingsCategoryOptionItem {
+                                title: "Integrations & Resolver";
+                                selected: root.active-category == "integrations";
+                                clicked => {
+                                    root.active-category = "integrations";
+                                    root.category-dropdown-open = false;
+                                    root.category-changed("integrations");
+                                }
+                            }
+
+                            SettingsCategoryOptionItem {
+                                title: "Content & Filters";
+                                selected: root.active-category == "content";
+                                clicked => {
+                                    root.active-category = "content";
+                                    root.category-dropdown-open = false;
+                                    root.category-changed("content");
+                                }
+                            }
+
+                            SettingsCategoryOptionItem {
+                                title: "Cache & Storage";
+                                selected: root.active-category == "storage";
+                                clicked => {
+                                    root.active-category = "storage";
+                                    root.category-dropdown-open = false;
+                                    root.category-changed("storage");
+                                }
+                            }
+
+                            SettingsCategoryOptionItem {
+                                title: "Data & Privacy";
+                                selected: root.active-category == "privacy";
+                                clicked => {
+                                    root.active-category = "privacy";
+                                    root.category-dropdown-open = false;
+                                    root.category-changed("privacy");
+                                }
+                            }
+
+                            SettingsCategoryOptionItem {
+                                title: "System & Diagnostics";
+                                selected: root.active-category == "system";
+                                clicked => {
+                                    root.active-category = "system";
+                                    root.category-dropdown-open = false;
+                                    root.category-changed("system");
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // -------------------------------------------------------------
+                // 4. Compact Left-Aligned Form Content
+                // -------------------------------------------------------------
+                Rectangle {
+                    max-width: 920px;
+                    width: 100%;
+                    background: transparent;
+
+                    VerticalLayout {
+                        spacing: 20px;
+
+                        // =====================================================
+                        // SECTION: CONNECTION & SERVER
+                        // =====================================================
+                        if root.active-category == "connection" : Rectangle {
+                            border-radius: HubTheme.card-radius;
+                            background: HubTheme.surface;
+                            border-width: 1px;
+                            border-color: #F3F4F614;
+
+                            VerticalLayout {
+                                padding: HubTheme.form-card-padding;
+                                spacing: 16px;
+
+                                HorizontalLayout {
+                                    Text {
+                                        text: "Jellyfin Server";
+                                        color: HubTheme.accent-text;
+                                        font-size: HubTheme.card-title-size;
+                                        font-weight: 700;
+                                        horizontal-stretch: 1;
+                                    }
+
+                                    SettingsStatusBadge {
+                                        text: root.is-logged-in ? "Connected" : "Disconnected";
+                                        status: root.is-logged-in ? "success" : "neutral";
+                                    }
+                                }
+
+                                if !root.is-logged-in : VerticalLayout {
+                                    spacing: 12px;
+
+                                    VerticalLayout {
+                                        spacing: 6px;
+                                        Text {
+                                            text: root.quick-connect-active
+                                                ? "Server Address (locked during Quick Connect):"
+                                                : "Server Address (HTTP LAN or HTTPS):";
+                                            color: HubTheme.text-secondary;
+                                            font-size: HubTheme.metadata-size;
+                                            font-weight: 600;
+                                        }
+
+                                        SettingsTextInput {
+                                            text <=> root.server-url-input;
+                                            placeholder: "http://192.168.1.100:8096 or https://...";
+                                            accessible-name: "Server Address";
+                                            enabled: !root.quick-connect-active;
+                                        }
+                                    }
+
+                                    // Local LAN Server Discovery
+                                    VerticalLayout {
+                                        spacing: 8px;
+
+                                        HorizontalLayout {
+                                            alignment: space-between;
+
+                                            Text {
+                                                text: "Discovered Local Servers:";
+                                                color: HubTheme.text-primary;
+                                                font-size: HubTheme.metadata-size;
+                                                font-weight: 600;
+                                                vertical-alignment: center;
+                                            }
+
+                                            SettingsButton {
+                                                text: root.is-scanning-servers ? "Scanning..." : "Scan LAN";
+                                                disabled: root.quick-connect-active || root.is-scanning-servers;
+                                                custom-height: 40px;
+                                                clicked => { root.scan-servers(); }
+                                            }
+                                        }
+
+                                        if root.discovered-servers.length > 0 : HorizontalLayout {
+                                            spacing: 8px;
+                                            for server in root.discovered-servers : Rectangle {
+                                                height: 38px;
+                                                border-radius: HubTheme.control-radius;
+                                                background: server-touch.has-hover ? HubTheme.surface-hover : HubTheme.navigation-background;
+                                                border-width: 1px;
+                                                border-color: server-touch.has-hover ? HubTheme.accent-outline : #F3F4F622;
+
+                                                server-touch := TouchArea {
+                                                    enabled: !root.quick-connect-active;
+                                                    clicked => {
+                                                        root.server-url-input = server.url;
+                                                        root.select-discovered-server(server.url);
+                                                    }
+                                                }
+
+                                                HorizontalLayout {
+                                                    padding-left: 12px;
+                                                    padding-right: 12px;
+                                                    spacing: 8px;
+                                                    alignment: center;
+
+                                                    Rectangle {
+                                                        width: 8px;
+                                                        height: 8px;
+                                                        border-radius: 4px;
+                                                        background: HubTheme.success;
+                                                    }
+
+                                                    Text {
+                                                        text: server.name;
+                                                        color: HubTheme.text-primary;
+                                                        font-size: 12px;
+                                                        font-weight: 600;
+                                                        vertical-alignment: center;
+                                                    }
+
+                                                    Text {
+                                                        text: "(" + server.url + ")";
+                                                        color: HubTheme.text-muted;
+                                                        font-size: 11px;
+                                                        vertical-alignment: center;
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        if root.discovered-servers.length == 0 : Text {
+                                            text: root.is-scanning-servers
+                                                ? "Scanning local network for Jellyfin servers..."
+                                                : "No local servers discovered. Enter address manually or click Scan LAN.";
+                                            color: HubTheme.text-muted;
+                                            font-size: HubTheme.metadata-size;
+                                        }
+                                    }
+
+                                    // Credentials input fields
+                                    HorizontalLayout {
+                                        spacing: 12px;
+
+                                        VerticalLayout {
+                                            horizontal-stretch: 1;
+                                            spacing: 6px;
+
+                                            Text {
+                                                text: "Username:";
+                                                color: HubTheme.text-secondary;
+                                                font-size: HubTheme.metadata-size;
+                                                font-weight: 600;
+                                            }
+
+                                            SettingsTextInput {
+                                                text <=> root.username-input;
+                                                placeholder: "Username";
+                                                accessible-name: "Username";
+                                            }
+                                        }
+
+                                        VerticalLayout {
+                                            horizontal-stretch: 1;
+                                            spacing: 6px;
+
+                                            Text {
+                                                text: "Password:";
+                                                color: HubTheme.text-secondary;
+                                                font-size: HubTheme.metadata-size;
+                                                font-weight: 600;
+                                            }
+
+                                            SettingsTextInput {
+                                                text <=> root.password-input;
+                                                placeholder: "Password";
+                                                password-field: true;
+                                                accessible-name: "Password";
+                                                accepted(text) => {
+                                                    root.password-input = text;
+                                                    root.perform-login(
+                                                        root.server-url-input,
+                                                        root.username-input,
+                                                        text
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Action buttons: Sign in / Quick connect
+                                    HorizontalLayout {
+                                        spacing: 12px;
+                                        padding-top: 4px;
+
+                                        SettingsButton {
+                                            text: "Sign In";
+                                            primary: true;
+                                            custom-height: 44px;
+                                            horizontal-stretch: 1;
+                                            clicked => {
+                                                root.perform-login(
+                                                    root.server-url-input,
+                                                    root.username-input,
+                                                    root.password-input
+                                                );
+                                            }
+                                        }
+
+                                        SettingsButton {
+                                            text: root.quick-connect-active
+                                                ? (root.quick-connect-authenticating ? "Signing in…" : (root.quick-connect-code == "" ? "Connecting…" : "Waiting…"))
+                                                : "Quick Connect";
+                                            disabled: root.quick-connect-active && !root.quick-connect-expired;
+                                            custom-height: 44px;
+                                            horizontal-stretch: 1;
+                                            clicked => { root.start-quick-connect(); }
+                                        }
+                                    }
+
+                                    // Quick Connect PIN banner
+                                    if root.quick-connect-active || root.quick-connect-expired : Rectangle {
+                                        border-radius: HubTheme.control-radius;
+                                        background: @linear-gradient(105deg, #21131f 0%, #17151c 100%);
+                                        border-width: 1px;
+                                        border-color: #BE185D77;
+
+                                        VerticalLayout {
+                                            padding: 16px;
+                                            spacing: 10px;
+
+                                            HorizontalLayout {
+                                                alignment: center;
+
+                                                Text {
+                                                    text: "QUICK CONNECT";
+                                                    color: HubTheme.focus-ring;
+                                                    font-size: 12px;
+                                                    font-weight: 800;
+                                                    letter-spacing: 1.5px;
+                                                    horizontal-stretch: 1;
+                                                }
+
+                                                Text {
+                                                    text: root.quick-connect-expired
+                                                        ? "CODE EXPIRED"
+                                                        : (root.quick-connect-authenticating
+                                                            ? "AUTHORIZED · SIGNING IN"
+                                                            : (root.quick-connect-code == "" ? "CONNECTING TO JELLYFIN" : "WAITING FOR AUTHORIZATION"));
+                                                    color: root.quick-connect-expired ? HubTheme.error : HubTheme.text-muted;
+                                                    font-size: 11px;
+                                                    font-weight: 700;
+                                                }
+                                            }
+
+                                            if root.quick-connect-code != "" : HorizontalLayout {
+                                                alignment: center;
+                                                spacing: 18px;
+
+                                                Text {
+                                                    text: root.quick-connect-code;
+                                                    color: HubTheme.text-primary;
+                                                    font-size: 32px;
+                                                    font-family: "Consolas";
+                                                    font-weight: 800;
+                                                    letter-spacing: 6px;
+                                                    vertical-alignment: center;
+                                                }
+
+                                                Text {
+                                                    text: root.quick-connect-authenticating
+                                                        ? "Authorization confirmed. Signing in to Jellyfin…"
+                                                        : "On another device, open Jellyfin → Settings → Quick Connect and enter this code.";
+                                                    color: HubTheme.text-secondary;
+                                                    font-size: 12px;
+                                                    wrap: word-wrap;
+                                                    vertical-alignment: center;
+                                                    horizontal-stretch: 1;
+                                                }
+
+                                                SettingsButton {
+                                                    text: "Cancel";
+                                                    custom-height: 40px;
+                                                    clicked => { root.cancel-quick-connect(); }
+                                                }
+                                            }
+
+                                            if root.quick-connect-code == "" : HorizontalLayout {
+                                                alignment: center;
+                                                spacing: 12px;
+
+                                                Text {
+                                                    text: root.quick-connect-expired
+                                                        ? "This code expired. Get a new code to continue."
+                                                        : "Requesting a secure authorization code…";
+                                                    color: HubTheme.text-secondary;
+                                                    font-size: 12px;
+                                                    horizontal-stretch: 1;
+                                                    vertical-alignment: center;
+                                                }
+
+                                                if root.quick-connect-active : SettingsButton {
+                                                    text: "Cancel";
+                                                    custom-height: 40px;
+                                                    clicked => { root.cancel-quick-connect(); }
+                                                }
+
+                                                if root.quick-connect-expired : SettingsButton {
+                                                    text: "Get New Code";
+                                                    primary: true;
+                                                    custom-height: 40px;
+                                                    clicked => { root.start-quick-connect(); }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if root.is-logged-in : VerticalLayout {
+                                    spacing: 16px;
+
+                                    HorizontalLayout {
+                                        alignment: center;
+                                        spacing: 16px;
+
+                                        Rectangle {
+                                            width: 48px;
+                                            height: 48px;
+                                            border-radius: 24px;
+                                            background: #BE185D33;
+                                            border-width: 2px;
+                                            border-color: HubTheme.accent-outline;
+
+                                            PersonPlaceholder {
+                                                width: 100%;
+                                                height: 100%;
+                                            }
+                                        }
+
+                                        VerticalLayout {
+                                            horizontal-stretch: 1;
+                                            spacing: 2px;
+
+                                            Text {
+                                                text: root.logged-in-user;
+                                                color: HubTheme.text-primary;
+                                                font-size: HubTheme.card-title-size;
+                                                font-weight: 700;
+                                            }
+
+                                            Text {
+                                                text: "Connected to " + root.server-url-input;
+                                                color: HubTheme.text-secondary;
+                                                font-size: HubTheme.metadata-size;
+                                                overflow: elide;
+                                            }
+                                        }
+
+                                        SettingsButton {
+                                            text: "Log Out";
+                                            danger: true;
+                                            custom-height: 42px;
+                                            clicked => { root.perform-logout(); }
+                                        }
+                                    }
+
+                                    HorizontalLayout {
+                                        spacing: 12px;
+                                        alignment: center;
+
+                                        Text {
+                                            text: "Active Library: " + root.current-library;
+                                            color: HubTheme.text-primary;
+                                            font-size: 13px;
+                                            font-weight: 600;
+                                            vertical-alignment: center;
+                                            horizontal-stretch: 1;
+                                        }
+
+                                        SettingsButton {
+                                            text: "Refresh Libraries";
+                                            custom-height: 40px;
+                                            clicked => { root.refresh-library-list(); }
+                                        }
+                                    }
+
+                                    if root.library-options.length > 0 : VerticalLayout {
+                                        spacing: 6px;
+                                        for library in root.library-options : Rectangle {
+                                            height: 40px;
+                                            border-radius: HubTheme.control-radius;
+                                            background: library.selected ? #BE185D22 : (library-touch.has-hover ? HubTheme.surface-hover : HubTheme.navigation-background);
+                                            border-width: 1px;
+                                            border-color: library.selected ? HubTheme.accent-outline : #F3F4F614;
+
+                                            library-touch := TouchArea {
+                                                clicked => { root.select-library(library.id); }
+                                            }
+
+                                            HorizontalLayout {
+                                                padding-left: 14px;
+                                                padding-right: 14px;
+                                                alignment: center;
+
+                                                Text {
+                                                    text: library.selected ? "✓  " + library.name : library.name;
+                                                    color: library.selected ? HubTheme.text-primary : HubTheme.text-secondary;
+                                                    font-size: 13px;
+                                                    font-weight: library.selected ? 700 : 500;
+                                                    vertical-alignment: center;
+                                                    horizontal-stretch: 1;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Trusted LAN HTTP Origins
+                        if root.active-category == "connection" : Rectangle {
+                            border-radius: HubTheme.card-radius;
+                            background: HubTheme.surface;
+                            border-width: 1px;
+                            border-color: #F3F4F614;
+
+                            VerticalLayout {
+                                padding: HubTheme.form-card-padding;
+                                spacing: 12px;
+
+                                Text {
+                                    text: "Trusted LAN HTTP Origins";
+                                    color: HubTheme.accent-text;
+                                    font-size: HubTheme.card-title-size;
+                                    font-weight: 700;
+                                }
+
+                                Text {
+                                    text: "HTTP traffic is unencrypted. Trust only local servers you control; you can revoke saved access grants here.";
+                                    color: HubTheme.text-secondary;
+                                    font-size: HubTheme.metadata-size;
+                                    wrap: word-wrap;
+                                }
+
+                                if root.approved-http-origins.length == 0 : Text {
+                                    text: "No HTTP hosts approved.";
+                                    color: HubTheme.text-muted;
+                                    font-size: HubTheme.metadata-size;
+                                }
+
+                                if root.approved-http-origins.length > 0 : VerticalLayout {
+                                    spacing: 8px;
+                                    for origin in root.approved-http-origins : Rectangle {
+                                        height: 42px;
+                                        border-radius: HubTheme.control-radius;
+                                        background: HubTheme.navigation-background;
+                                        border-width: 1px;
+                                        border-color: #F3F4F614;
+
+                                        HorizontalLayout {
+                                            padding-left: 14px;
+                                            padding-right: 8px;
+                                            spacing: 12px;
+                                            alignment: center;
+
+                                            Text {
+                                                text: origin;
+                                                color: HubTheme.text-primary;
+                                                font-size: 13px;
+                                                vertical-alignment: center;
+                                                horizontal-stretch: 1;
+                                                overflow: elide;
+                                            }
+
+                                            SettingsButton {
+                                                text: "Revoke";
+                                                danger: true;
+                                                custom-height: 38px;
+                                                clicked => { root.revoke-cleartext-http-origin(origin); }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // =====================================================
+                        // SECTION: PLAYBACK & ENGINE
+                        // =====================================================
+                        if root.active-category == "playback" : Rectangle {
+                            border-radius: HubTheme.card-radius;
+                            background: HubTheme.surface;
+                            border-width: 1px;
+                            border-color: #F3F4F614;
+
+                            VerticalLayout {
+                                padding: HubTheme.form-card-padding;
+                                spacing: 16px;
+
+                                Text {
+                                    text: "Playback & Video Engine Preferences";
+                                    color: HubTheme.accent-text;
+                                    font-size: HubTheme.card-title-size;
+                                    font-weight: 700;
+                                }
+
+                                Text {
+                                    text: "Configure stream buffering, seeking increments, hardware acceleration, and memory profile.";
+                                    color: HubTheme.text-secondary;
+                                    font-size: HubTheme.metadata-size;
+                                    wrap: word-wrap;
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 12px;
+
+                                    SettingsButton {
+                                        text: root.buffer-profile-label;
+                                        custom-height: 42px;
+                                        horizontal-stretch: 1;
+                                        clicked => { root.cycle-buffer-profile(); }
+                                    }
+
+                                    SettingsButton {
+                                        text: root.seek-step-label;
+                                        custom-height: 42px;
+                                        horizontal-stretch: 1;
+                                        clicked => { root.cycle-seek-step(); }
+                                    }
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 12px;
+
+                                    SettingsButton {
+                                        text: root.hwdec-active ? "Hardware Decode: ON" : "Hardware Decode: OFF";
+                                        active: root.hwdec-active;
+                                        custom-height: 42px;
+                                        horizontal-stretch: 1;
+                                        clicked => { root.toggle-hwdec(); }
+                                    }
+
+                                    SettingsButton {
+                                        text: root.autoplay-active ? "Autoplay Next: ON" : "Autoplay Next: OFF";
+                                        active: root.autoplay-active;
+                                        custom-height: 42px;
+                                        horizontal-stretch: 1;
+                                        clicked => { root.toggle-autoplay(); }
+                                    }
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 12px;
+
+                                    SettingsButton {
+                                        text: root.low-ram-active ? "Low-RAM Mode: ON" : "Low-RAM Mode: OFF";
+                                        active: root.low-ram-active;
+                                        custom-height: 42px;
+                                        horizontal-stretch: 1;
+                                        clicked => { root.toggle-low-ram(); }
+                                    }
+                                }
+                            }
+                        }
+
+                        // =====================================================
+                        // SECTION: INTEGRATIONS & RESOLVER
+                        // =====================================================
+                        if root.active-category == "integrations" : Rectangle {
+                            border-radius: HubTheme.card-radius;
+                            background: HubTheme.surface;
+                            border-width: 1px;
+                            border-color: #F3F4F614;
+
+                            VerticalLayout {
+                                padding: HubTheme.form-card-padding;
+                                spacing: 16px;
+
+                                Text {
+                                    text: "Resolver API & Video Matching";
+                                    color: HubTheme.accent-text;
+                                    font-size: HubTheme.card-title-size;
+                                    font-weight: 700;
+                                }
+
+                                Text {
+                                    text: "Configure the Telegram Resolver API endpoint for channel videos and perceptual video fingerprint matching (pHash).";
+                                    color: HubTheme.text-secondary;
+                                    font-size: HubTheme.metadata-size;
+                                    wrap: word-wrap;
+                                }
+
+                                // Connection Status Badges & Probe trigger
+                                HorizontalLayout {
+                                    spacing: 14px;
+                                    alignment: center;
+
+                                    Text {
+                                        text: "Jellyfin: " + root.jellyfin-connection-status;
+                                        color: HubTheme.text-secondary;
+                                        font-size: HubTheme.metadata-size;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                        overflow: elide;
+                                    }
+
+                                    Text {
+                                        text: "Resolver: " + root.resolver-connection-status;
+                                        color: HubTheme.text-secondary;
+                                        font-size: HubTheme.metadata-size;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                        overflow: elide;
+                                    }
+
+                                    SettingsButton {
+                                        text: root.checking-connections ? "Checking…" : "Check Connections";
+                                        disabled: root.checking-connections;
+                                        custom-height: 40px;
+                                        clicked => { root.check-connections(); }
+                                    }
+                                }
+
+                                // Artwork sample diagnostic probe status placeholder
+                                Rectangle {
+                                    height: 38px;
+                                    border-radius: HubTheme.control-radius;
+                                    background: HubTheme.navigation-background;
+                                    border-width: 1px;
+                                    border-color: root.checking-connections ? HubTheme.separator : (root.thumbnail-check-failed ? #FBBF2488 : #4ADE8066);
+
+                                    HorizontalLayout {
+                                        padding-left: 14px;
+                                        padding-right: 14px;
+                                        spacing: 8px;
+                                        alignment: center;
+
+                                        Text {
+                                            text: root.thumbnail-check-status;
+                                            color: root.checking-connections ? HubTheme.text-muted : (root.thumbnail-check-failed ? HubTheme.warning : HubTheme.success);
+                                            font-size: HubTheme.metadata-size;
+                                            vertical-alignment: center;
+                                            horizontal-stretch: 1;
+                                            overflow: elide;
+                                        }
+                                    }
+                                }
+
+                                // Resolver Base URL field & action buttons
+                                VerticalLayout {
+                                    spacing: 6px;
+
+                                    Text {
+                                        text: "Resolver Base URL:";
+                                        color: HubTheme.text-secondary;
+                                        font-size: HubTheme.metadata-size;
+                                        font-weight: 600;
+                                    }
+
+                                    SettingsTextInput {
+                                        text <=> root.resolver-url-input;
+                                        placeholder: "https://resolver.example.com";
+                                        accessible-name: "Resolver Base URL";
+                                    }
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 12px;
+
+                                    SettingsButton {
+                                        text: "Save Resolver URL";
+                                        primary: true;
+                                        custom-height: 42px;
+                                        horizontal-stretch: 1;
+                                        clicked => {
+                                            root.save-resolver-url(root.resolver-url-input);
+                                        }
+                                    }
+
+                                    SettingsButton {
+                                        text: "Test Connection";
+                                        custom-height: 42px;
+                                        horizontal-stretch: 1;
+                                        clicked => {
+                                            root.test-resolver-connection();
+                                        }
+                                    }
+                                }
+
+                                // Perceptual Video Matching (pHash) Toggle
+                                VerticalLayout {
+                                    spacing: 8px;
+                                    padding-top: 4px;
+
+                                    SettingsButton {
+                                        text: root.phash-active ? "Video Matching (pHash on playback): ON" : "Video Matching (pHash on playback): OFF";
+                                        active: root.phash-active;
+                                        custom-height: 42px;
+                                        clicked => { root.toggle-phash(); }
+                                    }
+
+                                    Text {
+                                        text: "Calculates video perceptual hashes to cross-reference scenes against external catalogs.";
+                                        color: HubTheme.text-muted;
+                                        font-size: 11px;
+                                    }
+                                }
+                            }
+                        }
+
+                        // =====================================================
+                        // SECTION: CONTENT & FILTERS
+                        // =====================================================
+                        if root.active-category == "content" : Rectangle {
+                            border-radius: HubTheme.card-radius;
+                            background: HubTheme.surface;
+                            border-width: 1px;
+                            border-color: #F3F4F614;
+
+                            VerticalLayout {
+                                padding: HubTheme.form-card-padding;
+                                spacing: 16px;
+
+                                Text {
+                                    text: "Home Screen Categories & Shelves";
+                                    color: HubTheme.accent-text;
+                                    font-size: HubTheme.card-title-size;
+                                    font-weight: 700;
+                                }
+
+                                Text {
+                                    text: "Choose genres to display as separate featured shelves on the home screen.";
+                                    color: HubTheme.text-secondary;
+                                    font-size: HubTheme.metadata-size;
+                                    wrap: word-wrap;
+                                }
+
+                                if root.home-category-options.length == 0 : Text {
+                                    text: root.is-logged-in ? "No genres found in this library." : "Connect to Jellyfin to load genres.";
+                                    color: HubTheme.text-muted;
+                                    font-size: HubTheme.metadata-size;
+                                }
+
+                                if root.home-category-options.length > 0 : VerticalLayout {
+                                    spacing: 8px;
+                                    for category in root.home-category-options : HorizontalLayout {
+                                        height: 38px;
+                                        SettingsButton {
+                                            text: category.name;
+                                            active: category.selected;
+                                            custom-height: 38px;
+                                            clicked => { root.toggle-home-category(category.id); }
+                                        }
+                                    }
+                                }
+
+                                SettingsButton {
+                                    text: "Reload Categories";
+                                    custom-height: 40px;
+                                    clicked => { root.refresh-home-categories(); }
+                                }
+                            }
+                        }
+
+                        // Excluded tags & hidden channels
+                        if root.active-category == "content" : Rectangle {
+                            border-radius: HubTheme.card-radius;
+                            background: HubTheme.surface;
+                            border-width: 1px;
+                            border-color: #F3F4F614;
+
+                            VerticalLayout {
+                                padding: HubTheme.form-card-padding;
+                                spacing: 14px;
+
+                                Text {
+                                    text: "Content Exclusions & Hidden Channels";
+                                    color: HubTheme.accent-text;
+                                    font-size: HubTheme.card-title-size;
+                                    font-weight: 700;
+                                }
+
+                                Text {
+                                    text: "Excluded Tags (hidden from catalog views and search results):";
+                                    color: HubTheme.text-secondary;
+                                    font-size: HubTheme.metadata-size;
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 10px;
+
+                                    SettingsTextInput {
+                                        horizontal-stretch: 1;
+                                        text <=> root.new-tag-input;
+                                        placeholder: "Enter tag to exclude...";
+                                        accessible-name: "New tag to exclude";
+                                    }
+
+                                    SettingsButton {
+                                        text: "Exclude Tag";
+                                        custom-height: 42px;
+                                        clicked => {
+                                            if (root.new-tag-input != "") {
+                                                root.add-excluded-tag(root.new-tag-input);
+                                                root.new-tag-input = "";
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if root.excluded-tags-list.length > 0 : HorizontalLayout {
+                                    spacing: 8px;
+                                    for tag in root.excluded-tags-list : Rectangle {
+                                        height: 32px;
+                                        border-radius: 16px;
+                                        background: HubTheme.surface-hover;
+                                        border-width: 1px;
+                                        border-color: #BE185D88;
+
+                                        HorizontalLayout {
+                                            padding-left: 12px;
+                                            padding-right: 10px;
+                                            spacing: 8px;
+                                            alignment: center;
+
+                                            Text {
+                                                text: tag;
+                                                color: HubTheme.text-primary;
+                                                font-size: 12px;
+                                                vertical-alignment: center;
+                                            }
+
+                                            tag-touch := TouchArea {
+                                                width: 18px;
+                                                height: 18px;
+                                                clicked => { root.remove-excluded-tag(tag); }
+                                                Text {
+                                                    text: "✕";
+                                                    color: tag-touch.has-hover ? HubTheme.accent-text : HubTheme.text-muted;
+                                                    font-size: 11px;
+                                                    font-weight: 700;
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Text {
+                                    text: "Hidden Channels: " + root.hidden-channels-list.length + " channel(s) hidden. Select one to restore it.";
+                                    color: HubTheme.text-secondary;
+                                    font-size: HubTheme.metadata-size;
+                                }
+
+                                if root.hidden-channels-list.length > 0 : VerticalLayout {
+                                    spacing: 8px;
+                                    for hidden_channel in root.hidden-channels-list : SettingsButton {
+                                        text: "Unhide " + hidden_channel;
+                                        custom-height: 40px;
+                                        clicked => { root.unhide-channel(hidden_channel); }
+                                    }
+
+                                    SettingsButton {
+                                        text: "Unhide All Channels";
+                                        custom-height: 40px;
+                                        clicked => { root.unhide-all-channels(); }
+                                    }
+                                }
+                            }
+                        }
+
+                        // =====================================================
+                        // SECTION: STORAGE & CACHE
+                        // =====================================================
+                        if root.active-category == "storage" : Rectangle {
+                            border-radius: HubTheme.card-radius;
+                            background: HubTheme.surface;
+                            border-width: 1px;
+                            border-color: #F3F4F614;
+
+                            VerticalLayout {
+                                padding: HubTheme.form-card-padding;
+                                spacing: 16px;
+
+                                Text {
+                                    text: "Thumbnail Cache & Local Storage";
+                                    color: HubTheme.accent-text;
+                                    font-size: HubTheme.card-title-size;
+                                    font-weight: 700;
+                                }
+
+                                Text {
+                                    text: "Manage local disk caching for catalog posters and backdrop artwork.";
+                                    color: HubTheme.text-secondary;
+                                    font-size: HubTheme.metadata-size;
+                                    wrap: word-wrap;
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 12px;
+
+                                    SettingsButton {
+                                        text: root.cache-limit-label;
+                                        custom-height: 42px;
+                                        horizontal-stretch: 1;
+                                        clicked => { root.cycle-cache-limit(); }
+                                    }
+
+                                    SettingsButton {
+                                        text: "Clear Image Cache";
+                                        danger: true;
+                                        custom-height: 42px;
+                                        horizontal-stretch: 1;
+                                        clicked => {
+                                            root.confirm-dialog-action = "cache";
+                                            root.confirm-dialog-title = "Clear Image Cache";
+                                            root.confirm-dialog-message = "Delete cached image files from this computer? Images will be downloaded again as needed.";
+                                            root.confirm-dialog-visible = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // =====================================================
+                        // SECTION: DATA & PRIVACY
+                        // =====================================================
+                        if root.active-category == "privacy" : Rectangle {
+                            border-radius: HubTheme.card-radius;
+                            background: HubTheme.surface;
+                            border-width: 1px;
+                            border-color: #F3F4F614;
+
+                            VerticalLayout {
+                                padding: HubTheme.form-card-padding;
+                                spacing: 16px;
+
+                                Text {
+                                    text: "Data & Privacy Controls";
+                                    color: HubTheme.accent-text;
+                                    font-size: HubTheme.card-title-size;
+                                    font-weight: 700;
+                                }
+
+                                Text {
+                                    text: "Clear local search queries, watch records, and playback checkpoints.";
+                                    color: HubTheme.text-secondary;
+                                    font-size: HubTheme.metadata-size;
+                                    wrap: word-wrap;
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 12px;
+
+                                    SettingsButton {
+                                        text: "Clear Search History";
+                                        custom-height: 42px;
+                                        horizontal-stretch: 1;
+                                        clicked => {
+                                            root.confirm-dialog-action = "search";
+                                            root.confirm-dialog-title = "Clear Search History";
+                                            root.confirm-dialog-message = "Clear all saved search queries from this device?";
+                                            root.confirm-dialog-visible = true;
+                                        }
+                                    }
+
+                                    SettingsButton {
+                                        text: "Clear Watch History";
+                                        custom-height: 42px;
+                                        horizontal-stretch: 1;
+                                        clicked => {
+                                            root.confirm-dialog-action = "watch";
+                                            root.confirm-dialog-title = "Clear Watch History";
+                                            root.confirm-dialog-message = "Clear the local watch history records?";
+                                            root.confirm-dialog-visible = true;
+                                        }
+                                    }
+
+                                    SettingsButton {
+                                        text: "Clear Resume Progress";
+                                        custom-height: 42px;
+                                        horizontal-stretch: 1;
+                                        clicked => {
+                                            root.confirm-dialog-action = "progress";
+                                            root.confirm-dialog-title = "Clear Resume Progress";
+                                            root.confirm-dialog-message = "Clear all saved playback checkpoint positions?";
+                                            root.confirm-dialog-visible = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Emergency Panic Exit Card
+                        if root.active-category == "privacy" : Rectangle {
+                            border-radius: HubTheme.card-radius;
+                            background: HubTheme.surface;
+                            border-width: 1px;
+                            border-color: #F3F4F614;
+
+                            VerticalLayout {
+                                padding: HubTheme.form-card-padding;
+                                spacing: 12px;
+
+                                Text {
+                                    text: "Emergency Panic Exit";
+                                    color: HubTheme.error;
+                                    font-size: HubTheme.card-title-size;
+                                    font-weight: 700;
+                                }
+
+                                Text {
+                                    text: "Press Ctrl+Shift+Q anywhere in the application to immediately hide windows, silence audio, and terminate the process.";
+                                    color: HubTheme.text-secondary;
+                                    font-size: HubTheme.metadata-size;
+                                    wrap: word-wrap;
+                                }
+
+                                HorizontalLayout {
+                                    SettingsButton {
+                                        text: "Panic Exit Now (Ctrl+Shift+Q)";
+                                        danger: true;
+                                        custom-height: 44px;
+                                        clicked => { root.panic-exit(); }
+                                    }
+                                }
+                            }
+                        }
+
+                        // =====================================================
+                        // SECTION: SYSTEM & DIAGNOSTICS
+                        // =====================================================
+                        if root.active-category == "system" : Rectangle {
+                            border-radius: HubTheme.card-radius;
+                            background: HubTheme.surface;
+                            border-width: 1px;
+                            border-color: #F3F4F614;
+
+                            VerticalLayout {
+                                padding: HubTheme.form-card-padding;
+                                spacing: 14px;
+
+                                HorizontalLayout {
+                                    Text {
+                                        text: "Device & Hardware Diagnostics";
+                                        color: HubTheme.accent-text;
+                                        font-size: HubTheme.card-title-size;
+                                        font-weight: 700;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                    }
+
+                                    SettingsButton {
+                                        text: "Refresh";
+                                        custom-height: 40px;
+                                        clicked => { root.refresh-system-info(); }
+                                    }
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 24px;
+                                    Text {
+                                        text: "Operating system: " + root.system-os-name + " " + root.system-os-version;
+                                        color: HubTheme.text-primary;
+                                        font-size: 13px;
+                                        wrap: word-wrap;
+                                        horizontal-stretch: 1;
+                                    }
+                                    Text {
+                                        text: "Logical processors: " + root.system-logical-processors;
+                                        color: HubTheme.text-primary;
+                                        font-size: 13px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                Text {
+                                    text: "Processor: " + root.system-cpu-brand;
+                                    color: HubTheme.text-primary;
+                                    font-size: 13px;
+                                    overflow: elide;
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 24px;
+                                    Text {
+                                        text: "System RAM: " + root.system-total-memory + " MB total (" + root.system-available-memory + " MB available)";
+                                        color: HubTheme.text-primary;
+                                        font-size: 13px;
+                                        horizontal-stretch: 1;
+                                    }
+                                }
+
+                                Text {
+                                    text: "Vulkan loader: " + root.system-vulkan-loader + (root.system-vulkan-loader == "Missing" ? " — update graphics driver" : "");
+                                    color: root.system-vulkan-loader == "Available" ? HubTheme.success : HubTheme.warning;
+                                    font-size: 13px;
+                                }
+
+                                Text {
+                                    text: "Built-in libmpv video decoders:";
+                                    color: HubTheme.text-secondary;
+                                    font-size: HubTheme.metadata-size;
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    DiagnosticCodecBadge { codec-name: "H.264"; codec-status: root.system-codec-h264; }
+                                    DiagnosticCodecBadge { codec-name: "HEVC"; codec-status: root.system-codec-hevc; }
+                                    DiagnosticCodecBadge { codec-name: "VP9"; codec-status: root.system-codec-vp9; }
+                                    DiagnosticCodecBadge { codec-name: "AV1"; codec-status: root.system-codec-av1; }
+                                }
+                            }
+                        }
+
+                        // Configuration Export & Import
+                        if root.active-category == "system" : Rectangle {
+                            border-radius: HubTheme.card-radius;
+                            background: HubTheme.surface;
+                            border-width: 1px;
+                            border-color: #F3F4F614;
+
+                            VerticalLayout {
+                                padding: HubTheme.form-card-padding;
+                                spacing: 14px;
+
+                                Text {
+                                    text: "Configuration & Diagnostics Export";
+                                    color: HubTheme.accent-text;
+                                    font-size: HubTheme.card-title-size;
+                                    font-weight: 700;
+                                }
+
+                                Text {
+                                    text: "Export non-secret configuration (v1 JSON) or import Android TV settings. Export redacted local diagnostics for troubleshooting.";
+                                    color: HubTheme.text-secondary;
+                                    font-size: HubTheme.metadata-size;
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 12px;
+
+                                    SettingsButton {
+                                        text: "Export Config (JSON)";
+                                        custom-height: 42px;
+                                        horizontal-stretch: 1;
+                                        clicked => { root.export-config(); }
+                                    }
+
+                                    SettingsButton {
+                                        text: "Import Config (JSON)";
+                                        custom-height: 42px;
+                                        horizontal-stretch: 1;
+                                        clicked => { root.import-config(); }
+                                    }
+
+                                    SettingsButton {
+                                        text: "Export Diagnostics";
+                                        custom-height: 42px;
+                                        horizontal-stretch: 1;
+                                        clicked => { root.export-diagnostics(); }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Application Updates & Releases
+                        if root.active-category == "system" : Rectangle {
+                            border-radius: HubTheme.card-radius;
+                            background: HubTheme.surface;
+                            border-width: 1px;
+                            border-color: #F3F4F614;
+
+                            VerticalLayout {
+                                padding: HubTheme.form-card-padding;
+                                spacing: 14px;
+
+                                Text {
+                                    text: "Application Updates & Release";
+                                    color: HubTheme.accent-text;
+                                    font-size: HubTheme.card-title-size;
+                                    font-weight: 700;
+                                }
+
+                                Text {
+                                    text: "Adult Hub Desktop " + root.app-version + " (Desktop Edition)";
+                                    color: HubTheme.text-primary;
+                                    font-size: 14px;
+                                    font-weight: 600;
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 12px;
+
+                                    SettingsButton {
+                                        text: root.auto-update-enabled ? "Auto Update: Enabled" : "Auto Update: Disabled";
+                                        active: root.auto-update-enabled;
+                                        custom-height: 42px;
+                                        horizontal-stretch: 1;
+                                        clicked => { root.toggle-auto-update(); }
+                                    }
+
+                                    SettingsButton {
+                                        text: root.update-checking ? "Checking..."
+                                            : (root.update-downloading ? "Downloading..."
+                                            : (root.update-ready ? "Install Update Now"
+                                            : (root.update-available ? "Download Update (" + root.update-version + ")" : "Check for Updates")));
+                                        primary: root.update-available || root.update-ready;
+                                        disabled: root.update-checking || root.update-downloading;
+                                        custom-height: 42px;
+                                        horizontal-stretch: 1;
+                                        clicked => {
+                                            if (root.update-ready) {
+                                                root.install-update();
+                                            } else if (root.update-available) {
+                                                root.start-update-download();
+                                            } else {
+                                                root.check-for-updates();
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if root.update-status != "" : Rectangle {
+                                    background: HubTheme.navigation-background;
+                                    border-radius: HubTheme.control-radius;
+                                    height: 38px;
+                                    HorizontalLayout {
+                                        padding-left: 14px;
+                                        padding-right: 14px;
+                                        Text {
+                                            text: root.update-status;
+                                            color: HubTheme.text-primary;
+                                            font-size: HubTheme.metadata-size;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+
+                                if root.update-release-notes != "" : Text {
+                                    text: "Release Notes: " + root.update-release-notes;
+                                    color: HubTheme.focus-ring;
+                                    font-size: HubTheme.metadata-size;
+                                }
+                            }
+                        }
+
+                        // Open Source Licenses & About
+                        if root.active-category == "system" : Rectangle {
+                            border-radius: HubTheme.card-radius;
+                            background: HubTheme.surface;
+                            border-width: 1px;
+                            border-color: #F3F4F614;
+
+                            VerticalLayout {
+                                padding: HubTheme.form-card-padding;
+                                spacing: 12px;
+
+                                Text {
+                                    text: "About & Open Source Licenses";
+                                    color: HubTheme.accent-text;
+                                    font-size: HubTheme.card-title-size;
+                                    font-weight: 700;
+                                }
+
+                                Text {
+                                    text: "Adult Hub Desktop " + root.app-version + " · third-party software notices and licenses.";
+                                    color: HubTheme.text-secondary;
+                                    font-size: HubTheme.metadata-size;
+                                }
+
+                                SettingsButton {
+                                    text: "Third-party open-source licenses";
+                                    custom-height: 42px;
+                                    clicked => {
+                                        root.licenses-visible = true;
+                                        root.view-licenses();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // 5. Destructive Action Confirmation Dialog Modal
+    // -------------------------------------------------------------------------
+    if root.confirm-dialog-visible : Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #000000ba;
+        z: 950;
+
+        TouchArea {
+            // Absorb background clicks
+        }
+
+        Rectangle {
+            width: min(460px, root.width - 32px);
+            height: 220px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: HubTheme.dialog-radius;
+            background: HubTheme.surface;
+            border-width: 1px;
+            border-color: HubTheme.separator;
+
+            VerticalLayout {
+                padding: HubTheme.form-card-padding;
+                spacing: 14px;
+
+                Text {
+                    text: root.confirm-dialog-title != "" ? root.confirm-dialog-title : "Confirm Action";
+                    color: HubTheme.text-primary;
+                    font-size: 18px;
+                    font-weight: 700;
+                }
+
+                Text {
+                    text: root.confirm-dialog-message != "" ? root.confirm-dialog-message : "Are you sure you want to proceed with this action?";
+                    color: HubTheme.text-secondary;
+                    font-size: HubTheme.body-size;
+                    wrap: word-wrap;
+                    vertical-stretch: 1;
+                }
+
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: end;
+
+                    SettingsButton {
+                        text: "Cancel";
+                        custom-height: 40px;
+                        clicked => {
+                            root.confirm-dialog-visible = false;
+                        }
+                    }
+
+                    SettingsButton {
+                        text: "Confirm";
+                        primary: true;
+                        danger: true;
+                        custom-height: 40px;
+                        clicked => {
+                            root.confirm-dialog-visible = false;
+                            root.confirm-action(root.confirm-dialog-action);
+                            if (root.confirm-dialog-action == "search") {
+                                root.clear-search-history();
+                            }
+                            if (root.confirm-dialog-action == "watch") {
+                                root.clear-watch-history();
+                            }
+                            if (root.confirm-dialog-action == "progress") {
+                                root.clear-progress-history();
+                            }
+                            if (root.confirm-dialog-action == "cache") {
+                                root.clear-image-cache();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // 6. Third-party Licenses Modal Overlay
+    // -------------------------------------------------------------------------
+    if root.licenses-visible : Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #000000d9;
+        z: 960;
+
+        TouchArea {
+            clicked => { root.licenses-visible = false; }
+        }
+
+        Rectangle {
+            width: min(840px, root.width - 48px);
+            height: min(560px, root.height - 48px);
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: HubTheme.dialog-radius;
+            background: HubTheme.surface;
+            border-width: 1px;
+            border-color: #BE185D88;
+            clip: true;
+
+            TouchArea {
+                // Prevent dismiss when clicking inside the dialog card
+            }
+
+            VerticalLayout {
+                padding: HubTheme.form-card-padding;
+                spacing: 14px;
+
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 12px;
+
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 4px;
+
+                        Text {
+                            text: "Third-party Licenses";
+                            color: HubTheme.focus-ring;
+                            font-size: 20px;
+                            font-weight: 700;
+                        }
+
+                        Text {
+                            text: "Open-source software and redistribution notices";
+                            color: HubTheme.text-muted;
+                            font-size: HubTheme.metadata-size;
+                        }
+                    }
+
+                    SettingsButton {
+                        text: "Close";
+                        custom-height: 40px;
+                        clicked => { root.licenses-visible = false; }
+                    }
+                }
+
+                ScrollView {
+                    vertical-stretch: 1;
+
+                    Text {
+                        width: parent.width;
+                        text: root.licenses-text;
+                        color: HubTheme.text-primary;
+                        font-size: 12px;
+                        font-family: "Consolas";
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+    }
+}

@@ -57,14 +57,27 @@ impl Options {
     }
 }
 
-pub fn initial_media(options: &Options) -> Option<String> {
-    if let Some(url) = &options.url {
-        return Some(url.clone());
+pub const PUBLIC_SAMPLE_MP4_URL: &str =
+    "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
+
+pub fn resolve_sample_media() -> String {
+    // 1. Executable directory
+    if let Some(path) = media_beside_executable("sample.mp4") {
+        return path;
     }
-    media_beside_executable("sample.mp4").or_else(|| {
-        let local = PathBuf::from("sample.mp4");
-        local.exists().then(|| local.to_string_lossy().into_owned())
-    })
+    // 2. Current working directory
+    let local = PathBuf::from("sample.mp4");
+    if local.is_file() {
+        return local.to_string_lossy().into_owned();
+    }
+    // 3. Fallback to hardcoded remote public MP4 stream URL
+    PUBLIC_SAMPLE_MP4_URL.to_string()
+}
+
+pub fn initial_media(options: &Options) -> Option<String> {
+    // A bundled sample is an explicit demo action in the UI, not a startup
+    // default. Opening the installed app without arguments should land on Home.
+    options.url.clone()
 }
 
 pub fn media_beside_executable(name: &str) -> Option<String> {

@@ -1,6 +1,6 @@
 use crate::models::{
-    AuthResult, PlaybackProgressInfo, PlaybackStartInfo, PlaybackStopInfo, QuickConnectInit,
-    QuickConnectStatus, ServerInfo, TvItem, TvItemsPage, TvLibrary, TvPersonRole,
+    AuthResult, PlaybackProgressInfo, PlaybackResolution, PlaybackStartInfo, PlaybackStopInfo,
+    QuickConnectInit, QuickConnectStatus, ServerInfo, TvItem, TvItemsPage, TvLibrary, TvPersonRole,
 };
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderValue};
@@ -10,12 +10,26 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum JellyfinError {
+    #[error("unauthorized (HTTP {0})")]
+    Unauthorized(u16),
     #[error("http error: {0}")]
     Http(#[from] reqwest::Error),
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
     #[error("api error: {0}")]
     Api(String),
+}
+
+impl JellyfinError {
+    pub fn is_unauthorized(&self) -> bool {
+        match self {
+            JellyfinError::Unauthorized(_) => true,
+            JellyfinError::Http(e) => e
+                .status()
+                .is_some_and(|s| s.as_u16() == 401 || s.as_u16() == 403),
+            _ => false,
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, JellyfinError>;
@@ -37,10 +51,15 @@ pub struct GetItemsQuery<'a> {
     pub sort_by: &'a str,
     pub sort_descending: bool,
     pub search_term: Option<&'a str>,
+    pub name_starts_with: Option<&'a str>,
     pub person: Option<&'a str>,
     pub studio: Option<&'a str>,
     pub genre: Option<&'a str>,
     pub is_favorite: Option<bool>,
+    pub is_hd: Option<bool>,
+    pub is_unplayed: bool,
+    pub include_item_types: Option<&'a str>,
+    pub person_types: Option<&'a str>,
 }
 
 impl JellyfinClient {
@@ -89,6 +108,14 @@ impl JellyfinClient {
             }
         }
         map
+    }
+
+    fn check_res(res: reqwest::blocking::Response) -> Result<reqwest::blocking::Response> {
+        let code = res.status().as_u16();
+        if code == 401 || code == 403 {
+            return Err(JellyfinError::Unauthorized(code));
+        }
+        res.error_for_status().map_err(JellyfinError::from)
     }
 
     pub fn get_public_system_info(&self, base_url: &str) -> Result<ServerInfo> {
@@ -245,13 +272,13 @@ impl JellyfinClient {
     ) -> Result<Vec<TvLibrary>> {
         let base = Self::clean_url(base_url);
         let url = format!("{base}/Users/{}/Views", crate::urlencoding(user_id));
-        let res: ItemsResponseDto = self
-            .client
-            .get(&url)
-            .headers(self.headers(Some(token)))
-            .send()?
-            .error_for_status()?
-            .json()?;
+        let res: ItemsResponseDto = Self::check_res(
+            self.client
+                .get(&url)
+                .headers(self.headers(Some(token)))
+                .send()?,
+        )?
+        .json()?;
 
         let libraries = res
             .items
@@ -272,24 +299,41 @@ impl JellyfinClient {
         token: &str,
         limit: usize,
     ) -> Result<Vec<TvItem>> {
+        Ok(self
+            .get_resume_items_page(base_url, user_id, token, 0, limit)?
+            .items)
+    }
+
+    pub fn get_resume_items_page(
+        &self,
+        base_url: &str,
+        user_id: &str,
+        token: &str,
+        start_index: usize,
+        limit: usize,
+    ) -> Result<TvItemsPage> {
         let base = Self::clean_url(base_url);
         let url = format!(
-            "{base}/Users/{}/Items/Resume?Limit={limit}&Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources",
+            "{base}/UserItems/Resume?userId={}&startIndex={start_index}&limit={limit}&enableTotalRecordCount=true&enableImages=true&enableImageTypes=Primary,Thumb,Backdrop&imageTypeLimit=1&fields=ProviderIds,Overview,Genres,Studios,People,MediaSources,ChildCount",
             crate::urlencoding(user_id)
         );
-        let res: ItemsResponseDto = self
-            .client
-            .get(&url)
-            .headers(self.headers(Some(token)))
-            .send()?
-            .error_for_status()?
-            .json()?;
+        let res: ItemsResponseDto = Self::check_res(
+            self.client
+                .get(&url)
+                .headers(self.headers(Some(token)))
+                .send()?,
+        )?
+        .json()?;
 
-        Ok(res
-            .items
-            .into_iter()
-            .map(map_base_item_to_tv_item)
-            .collect())
+        Ok(TvItemsPage {
+            total_record_count: res.total_record_count.unwrap_or(res.items.len()),
+            items: res
+                .items
+                .into_iter()
+                .map(map_base_item_to_tv_item)
+                .collect(),
+            start_index,
+        })
     }
 
     pub fn get_latest_items(
@@ -302,19 +346,19 @@ impl JellyfinClient {
     ) -> Result<Vec<TvItem>> {
         let base = Self::clean_url(base_url);
         let mut url = format!(
-            "{base}/Users/{}/Items/Latest?Limit={limit}&Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources",
+            "{base}/Users/{}/Items/Latest?Limit={limit}&EnableImages=true&EnableImageTypes=Primary,Thumb,Backdrop&ImageTypeLimit=1&Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources,ChildCount",
             crate::urlencoding(user_id)
         );
         if let Some(pid) = parent_id {
             url.push_str(&format!("&ParentId={}", crate::urlencoding(pid)));
         }
-        let res: Vec<BaseItemDto> = self
-            .client
-            .get(&url)
-            .headers(self.headers(Some(token)))
-            .send()?
-            .error_for_status()?
-            .json()?;
+        let res: Vec<BaseItemDto> = Self::check_res(
+            self.client
+                .get(&url)
+                .headers(self.headers(Some(token)))
+                .send()?,
+        )?
+        .json()?;
 
         Ok(res.into_iter().map(map_base_item_to_tv_item).collect())
     }
@@ -327,14 +371,22 @@ impl JellyfinClient {
         query: &GetItemsQuery<'_>,
     ) -> Result<TvItemsPage> {
         let base = Self::clean_url(base_url);
+        let include_item_types = query.include_item_types.unwrap_or("Movie");
         let mut url = format!(
-            "{base}/Users/{}/Items?StartIndex={}&Limit={}&Recursive=true&IncludeItemTypes=Movie&Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources",
+            "{base}/Users/{}/Items?StartIndex={}&Limit={}&Recursive=true&IncludeItemTypes={}&EnableImages=true&EnableImageTypes=Primary,Thumb,Backdrop&ImageTypeLimit=1&Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources,ChildCount",
             crate::urlencoding(user_id),
             query.start_index,
-            query.limit
+            query.limit,
+            crate::urlencoding(include_item_types)
         );
         if let Some(pid) = query.parent_id {
             url.push_str(&format!("&ParentId={}", crate::urlencoding(pid)));
+        }
+        if let Some(person_types) = query.person_types {
+            url.push_str(&format!(
+                "&PersonTypes={}",
+                crate::urlencoding(person_types)
+            ));
         }
         if !query.sort_by.is_empty() {
             url.push_str(&format!("&SortBy={}", crate::urlencoding(query.sort_by)));
@@ -349,6 +401,14 @@ impl JellyfinClient {
         if let Some(term) = query.search_term {
             if !term.trim().is_empty() {
                 url.push_str(&format!("&SearchTerm={}", crate::urlencoding(term.trim())));
+            }
+        }
+        if let Some(prefix) = query.name_starts_with {
+            if !prefix.trim().is_empty() {
+                url.push_str(&format!(
+                    "&NameStartsWith={}",
+                    crate::urlencoding(prefix.trim())
+                ));
             }
         }
         if let Some(person) = query.person {
@@ -369,14 +429,20 @@ impl JellyfinClient {
         if let Some(fav) = query.is_favorite {
             url.push_str(&format!("&IsFavorite={fav}"));
         }
+        if let Some(is_hd) = query.is_hd {
+            url.push_str(&format!("&IsHd={is_hd}"));
+        }
+        if query.is_unplayed {
+            url.push_str("&Filters=IsUnplayed");
+        }
 
-        let res: ItemsResponseDto = self
-            .client
-            .get(&url)
-            .headers(self.headers(Some(token)))
-            .send()?
-            .error_for_status()?
-            .json()?;
+        let res: ItemsResponseDto = Self::check_res(
+            self.client
+                .get(&url)
+                .headers(self.headers(Some(token)))
+                .send()?,
+        )?
+        .json()?;
 
         let total = res.total_record_count.unwrap_or(res.items.len());
         let items = res
@@ -401,16 +467,16 @@ impl JellyfinClient {
     ) -> Result<Vec<TvItem>> {
         let base = Self::clean_url(base_url);
         let url = format!(
-            "{base}/Items/{}/Similar?Limit={limit}&Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources",
+            "{base}/Items/{}/Similar?Limit={limit}&Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources,ChildCount",
             crate::urlencoding(item_id)
         );
-        let res: ItemsResponseDto = self
-            .client
-            .get(&url)
-            .headers(self.headers(Some(token)))
-            .send()?
-            .error_for_status()?
-            .json()?;
+        let res: ItemsResponseDto = Self::check_res(
+            self.client
+                .get(&url)
+                .headers(self.headers(Some(token)))
+                .send()?,
+        )?
+        .json()?;
 
         Ok(res
             .items
@@ -428,15 +494,116 @@ impl JellyfinClient {
     ) -> String {
         let base = Self::clean_url(base_url);
         let tag_param = match tag {
-            Some(t) if !t.trim().is_empty() => format!("&tag={t}"),
+            Some(t) if !t.trim().is_empty() => format!("&tag={}", crate::urlencoding(t)),
             _ => String::new(),
         };
-        format!("{base}/Items/{item_id}/Images/{image_type}?maxWidth={max_width}{tag_param}")
+        // Keep the URL shape identical to the Android client. Jellyfin accepts
+        // Backdrop without an explicit index, including when served through a
+        // reverse proxy that does not route `/Backdrop/0` correctly.
+        // Keep this URL compatible with the Android client and Jellyfin
+        // proxies. Some servers reject or fail to transcode `format=jpg` for
+        // individual library items, while the default image representation is
+        // already supported by our decoder (including WebP).
+        format!(
+            "{base}/Items/{}/Images/{image_type}?maxWidth={max_width}{tag_param}",
+            crate::urlencoding(item_id)
+        )
     }
 
     pub fn stream_url(base_url: &str, item_id: &str) -> String {
         let base = Self::clean_url(base_url);
         format!("{base}/Videos/{item_id}/stream?static=true")
+    }
+
+    /// Ask Jellyfin to select a playable source before starting a library item.
+    /// This keeps the stream URL, headers, and session identifiers aligned with
+    /// the server's direct-play / direct-stream / transcode decision.
+    pub fn resolve_playback(
+        &self,
+        base_url: &str,
+        user_id: &str,
+        token: &str,
+        item_id: &str,
+    ) -> Result<PlaybackResolution> {
+        let base = Self::clean_url(base_url);
+        let url = format!("{base}/Items/{item_id}/PlaybackInfo");
+        let response: PlaybackInfoResponseDto = Self::check_res(
+            self.client
+                .post(&url)
+                .query(&[("userId", user_id)])
+                .headers(self.headers(Some(token)))
+                .json(&PlaybackInfoRequestDto {
+                    user_id: user_id.to_owned(),
+                    enable_direct_play: true,
+                    enable_direct_stream: true,
+                    enable_transcoding: true,
+                })
+                .send()?,
+        )?
+        .json()?;
+
+        let source = response
+            .media_sources
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|source| {
+                source.supports_direct_play.unwrap_or(false)
+                    || source.supports_direct_stream.unwrap_or(false)
+                    || source.supports_transcoding.unwrap_or(false)
+            })
+            .max_by_key(|source| {
+                (
+                    source.supports_direct_play.unwrap_or(false),
+                    source.supports_direct_stream.unwrap_or(false),
+                    source.bitrate.unwrap_or(0),
+                )
+            })
+            .ok_or_else(|| {
+                JellyfinError::Api("Jellyfin returned no playable media source".into())
+            })?;
+
+        let play_method = if source.supports_direct_play.unwrap_or(false) {
+            crate::models::PlayMethod::DirectPlay
+        } else if source.supports_direct_stream.unwrap_or(false) {
+            crate::models::PlayMethod::DirectStream
+        } else {
+            crate::models::PlayMethod::Transcode
+        };
+        let stream_url = source
+            .transcoding_url
+            .as_deref()
+            .filter(|url| !url.trim().is_empty())
+            .map(|path| {
+                if path.starts_with("http://") || path.starts_with("https://") {
+                    path.to_owned()
+                } else {
+                    format!("{base}/{}", path.trim_start_matches('/'))
+                }
+            })
+            .unwrap_or_else(|| {
+                let mut url = format!("{base}/Videos/{item_id}/stream?static=true");
+                if let Some(source_id) = source.id.as_deref() {
+                    url.push_str("&mediaSourceId=");
+                    url.push_str(&crate::urlencoding(source_id));
+                }
+                if let Some(play_session_id) = response.play_session_id.as_deref() {
+                    url.push_str("&PlaySessionId=");
+                    url.push_str(&crate::urlencoding(play_session_id));
+                }
+                url
+            });
+
+        Ok(PlaybackResolution {
+            stream_url,
+            media_source_id: source.id,
+            play_session_id: response.play_session_id,
+            required_headers: source
+                .required_http_headers
+                .into_iter()
+                .map(|(name, value)| format!("{name}: {value}"))
+                .collect(),
+            play_method,
+        })
     }
 
     pub fn stream_headers(&self, token: Option<&str>) -> Vec<String> {
@@ -463,12 +630,13 @@ impl JellyfinClient {
         }
         let base = Self::clean_url(base_url);
         let url = format!("{base}/Sessions/Playing");
-        self.client
-            .post(&url)
-            .headers(self.headers(Some(token)))
-            .json(info)
-            .send()?
-            .error_for_status()?;
+        Self::check_res(
+            self.client
+                .post(&url)
+                .headers(self.headers(Some(token)))
+                .json(info)
+                .send()?,
+        )?;
         Ok(())
     }
 
@@ -483,12 +651,13 @@ impl JellyfinClient {
         }
         let base = Self::clean_url(base_url);
         let url = format!("{base}/Sessions/Playing/Progress");
-        self.client
-            .post(&url)
-            .headers(self.headers(Some(token)))
-            .json(info)
-            .send()?
-            .error_for_status()?;
+        Self::check_res(
+            self.client
+                .post(&url)
+                .headers(self.headers(Some(token)))
+                .json(info)
+                .send()?,
+        )?;
         Ok(())
     }
 
@@ -503,12 +672,13 @@ impl JellyfinClient {
         }
         let base = Self::clean_url(base_url);
         let url = format!("{base}/Sessions/Playing/Stopped");
-        self.client
-            .post(&url)
-            .headers(self.headers(Some(token)))
-            .json(info)
-            .send()?
-            .error_for_status()?;
+        Self::check_res(
+            self.client
+                .post(&url)
+                .headers(self.headers(Some(token)))
+                .json(info)
+                .send()?,
+        )?;
         Ok(())
     }
 
@@ -521,17 +691,17 @@ impl JellyfinClient {
     ) -> Result<TvItem> {
         let base = Self::clean_url(base_url);
         let url = format!(
-            "{base}/Users/{}/Items/{}?Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources",
+            "{base}/Users/{}/Items/{}?EnableImages=true&EnableImageTypes=Primary,Thumb,Backdrop&ImageTypeLimit=1&Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources,ChildCount",
             crate::urlencoding(user_id),
             crate::urlencoding(item_id)
         );
-        let res: BaseItemDto = self
-            .client
-            .get(&url)
-            .headers(self.headers(Some(token)))
-            .send()?
-            .error_for_status()?
-            .json()?;
+        let res: BaseItemDto = Self::check_res(
+            self.client
+                .get(&url)
+                .headers(self.headers(Some(token)))
+                .send()?,
+        )?
+        .json()?;
         Ok(map_base_item_to_tv_item(res))
     }
 
@@ -557,9 +727,7 @@ impl JellyfinClient {
         } else {
             self.client.delete(&url)
         };
-        req.headers(self.headers(Some(token)))
-            .send()?
-            .error_for_status()?;
+        Self::check_res(req.headers(self.headers(Some(token))).send()?)?;
         Ok(())
     }
 
@@ -585,9 +753,7 @@ impl JellyfinClient {
         } else {
             self.client.delete(&url)
         };
-        req.headers(self.headers(Some(token)))
-            .send()?
-            .error_for_status()?;
+        Self::check_res(req.headers(self.headers(Some(token))).send()?)?;
         Ok(())
     }
 }
@@ -665,6 +831,8 @@ struct BaseItemDto {
     width: Option<u32>,
     #[serde(rename = "Height")]
     height: Option<u32>,
+    #[serde(rename = "ChildCount")]
+    child_count: Option<u32>,
     #[serde(rename = "CollectionType")]
     collection_type: Option<String>,
 }
@@ -707,6 +875,35 @@ struct MediaSourceDto {
     id: Option<String>,
     #[serde(rename = "Size")]
     size: Option<i64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct PlaybackInfoRequestDto {
+    user_id: String,
+    enable_direct_play: bool,
+    enable_direct_stream: bool,
+    enable_transcoding: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct PlaybackInfoResponseDto {
+    play_session_id: Option<String>,
+    media_sources: Option<Vec<PlaybackMediaSourceDto>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct PlaybackMediaSourceDto {
+    id: Option<String>,
+    bitrate: Option<i64>,
+    supports_direct_play: Option<bool>,
+    supports_direct_stream: Option<bool>,
+    supports_transcoding: Option<bool>,
+    transcoding_url: Option<String>,
+    #[serde(default)]
+    required_http_headers: std::collections::HashMap<String, String>,
 }
 
 fn map_base_item_to_tv_item(dto: BaseItemDto) -> TvItem {
@@ -771,6 +968,7 @@ fn map_base_item_to_tv_item(dto: BaseItemDto) -> TvItem {
     TvItem {
         id: dto.id,
         title: dto.name.unwrap_or_else(|| "Untitled".into()),
+        source_provider: None,
         overview: dto.overview,
         year: dto.production_year,
         runtime_ticks: dto.run_time_ticks,
@@ -781,6 +979,7 @@ fn map_base_item_to_tv_item(dto: BaseItemDto) -> TvItem {
         primary_image_tag,
         backdrop_image_tag,
         thumb_image_tag,
+        child_count: dto.child_count,
         is_favorite,
         playback_position_ticks,
         played_percentage,
@@ -857,6 +1056,18 @@ mod tests {
         assert_eq!(
             url,
             "http://192.168.1.50:8096/Items/item-456/Images/Primary?maxWidth=480&tag=tag123"
+        );
+
+        let backdrop = JellyfinClient::image_url(
+            "http://192.168.1.50:8096",
+            "item-456",
+            "Backdrop",
+            480,
+            Some("tag+with&symbols"),
+        );
+        assert_eq!(
+            backdrop,
+            "http://192.168.1.50:8096/Items/item-456/Images/Backdrop?maxWidth=480&tag=tag%2Bwith%26symbols"
         );
     }
 
@@ -947,5 +1158,15 @@ mod tests {
         let qc = client.quick_connect_initiate("adult.ferges.eu").unwrap();
         assert!(!qc.code.is_empty());
         assert!(!qc.secret.is_empty());
+    }
+
+    #[test]
+    fn test_unauthorized_error_detection() {
+        let err401 = JellyfinError::Unauthorized(401);
+        assert!(err401.is_unauthorized());
+        let err403 = JellyfinError::Unauthorized(403);
+        assert!(err403.is_unauthorized());
+        let err_api = JellyfinError::Api("general error".into());
+        assert!(!err_api.is_unauthorized());
     }
 }
