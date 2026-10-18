@@ -11,6 +11,7 @@ static CACHE_LIMIT_MB: AtomicUsize = AtomicUsize::new(DEFAULT_CACHE_LIMIT_MB);
 static LOW_RAM_MODE: AtomicBool = AtomicBool::new(false);
 static CACHE_WRITE_LOCK: Mutex<()> = Mutex::new(());
 static RESOLVER_BASE_URL: OnceLock<RwLock<String>> = OnceLock::new();
+static RESOLVER_AUTH_TOKEN: OnceLock<RwLock<Option<String>>> = OnceLock::new();
 static JELLYFIN_DEVICE_ID: OnceLock<RwLock<String>> = OnceLock::new();
 
 pub fn set_jellyfin_device_id(device_id: &str) {
@@ -45,6 +46,42 @@ pub fn clear_cache() {
     clear_cache_files();
 }
 
+/// Remove the exact image cache entries used for a card before an explicit
+/// retry. Jellyfin may serve a tagged image URL and an untagged fallback.
+pub fn invalidate_cached_image(url: &str) {
+    let Ok(_guard) = CACHE_WRITE_LOCK.lock() else {
+        return;
+    };
+    for variant in cache_url_variants(url) {
+        let path = url_to_cache_path_without_create(&variant);
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn cache_url_variants(url: &str) -> Vec<String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return Vec::new();
+    }
+    let mut variants = vec![url.to_owned()];
+    if let Ok(mut parsed) = url::Url::parse(url) {
+        let original_query_count = parsed.query_pairs().count();
+        let params = parsed
+            .query_pairs()
+            .filter(|(key, _)| key != "tag")
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect::<Vec<_>>();
+        if params.len() != original_query_count {
+            parsed.set_query(None);
+            if !params.is_empty() {
+                parsed.query_pairs_mut().extend_pairs(params);
+            }
+            variants.push(parsed.to_string());
+        }
+    }
+    variants
+}
+
 pub fn set_low_ram_mode(enabled: bool) {
     LOW_RAM_MODE.store(enabled, Ordering::Relaxed);
 }
@@ -73,6 +110,19 @@ pub fn set_resolver_base_url(base_url: &str) {
 
 fn resolver_base_url() -> &'static RwLock<String> {
     RESOLVER_BASE_URL.get_or_init(|| RwLock::new(String::new()))
+}
+
+/// Keep the active Jellyfin token available for Resolver image endpoints that
+/// use the same authentication contract as Resolver pHash operations. The
+/// request layer only sends this token to the configured Resolver origin.
+pub fn set_resolver_auth_token(token: Option<&str>) {
+    if let Ok(mut current) = resolver_auth_token().write() {
+        *current = token.filter(|value| !value.is_empty()).map(str::to_owned);
+    }
+}
+
+fn resolver_auth_token() -> &'static RwLock<Option<String>> {
+    RESOLVER_AUTH_TOKEN.get_or_init(|| RwLock::new(None))
 }
 
 pub fn phash_thumbnail_url(video_id: &str) -> Option<String> {
@@ -106,6 +156,9 @@ fn resolve_resolver_thumbnail_url_at(url_or_path: &str, base: &str) -> Option<St
         return None;
     }
     if let Ok(image_url) = url::Url::parse(value) {
+        if !image_url.username().is_empty() || image_url.password().is_some() {
+            return None;
+        }
         if image_url.path().starts_with("/admin/") && !base.is_empty() {
             let mut configured_origin = url::Url::parse(base).ok()?;
             if !matches!(configured_origin.scheme(), "http" | "https") {
@@ -219,8 +272,20 @@ fn prune_cache(limit_bytes: usize, keep: Option<&std::path::PathBuf>) {
     }
 }
 
+fn decode_dynamic_image(bytes: &[u8]) -> Option<image::DynamicImage> {
+    let mut reader = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(8192);
+    limits.max_image_height = Some(8192);
+    limits.max_alloc = Some(96 * 1024 * 1024);
+    reader.limits(limits);
+    reader.decode().ok()
+}
+
 fn decode_image(bytes: &[u8]) -> Option<(slint::Image, Vec<u8>)> {
-    let decoded = image::load_from_memory(bytes).ok()?.into_rgba8();
+    let decoded = decode_dynamic_image(bytes)?.into_rgba8();
     let pixels = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
         decoded.as_raw(),
         decoded.width(),
@@ -242,12 +307,22 @@ pub fn url_to_cache_path(url: &str) -> PathBuf {
     cache_dir().join(format!("{hex}.png"))
 }
 
+fn url_to_cache_path_without_create(url: &str) -> PathBuf {
+    let hash = ring::digest::digest(&ring::digest::SHA256, url.as_bytes());
+    let hex: String = hash
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    cache_dir_path().join(format!("{hex}.png"))
+}
+
 fn http_client() -> Option<&'static reqwest::blocking::Client> {
     static CLIENT: OnceLock<Option<reqwest::blocking::Client>> = OnceLock::new();
     CLIENT
         .get_or_init(|| {
             reqwest::blocking::Client::builder()
-                .timeout(Duration::from_secs(8))
+                .timeout(Duration::from_secs(5))
                 // Handle redirects explicitly: reqwest cannot know that the
                 // custom X-Emby-Token header is a credential.
                 .redirect(reqwest::redirect::Policy::none())
@@ -255,6 +330,33 @@ fn http_client() -> Option<&'static reqwest::blocking::Client> {
                 .ok()
         })
         .as_ref()
+}
+
+fn is_resolver_origin_request(original: &url::Url, current: &url::Url, base: &str) -> bool {
+    let Ok(configured) = url::Url::parse(base) else {
+        return false;
+    };
+    original.origin() == current.origin() && original.origin() == configured.origin()
+}
+
+fn is_non_image_content_type(value: &str) -> bool {
+    let content_type = value
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    content_type.starts_with("text/")
+        || content_type == "application/json"
+        || content_type.ends_with("+json")
+        || content_type == "application/xml"
+        || content_type.ends_with("+xml")
+}
+
+fn retryable_image_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::REQUEST_TIMEOUT
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
 }
 
 enum ImageRequestError {
@@ -268,13 +370,23 @@ fn send_image_request(
     token: Option<&str>,
 ) -> Result<reqwest::blocking::Response, ImageRequestError> {
     let original = url::Url::parse(url).map_err(|_| ImageRequestError::InvalidRedirect)?;
+    if !matches!(original.scheme(), "http" | "https")
+        || !original.username().is_empty()
+        || original.password().is_some()
+    {
+        return Err(ImageRequestError::InvalidRedirect);
+    }
+    let resolver_base = resolver_base_url()
+        .read()
+        .map(|base| base.clone())
+        .unwrap_or_default();
     let mut current = original.clone();
     for redirect_count in 0..=5 {
         let mut request = http_client()
             .ok_or(ImageRequestError::InvalidRedirect)?
             .get(current.clone());
-        // Keep credentials on the original Jellyfin origin only. A redirect to
-        // a CDN or any other host is fetched without Authorization headers.
+        // Keep credentials on the matching configured service origin only. A
+        // redirect to a CDN or other host is fetched without auth headers.
         if current.origin() == original.origin()
             && is_jellyfin_item_image_url(current.as_str())
             && let Some(token) = token.filter(|token| !token.is_empty())
@@ -294,6 +406,18 @@ fn send_image_request(
                 .header("X-Emby-Authorization", &authorization)
                 .header(reqwest::header::AUTHORIZATION, &authorization)
                 .header("X-Emby-Token", token);
+        }
+        if is_resolver_origin_request(&original, &current, &resolver_base)
+            && !is_jellyfin_item_image_url(current.as_str())
+        {
+            let resolver_token = resolver_auth_token()
+                .read()
+                .ok()
+                .and_then(|value| value.clone())
+                .or_else(|| token.map(str::to_owned));
+            if let Some(token) = resolver_token.filter(|value| !value.is_empty()) {
+                request = request.header("X-Emby-Token", token);
+            }
         }
         let response = request.send().map_err(ImageRequestError::Transport)?;
         if !response.status().is_redirection() {
@@ -324,7 +448,11 @@ fn send_image_request(
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_resolver_thumbnail_url_at;
+    use super::{
+        cache_url_variants, decode_dynamic_image, is_non_image_content_type,
+        is_resolver_origin_request, resolve_resolver_thumbnail_url_at, retryable_image_status,
+    };
+    use std::io::Cursor;
 
     #[test]
     fn resolves_absolute_resolver_admin_urls_to_configured_origin() {
@@ -367,6 +495,96 @@ mod tests {
             resolve_resolver_thumbnail_url_at("file:///tmp/poster.jpg", "https://resolver.example"),
             None
         );
+        assert_eq!(
+            resolve_resolver_thumbnail_url_at(
+                "https://user:secret@cdn.example/poster.jpg",
+                "https://resolver.example"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn resolver_token_is_scoped_to_its_origin_and_not_redirected_hosts() {
+        let original =
+            url::Url::parse("https://resolver.example/admin/api/v2/video-phash/thumbnail?id=anon")
+                .unwrap();
+        let same_origin = url::Url::parse("https://resolver.example/cdn/image.jpg").unwrap();
+        let redirected = url::Url::parse("https://cdn.example/image.jpg").unwrap();
+
+        assert!(is_resolver_origin_request(
+            &original,
+            &original,
+            "https://resolver.example/base"
+        ));
+        assert!(is_resolver_origin_request(
+            &original,
+            &same_origin,
+            "https://resolver.example/base"
+        ));
+        assert!(!is_resolver_origin_request(
+            &original,
+            &redirected,
+            "https://resolver.example/base"
+        ));
+        assert!(!is_resolver_origin_request(
+            &redirected,
+            &redirected,
+            "https://resolver.example/base"
+        ));
+    }
+
+    #[test]
+    fn rejects_html_and_json_success_responses_as_invalid_image_responses() {
+        assert!(is_non_image_content_type("text/html; charset=utf-8"));
+        assert!(is_non_image_content_type("application/json"));
+        assert!(is_non_image_content_type("application/problem+json"));
+        assert!(is_non_image_content_type("application/xml"));
+        assert!(!is_non_image_content_type("image/jpeg"));
+        assert!(!is_non_image_content_type("application/octet-stream"));
+        assert!(!is_non_image_content_type(""));
+    }
+
+    #[test]
+    fn retry_invalidates_tagged_and_untagged_cache_keys() {
+        let variants = cache_url_variants(
+            "https://jellyfin.example/Items/abc/Images/Primary?tag=opaque&quality=90",
+        );
+        assert_eq!(variants.len(), 2);
+        assert_eq!(
+            variants[1],
+            "https://jellyfin.example/Items/abc/Images/Primary?quality=90"
+        );
+        assert!(cache_url_variants("").is_empty());
+    }
+
+    #[test]
+    fn access_denied_and_missing_are_not_retried() {
+        assert!(!retryable_image_status(reqwest::StatusCode::FORBIDDEN));
+        assert!(!retryable_image_status(reqwest::StatusCode::NOT_FOUND));
+        assert!(!retryable_image_status(reqwest::StatusCode::UNAUTHORIZED));
+        assert!(retryable_image_status(
+            reqwest::StatusCode::TOO_MANY_REQUESTS
+        ));
+        assert!(retryable_image_status(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        ));
+    }
+
+    #[test]
+    fn image_decoder_accepts_supported_images_and_rejects_invalid_or_oversized_data() {
+        let mut valid = Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(2, 2)
+            .write_to(&mut valid, image::ImageFormat::Png)
+            .unwrap();
+        assert!(decode_dynamic_image(valid.get_ref()).is_some());
+        assert!(decode_dynamic_image(b"<html>not an image</html>").is_none());
+
+        let mut oversized = Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(8193, 1)
+            .write_to(&mut oversized, image::ImageFormat::Png)
+            .unwrap();
+        assert!(decode_dynamic_image(oversized.get_ref()).is_none());
     }
 }
 
@@ -388,7 +606,7 @@ pub fn load_cached_image_bytes(url: &str) -> Option<Vec<u8>> {
         return None;
     }
     let bytes = std::fs::read(url_to_cache_path(url)).ok()?;
-    image::load_from_memory(&bytes).ok()?;
+    decode_dynamic_image(&bytes)?;
     Some(bytes)
 }
 
@@ -408,7 +626,7 @@ pub fn is_poor_thumbnail(url: &str) -> bool {
 }
 
 pub fn is_poor_thumbnail_bytes(bytes: &[u8]) -> bool {
-    let Ok(image) = image::load_from_memory(bytes) else {
+    let Some(image) = decode_dynamic_image(bytes) else {
         return false;
     };
     if (1..320).contains(&image.width()) || (1..160).contains(&image.height()) {
@@ -486,11 +704,26 @@ fn fetch_and_cache_image_data(
     }
 
     let mut downloaded_bytes = None;
-    for attempt in 0..3 {
+    for attempt in 0..2 {
         match send_image_request(url, token) {
             Ok(resp) => {
                 let status = resp.status();
                 if status.is_success() {
+                    let content_type = resp
+                        .headers()
+                        .get(reqwest::header::CONTENT_TYPE)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or_default();
+                    if is_non_image_content_type(content_type) {
+                        crate::diagnostics::GLOBAL_LOG.w(
+                            "Thumbnail",
+                            &format!(
+                                "image endpoint returned non-image content type ({})",
+                                content_type.split(';').next().unwrap_or("unknown").trim()
+                            ),
+                        );
+                        return None;
+                    }
                     if resp
                         .content_length()
                         .is_some_and(|size| size > MAX_IMAGE_BYTES as u64)
@@ -511,7 +744,7 @@ fn fetch_and_cache_image_data(
                                 .w("Thumbnail", "image exceeded the 10 MB limit");
                             return None;
                         }
-                        Ok(_) if attempt < 2 => {
+                        Ok(_) if attempt < 1 => {
                             std::thread::sleep(Duration::from_millis(180 * (attempt + 1) as u64));
                             continue;
                         }
@@ -520,7 +753,7 @@ fn fetch_and_cache_image_data(
                                 .w("Thumbnail", "image response was empty");
                             return None;
                         }
-                        Err(_) if attempt < 2 => {
+                        Err(_) if attempt < 1 => {
                             std::thread::sleep(Duration::from_millis(180 * (attempt + 1) as u64));
                             continue;
                         }
@@ -531,10 +764,8 @@ fn fetch_and_cache_image_data(
                         }
                     }
                 }
-                let retryable = status == reqwest::StatusCode::REQUEST_TIMEOUT
-                    || status == reqwest::StatusCode::TOO_MANY_REQUESTS
-                    || status.is_server_error();
-                if retryable && attempt < 2 {
+                let retryable = retryable_image_status(status);
+                if retryable && attempt < 1 {
                     std::thread::sleep(Duration::from_millis(180 * (attempt + 1) as u64));
                     continue;
                 }
@@ -549,7 +780,7 @@ fn fetch_and_cache_image_data(
             }
             Err(ImageRequestError::Transport(error)) => {
                 let retryable = error.is_timeout() || error.is_connect() || error.is_request();
-                if retryable && attempt < 2 {
+                if retryable && attempt < 1 {
                     std::thread::sleep(Duration::from_millis(180 * (attempt + 1) as u64));
                     continue;
                 }

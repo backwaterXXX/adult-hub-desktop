@@ -316,6 +316,11 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
             let _ = local_store.set_setting("resolver_url", &trimmed);
             crate::thumbnails::set_resolver_base_url(&trimmed);
             let session = credential_store.get().ok().flatten();
+            crate::thumbnails::set_resolver_auth_token(
+                session
+                    .as_ref()
+                    .map(|session| session.access_token.as_str()),
+            );
             phash_coord.update_auth(&trimmed, session.as_ref().map(|s| s.access_token.as_str()));
             ui.set_resolver_url_input(trimmed.into());
             ui.set_status("Resolver API URL updated".into());
@@ -577,6 +582,11 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
                 let _ = local_store.set_setting("resolver_base_url", "");
                 let _ = local_store.set_setting("resolver_url", "");
                 crate::thumbnails::set_resolver_base_url("");
+                crate::thumbnails::set_resolver_auth_token(
+                    session
+                        .as_ref()
+                        .map(|session| session.access_token.as_str()),
+                );
                 ui.set_resolver_url_input("".into());
                 if !active_server_uses_origin {
                     let session_url = session
@@ -584,6 +594,11 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
                         .map(|session| session.server_url.as_str())
                         .unwrap_or_default();
                     crate::thumbnails::set_resolver_base_url(session_url);
+                    crate::thumbnails::set_resolver_auth_token(
+                        session
+                            .as_ref()
+                            .map(|session| session.access_token.as_str()),
+                    );
                     phash_coord.update_auth(
                         session_url,
                         session
@@ -936,6 +951,12 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
                             })
                             .unwrap_or_default();
                         crate::thumbnails::set_resolver_base_url(&active_resolver_url);
+                        let active_token = credential_store
+                            .get()
+                            .ok()
+                            .flatten()
+                            .map(|session| session.access_token);
+                        crate::thumbnails::set_resolver_auth_token(active_token.as_deref());
                     }
                     Err(err) => show_error(&ui, format!("Config import rejected: {err}")),
                 },

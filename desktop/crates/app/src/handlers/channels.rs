@@ -146,10 +146,32 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
                     .or_else(|| credential_store.get().ok().flatten().map(|s| s.server_url))
                     .unwrap_or_default();
                 if res_url.is_empty() {
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak.upgrade() {
+                            ui.set_channel_error_kind("connection".into());
+                            ui.set_channel_error_message(
+                                "Configure a Resolver connection to load channels.".into(),
+                            );
+                            ui.set_channel_error_details("Resolver URL is not configured.".into());
+                        }
+                    });
                     return;
                 }
-                let Ok(categories) = resolver.get_categories(&res_url) else {
-                    return;
+                let categories = match resolver.get_categories(&res_url) {
+                    Ok(categories) => categories,
+                    Err(error) => {
+                        let details = resolver_error_summary(&error);
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = weak.upgrade() {
+                                ui.set_channel_error_kind("categories".into());
+                                ui.set_channel_error_message(
+                                    "Could not load channel categories. Check the Resolver connection and retry.".into(),
+                                );
+                                ui.set_channel_error_details(details.into());
+                            }
+                        });
+                        return;
+                    }
                 };
                 let hidden = local_store.get_hidden_channels().unwrap_or_default();
                 let mut ids = HashMap::new();
@@ -164,6 +186,11 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
                         ui.set_channels_categories(Rc::new(slint::VecModel::from(names)).into());
+                        if ui.get_channel_error_kind() == "categories" {
+                            ui.set_channel_error_kind("".into());
+                            ui.set_channel_error_message("".into());
+                            ui.set_channel_error_details("".into());
+                        }
                     }
                 });
             });
@@ -582,13 +609,29 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
                 let mut new_items = Vec::new();
                 let mut next_offset = None;
                 let mut has_more = false;
+                let mut load_error = if res_url.is_empty() {
+                    Some((
+                        "connection".to_owned(),
+                        "Resolver URL is not configured.".to_owned(),
+                    ))
+                } else {
+                    None
+                };
 
                 if !res_url.is_empty() {
-                    if let Ok(hist) = resolver.get_channel_history(&res_url, &chan_id, 20, offset) {
-                        next_offset = hist.next_offset_id;
-                        has_more = hist.has_more;
-                        for v in hist.videos {
-                            new_items.push(TvItem::from(v));
+                    match resolver.get_channel_history(&res_url, &chan_id, 20, offset) {
+                        Ok(hist) => {
+                            next_offset = hist.next_offset_id;
+                            has_more = hist.has_more;
+                            for v in hist.videos {
+                                new_items.push(TvItem::from(v));
+                            }
+                        }
+                        Err(error) => {
+                            load_error = Some((
+                                resolver_error_kind(&error).to_owned(),
+                                resolver_error_summary(&error),
+                            ));
                         }
                     }
                 }
@@ -617,6 +660,8 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
                 );
                 let refresh_items = channel_items_cache.clone();
                 let refresh_generation = channel_generation.clone();
+                let error_kind = load_error.as_ref().map(|(kind, _)| kind.clone());
+                let error_details = load_error.map(|(_, details)| details).unwrap_or_default();
 
                 // Merge into cached_catalog
                 {
@@ -640,6 +685,15 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
                     set_channel_catalog(&ui, cards.clone());
                     ui.set_channel_has_more(has_more);
                     ui.set_channel_loading(false);
+                    if let Some(error_kind) = error_kind {
+                        ui.set_channel_error_kind(error_kind.clone().into());
+                        ui.set_channel_error_message(if error_kind == "access-denied" {
+                            "The Resolver denied access. Check the account and permissions configured for this channel.".into()
+                        } else {
+                            "Could not load more channel videos. Check the connection and retry.".into()
+                        });
+                        ui.set_channel_error_details(error_details.into());
+                    }
                     refresh_channel_thumbnails_async(
                         ui.as_weak(),
                         cards,
@@ -716,21 +770,52 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
             let mut initial_items = Vec::new();
             let mut next_offset = None;
             let mut has_more = false;
-            if !res_url.is_empty() {
-                if let Ok(cats) = resolver.get_categories(&res_url) {
-                    for category in cats {
-                        ids.insert(category.title.clone(), category.id.clone());
-                        if !hidden.iter().any(|id| id == &category.id) {
-                            cat_names.push(category.title);
+            let mut error_kind = String::new();
+            let mut error_details = String::new();
+            if res_url.is_empty() {
+                error_kind = "connection".into();
+                error_details = "Resolver URL is not configured.".into();
+            } else {
+                match resolver.get_categories(&res_url) {
+                    Ok(cats) => {
+                        for category in cats {
+                            ids.insert(category.title.clone(), category.id.clone());
+                            if !hidden.iter().any(|id| id == &category.id) {
+                                cat_names.push(category.title);
+                            }
                         }
                     }
+                    Err(error) => {
+                        error_kind = resolver_error_kind(&error).into();
+                        error_details = format!(
+                            "Could not load channel categories: {}",
+                            resolver_error_summary(&error)
+                        );
+                    }
                 }
-                if let Ok(history) = resolver.get_channel_history(&res_url, "main", 20, None) {
-                    next_offset = history.next_offset_id;
-                    has_more = history.has_more;
-                    initial_items = history.videos.into_iter().map(TvItem::from).collect();
+                match resolver.get_channel_history(&res_url, "main", 20, None) {
+                    Ok(history) => {
+                        next_offset = history.next_offset_id;
+                        has_more = history.has_more;
+                        initial_items = history.videos.into_iter().map(TvItem::from).collect();
+                    }
+                    Err(error) => {
+                        error_kind = resolver_error_kind(&error).into();
+                        error_details = format!(
+                            "Could not load channel history: {}",
+                            resolver_error_summary(&error)
+                        );
+                    }
                 }
             }
+            let error_message = if error_kind == "access-denied" {
+                "The Resolver denied access. Check the account and permissions configured for this channel.".to_owned()
+            } else if !error_kind.is_empty() {
+                "Channel data could not be loaded. Check the Resolver connection and retry."
+                    .to_owned()
+            } else {
+                String::new()
+            };
             initial_items = filter_catalog_items(initial_items, &local_store);
             *category_ids.lock().unwrap() = ids;
             let weak_categories = weak.clone();
@@ -779,6 +864,9 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
                 set_channel_catalog(&ui, cards.clone());
                 ui.set_channel_has_more(has_more);
                 ui.set_channel_loading(false);
+                ui.set_channel_error_kind(error_kind.into());
+                ui.set_channel_error_message(error_message.into());
+                ui.set_channel_error_details(error_details.into());
                 refresh_channel_thumbnails_async(
                     ui.as_weak(),
                     cards,

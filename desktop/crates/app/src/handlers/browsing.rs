@@ -139,8 +139,8 @@ fn refresh_home_thumbnails_async(
         .collect::<Vec<_>>();
     std::thread::spawn(move || {
         for (shelf_index, shelf) in shelves.iter().enumerate() {
-            for start in (0..shelf.len()).step_by(6) {
-                let end = (start + 6).min(shelf.len());
+            for start in (0..shelf.len()).step_by(crate::catalog::THUMBNAIL_BATCH_SIZE) {
+                let end = (start + crate::catalog::THUMBNAIL_BATCH_SIZE).min(shelf.len());
                 let thumbnails = fetch_thumbnail_batch(&shelf[start..end], Some(&token))
                     .into_iter()
                     .map(|(offset, thumbnail)| (start + offset, thumbnail))
@@ -158,8 +158,8 @@ fn refresh_home_thumbnails_async(
             }
         }
         for (category_index, (_, shelf, _)) in category_shelves.iter().enumerate() {
-            for start in (0..shelf.len()).step_by(6) {
-                let end = (start + 6).min(shelf.len());
+            for start in (0..shelf.len()).step_by(crate::catalog::THUMBNAIL_BATCH_SIZE) {
+                let end = (start + crate::catalog::THUMBNAIL_BATCH_SIZE).min(shelf.len());
                 let thumbnails = fetch_thumbnail_batch(&shelf[start..end], Some(&token))
                     .into_iter()
                     .map(|(offset, thumbnail)| (start + offset, thumbnail))
@@ -1044,6 +1044,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             let _ = local_store.clear_session();
             let _ = credential_store.clear();
             reporter.set_auth(None, None);
+            crate::thumbnails::set_resolver_auth_token(None);
             phash_coord.update_auth("", None);
             home_catalog.lock().unwrap().clear();
             let raw_items = Vec::new();

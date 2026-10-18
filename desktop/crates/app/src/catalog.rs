@@ -2,9 +2,12 @@ use crate::{DiscoveredServerItem, MainWindow, VideoCardData, VideoCardRowData};
 use adult_hub_client::{JellyfinClient, TvItem, TvPersonRole};
 use adult_hub_storage::LocalStore;
 use slint::Model;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+
+pub const THUMBNAIL_BATCH_SIZE: usize = 4;
 
 #[derive(Clone)]
 pub struct ThumbnailRequest {
@@ -16,9 +19,70 @@ pub struct ThumbnailRequest {
     pub progress: f32,
 }
 
+#[derive(Clone)]
 pub struct FetchedThumbnail {
     pub url: String,
     pub bytes: Vec<u8>,
+}
+
+struct ThumbnailFlight {
+    result: Mutex<Option<Option<FetchedThumbnail>>>,
+    completed: Condvar,
+}
+
+static THUMBNAIL_FLIGHTS: OnceLock<Mutex<HashMap<String, Arc<ThumbnailFlight>>>> = OnceLock::new();
+static THUMBNAIL_DOWNLOADS: OnceLock<(Mutex<usize>, Condvar)> = OnceLock::new();
+
+struct ThumbnailDownloadPermit;
+
+impl ThumbnailDownloadPermit {
+    fn acquire() -> Option<Self> {
+        const MAX_CONCURRENT_DOWNLOADS: usize = 4;
+        let (active, available) =
+            THUMBNAIL_DOWNLOADS.get_or_init(|| (Mutex::new(0), Condvar::new()));
+        let mut count = active.lock().ok()?;
+        while *count >= MAX_CONCURRENT_DOWNLOADS {
+            count = available.wait(count).ok()?;
+        }
+        *count += 1;
+        Some(Self)
+    }
+}
+
+impl Drop for ThumbnailDownloadPermit {
+    fn drop(&mut self) {
+        if let Some((active, available)) = THUMBNAIL_DOWNLOADS.get()
+            && let Ok(mut count) = active.lock()
+        {
+            *count = count.saturating_sub(1);
+            available.notify_one();
+        }
+    }
+}
+
+fn thumbnail_flight_key(request: &ThumbnailRequest, token: Option<&str>) -> String {
+    let mut key_context = ring::digest::Context::new(&ring::digest::SHA256);
+    for value in [
+        request.id.as_str(),
+        request.primary_url.as_str(),
+        request.fallback_url.as_str(),
+        request.alternate_url.as_str(),
+        request.provider.as_str(),
+    ] {
+        key_context.update(value.as_bytes());
+        key_context.update(&[0]);
+    }
+    key_context.update(&request.progress.to_bits().to_le_bytes());
+    if let Some(token) = token {
+        let token_digest = ring::digest::digest(&ring::digest::SHA256, token.as_bytes());
+        key_context.update(token_digest.as_ref());
+    }
+    key_context
+        .finish()
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
 }
 
 impl From<&VideoCardData> for ThumbnailRequest {
@@ -40,6 +104,16 @@ fn card_index_by_id(model: &slint::ModelRc<VideoCardData>, id: &str) -> Option<u
 
 fn no_thumbnail_state(has_source_url: bool) -> &'static str {
     if has_source_url { "failed" } else { "missing" }
+}
+
+fn invalidate_thumbnail_request_cache(request: &ThumbnailRequest) {
+    for url in [
+        request.primary_url.as_str(),
+        request.fallback_url.as_str(),
+        request.alternate_url.as_str(),
+    ] {
+        crate::thumbnails::invalidate_cached_image(url);
+    }
 }
 
 pub fn make_sample_person(name: &str) -> TvPersonRole {
@@ -378,6 +452,7 @@ pub fn retry_thumbnail_async(
     let request = ThumbnailRequest::from(&card);
     let weak = ui.clone();
     std::thread::spawn(move || {
+        invalidate_thumbnail_request_cache(&request);
         let thumbnail = fetch_card_thumbnail(&request, token.as_deref());
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = weak.upgrade() else { return };
@@ -452,6 +527,7 @@ pub fn retry_home_thumbnail_async(ui: slint::Weak<MainWindow>, id: String, token
         return;
     }
     std::thread::spawn(move || {
+        invalidate_thumbnail_request_cache(&request);
         let thumbnail = fetch_card_thumbnail(&request, token.as_deref());
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = ui.upgrade() else { return };
@@ -730,6 +806,53 @@ pub fn fetch_card_thumbnail(
     request: &ThumbnailRequest,
     token: Option<&str>,
 ) -> Option<FetchedThumbnail> {
+    let key = thumbnail_flight_key(request, token);
+    let flights = THUMBNAIL_FLIGHTS.get_or_init(|| Mutex::new(HashMap::new()));
+    let (flight, is_leader) = {
+        let mut flights = flights.lock().ok()?;
+        if let Some(flight) = flights.get(&key) {
+            (flight.clone(), false)
+        } else {
+            let flight = Arc::new(ThumbnailFlight {
+                result: Mutex::new(None),
+                completed: Condvar::new(),
+            });
+            flights.insert(key.clone(), flight.clone());
+            (flight, true)
+        }
+    };
+
+    if !is_leader {
+        let mut result = flight.result.lock().ok()?;
+        while result.is_none() {
+            result = flight.completed.wait(result).ok()?;
+        }
+        return result.clone().flatten();
+    }
+
+    // The permit caps concurrent network/decode work across all screens.
+    // Catch panics at this worker boundary so every in-flight request still
+    // resolves to a terminal Failed result and wakes deduplicated waiters.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _permit = ThumbnailDownloadPermit::acquire()?;
+        fetch_card_thumbnail_inner(request, token)
+    }))
+    .unwrap_or(None);
+
+    if let Ok(mut stored) = flight.result.lock() {
+        *stored = Some(result.clone());
+        flight.completed.notify_all();
+    }
+    if let Ok(mut flights) = flights.lock() {
+        flights.remove(&key);
+    }
+    result
+}
+
+fn fetch_card_thumbnail_inner(
+    request: &ThumbnailRequest,
+    token: Option<&str>,
+) -> Option<FetchedThumbnail> {
     let fallback_first = request.provider == "telegram" && request.progress > 0.0;
     let candidates = if fallback_first {
         [
@@ -792,8 +915,13 @@ pub fn refresh_catalog_thumbnails_async(
         .map(|card| card.id.clone())
         .collect::<Vec<_>>();
     std::thread::spawn(move || {
-        for start in (0..requests.len()).step_by(6) {
-            let end = (start + 6).min(requests.len());
+        for start in (0..requests.len()).step_by(THUMBNAIL_BATCH_SIZE) {
+            if generation.as_ref().is_some_and(|(generation, request_id)| {
+                generation.load(Ordering::SeqCst) != *request_id
+            }) {
+                break;
+            }
+            let end = (start + THUMBNAIL_BATCH_SIZE).min(requests.len());
             let thumbnails = fetch_thumbnail_batch(&requests[start..end], Some(&token));
             let successful_offsets = thumbnails
                 .iter()
@@ -858,8 +986,11 @@ pub fn refresh_channel_thumbnails_async(
         .map(|card| card.id.clone())
         .collect::<Vec<_>>();
     std::thread::spawn(move || {
-        for start in (0..requests.len()).step_by(6) {
-            let end = (start + 6).min(requests.len());
+        for start in (0..requests.len()).step_by(THUMBNAIL_BATCH_SIZE) {
+            if generation.load(Ordering::SeqCst) != request_id {
+                break;
+            }
+            let end = (start + THUMBNAIL_BATCH_SIZE).min(requests.len());
             let thumbnails = fetch_thumbnail_batch(&requests[start..end], None);
             let successful_offsets = thumbnails
                 .iter()
@@ -1007,5 +1138,38 @@ mod tests {
         .into();
         assert_eq!(card_index_by_id(&model, "item-a"), Some(1));
         assert_eq!(card_index_by_id(&model, "removed-item"), None);
+    }
+
+    #[test]
+    fn request_deduplication_key_is_stable_but_separated_by_credentials() {
+        let mut request = ThumbnailRequest::from(&card("telegram:chan:1", "Video"));
+        request.primary_url = "https://resolver.example/admin/thumb?id=anonymous".into();
+        let first = thumbnail_flight_key(&request, Some("token-one"));
+        assert_eq!(first, thumbnail_flight_key(&request, Some("token-one")));
+        assert_ne!(first, thumbnail_flight_key(&request, Some("token-two")));
+        assert_ne!(first, thumbnail_flight_key(&request, None));
+    }
+
+    #[test]
+    fn thumbnail_downloads_are_globally_bounded() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        let active = AtomicUsize::new(0);
+        let highest = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..12 {
+                let active = &active;
+                let highest = &highest;
+                scope.spawn(move || {
+                    let _permit = ThumbnailDownloadPermit::acquire().unwrap();
+                    let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    highest.fetch_max(current, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(10));
+                    active.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+        });
+        assert!(highest.load(Ordering::SeqCst) <= 4);
     }
 }

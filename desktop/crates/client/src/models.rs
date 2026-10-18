@@ -458,4 +458,22 @@ mod tests {
         assert_eq!(item.provider_video_id, None);
         assert!(!item.is_telegram());
     }
+
+    #[test]
+    fn telegram_record_without_artwork_stays_a_missing_source_not_a_fake_url() {
+        let dto: VideoDto = serde_json::from_value(serde_json::json!({
+            "id": "resolver-row-17",
+            "provider": "telegram",
+            "provider_video_id": "-100123:456:789",
+            "title": "Example item",
+            "thumbnail": null
+        }))
+        .unwrap();
+        let item = TvItem::from(dto);
+
+        assert_eq!(item.id, "telegram:-100123:456:789");
+        assert_eq!(item.source_provider.as_deref(), Some("telegram"));
+        assert_eq!(item.primary_image_tag, None);
+        assert!(item.is_telegram());
+    }
 }

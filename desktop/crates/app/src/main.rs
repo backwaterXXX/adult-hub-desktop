@@ -141,11 +141,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             String::new()
         }
     };
-    thumbnails::set_resolver_base_url(&initial_resolver_url);
     let initial_auth_token = session_opt
         .as_ref()
         .filter(|_| session_origin_approved)
         .map(|s| s.access_token.clone());
+    thumbnails::set_resolver_base_url(&initial_resolver_url);
+    thumbnails::set_resolver_auth_token(initial_auth_token.as_deref());
 
     let phash_coord = phash::PhashCoordinator::new(
         local_store.clone(),
@@ -554,6 +555,7 @@ fn activate_session(
         resolver_url
     };
     crate::thumbnails::set_resolver_base_url(effective_resolver_url);
+    crate::thumbnails::set_resolver_auth_token(Some(&session.access_token));
     phash_coord.update_auth(effective_resolver_url, Some(&session.access_token));
     ui.set_is_logged_in(true);
     ui.set_logged_in_user(session.username.clone().into());

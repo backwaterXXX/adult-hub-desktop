@@ -816,8 +816,10 @@ export component MainWindow inherits Window {
         let catalog-width = max(0px, root.width - navigation-width - page-padding * 2 - 16px);
         let channel-sidebar-width = compact ? 0px : 272px;
         let channel-width = max(0px, catalog-width - channel-sidebar-width);
-        let catalog-columns = catalog-width >= 928px ? 4 : (catalog-width >= 692px ? 3 : (catalog-width >= 456px ? 2 : 1));
-        let channel-columns = channel-width >= 928px ? 4 : (channel-width >= 692px ? 3 : (channel-width >= 456px ? 2 : 1));
+        // Thresholds include the 16px card gap and 14px list scrollbar, so
+        // every selected column count can retain the 220px minimum card width.
+        let catalog-columns = catalog-width >= 942px ? 4 : (catalog-width >= 706px ? 3 : (catalog-width >= 470px ? 2 : 1));
+        let channel-columns = channel-width >= 942px ? 4 : (channel-width >= 706px ? 3 : (channel-width >= 470px ? 2 : 1));
         root.compact-layout = compact;
         if (root.catalog-column-count != catalog-columns || root.channel-column-count != channel-columns) {
             root.catalog-column-count = catalog-columns;
@@ -1472,13 +1474,34 @@ export component MainWindow inherits Window {
                 VerticalLayout {
                     spacing: 6px;
 
-                    if !root.is-catalog-search-results && root.active-category != "Performers" : HorizontalLayout {
+                    HorizontalLayout {
                         spacing: 8px;
-                        height: 34px;
-
-                        if root.active-category != "Performers" : TvChoiceChip {
-                            text: root.catalog-filters-expanded ? "Close options" : "Options";
-                            selected: root.catalog-filters-expanded
+                        height: 40px;
+                        DarkLineEdit {
+                            horizontal-stretch: 1;
+                            min-width: 180px;
+                            focus-request-id: root.search-focus-target == "catalog" ? root.search-focus-sequence : 0;
+                            text: root.search-query;
+                            placeholder-text: "Search videos, cast, channels...";
+                            edited(text) => { root.search-query = text; }
+                            accepted(text) => {
+                                root.search-query = text;
+                                root.search-catalog(text);
+                                keys.focus();
+                            }
+                        }
+                        Button {
+                            text: "Search";
+                            primary: true;
+                            clicked => {
+                                root.search-catalog(root.search-query);
+                                keys.focus();
+                            }
+                        }
+                        if !root.is-catalog-search-results && root.active-category != "Performers" : TvSecondaryButton {
+                            text: root.catalog-filters-expanded ? "Hide filters" : "Filters";
+                            custom-height: 40px;
+                            active: root.catalog-filters-expanded
                                 || root.catalog-unwatched-only
                                 || root.catalog-favorites-only
                                 || root.catalog-hd-only
@@ -1490,42 +1513,20 @@ export component MainWindow inherits Window {
                                 || root.catalog-performer-query != "";
                             clicked => { root.catalog-filters-expanded = !root.catalog-filters-expanded; }
                         }
-                        Rectangle { horizontal-stretch: 1; }
-                    }
-
-                    HorizontalLayout {
-                    spacing: 8px;
-                    height: 38px;
-                    DarkLineEdit {
-                        horizontal-stretch: 1;
-                        min-width: 180px;
-                        focus-request-id: root.search-focus-target == "catalog" ? root.search-focus-sequence : 0;
-                        text: root.search-query;
-                        placeholder-text: "Search videos, cast, channels...";
-                        edited(text) => { root.search-query = text; }
-                        accepted(text) => {
-                            root.search-query = text;
-                            root.search-catalog(text);
-                            keys.focus();
+                        if !root.is-catalog-search-results && root.active-category != "Performers" : TvSecondaryButton {
+                            text: "Sort: " + root.catalog-sort-label;
+                            custom-height: 40px;
+                            clicked => { root.update-catalog-filter("sort"); }
                         }
-                    }
-                    Button {
-                        text: "Search";
-                        primary: true;
-                        clicked => {
-                            root.search-catalog(root.search-query);
-                            keys.focus();
+                        if root.search-query != "" : TvSecondaryButton {
+                            text: "Clear";
+                            custom-height: 40px;
+                            clicked => {
+                                root.search-query = "";
+                                root.search-catalog("");
+                                keys.focus();
+                            }
                         }
-                    }
-                    if root.search-query != "" : TvSecondaryButton {
-                        text: "Clear";
-                        custom-height: 40px;
-                        clicked => {
-                            root.search-query = "";
-                            root.search-catalog("");
-                            keys.focus();
-                        }
-                    }
                     }
                 }
 
@@ -1549,7 +1550,7 @@ export component MainWindow inherits Window {
                     }
 
                     TvChoiceChip {
-                        text: root.performer-filters-expanded ? "Close options" : "Options";
+                        text: root.performer-filters-expanded ? "Hide filters" : "Filters";
                         selected: root.performer-filters-expanded || root.performer-letter != "" || root.performers-photo-only;
                         clicked => { root.performer-filters-expanded = !root.performer-filters-expanded; }
                     }
@@ -2171,6 +2172,40 @@ export component MainWindow inherits Window {
                         }
                     }
 
+                    if root.channel-error-message != "" && root.channel-rows.length > 0 : Rectangle {
+                        height: 48px;
+                        border-radius: 8px;
+                        border-width: 1px;
+                        border-color: HubTheme.error;
+                        background: HubTheme.surface;
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 8px;
+                            spacing: 10px;
+                            alignment: center;
+                            Text {
+                                text: root.channel-error-kind == "access-denied"
+                                    ? "Access denied. Check Resolver permissions."
+                                    : (root.channel-error-kind == "categories"
+                                        ? "Could not load channel categories. Check the connection."
+                                        : "Could not load more channel videos. Check the connection.");
+                                color: HubTheme.text-secondary;
+                                font-size: 13px;
+                                horizontal-stretch: 1;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                            TvSecondaryButton {
+                                text: "Retry";
+                                custom-height: 36px;
+                                clicked => {
+                                    if (root.channel-error-kind == "categories") { root.refresh-channel-categories(); }
+                                    else { root.select-channel-category(root.active-channel-category); }
+                                }
+                            }
+                        }
+                    }
+
                     // Video grid in channel (3-column responsive layout)
                     if root.channel-loading && root.channel-rows.length == 0 : VerticalLayout {
                         vertical-stretch: 1;
@@ -2191,12 +2226,21 @@ export component MainWindow inherits Window {
                         }
                     }
 
-                    if !root.channel-loading && root.channel-rows.length == 0 : VerticalLayout {
-                        vertical-stretch: 1;
-                        alignment: center;
-                        spacing: 10px;
-                        Text {
-                            text: root.channel-error-kind == "access-denied"
+                    if !root.channel-loading && root.channel-rows.length == 0 : Rectangle {
+                        width: 520px;
+                        height: root.channel-error-details-visible ? 320px : 240px;
+                        border-radius: 12px;
+                        border-width: 1px;
+                        border-color: HubTheme.separator;
+                        background: HubTheme.surface;
+
+                        VerticalLayout {
+                            padding: 18px;
+                            spacing: 10px;
+                            Text {
+                            text: root.channel-error-kind == "categories"
+                                ? "Could not load channel categories"
+                                : (root.channel-error-kind == "access-denied"
                                 ? "Access denied"
                                 : (root.channel-error-kind == "offline"
                                     ? "No connection"
@@ -2208,14 +2252,16 @@ export component MainWindow inherits Window {
                                         ? "Could not load channel videos"
                                 : (root.resolver-url-input == "" && !root.is-logged-in
                                     ? "Configure a Resolver to browse channels"
-                                    : "No channel videos available")))));
+                                    : "No channel videos available"))))));
                             color: HubTheme.text-primary;
                             font-size: 22px;
                             font-weight: 700;
-                            horizontal-alignment: center;
+                            horizontal-alignment: left;
                         }
-                        Text {
-                            text: root.channel-error-kind == "access-denied"
+                            Text {
+                            text: root.channel-error-kind == "categories"
+                                ? "Channel categories could not be loaded. Check the Resolver connection and retry."
+                                : (root.channel-error-kind == "access-denied"
                                 ? "The Resolver denied access. Check the account and permissions configured for this channel."
                                 : (root.channel-error-kind == "offline"
                                     ? "Check your network and Resolver availability, then try again."
@@ -2225,41 +2271,49 @@ export component MainWindow inherits Window {
                                     ? "The channel data could not be loaded. Check the connection and try again."
                                 : (root.resolver-url-input == "" && !root.is-logged-in
                                     ? "Add a Resolver URL in Settings to load channel categories and videos."
-                                    : "Try another category or check the Resolver connection in Settings."))));
+                                    : "Try another category or check the Resolver connection in Settings.")))));
                             color: root.channel-error-kind == "access-denied" ? HubTheme.text-secondary : (root.channel-error-message != "" ? HubTheme.error : HubTheme.text-secondary);
                             font-size: 14px;
-                            horizontal-alignment: center;
+                            horizontal-alignment: left;
                             wrap: word-wrap;
                             horizontal-stretch: 1;
                         }
 
-                        if root.channel-error-details != "" : VerticalLayout {
-                            spacing: 6px;
-                            TvSecondaryButton {
-                                text: root.channel-error-details-visible ? "Hide technical details" : "Technical details";
-                                clicked => { root.channel-error-details-visible = !root.channel-error-details-visible; }
-                            }
-                            if root.channel-error-details-visible : Text {
-                                text: root.channel-error-details;
-                                color: HubTheme.text-muted;
-                                font-size: 12px;
-                                wrap: word-wrap;
-                                horizontal-stretch: 1;
-                            }
-                        }
-
-                        HorizontalLayout {
-                            spacing: 10px;
-                            alignment: center;
-
-                            TvPrimaryButton {
-                                text: "Open connection settings";
-                                clicked => { root.switch-screen("settings"); }
+                            if root.channel-error-details != "" : VerticalLayout {
+                                spacing: 6px;
+                                TvSecondaryButton {
+                                    text: root.channel-error-details-visible ? "Hide technical details" : "Technical details";
+                                    clicked => { root.channel-error-details-visible = !root.channel-error-details-visible; }
+                                }
+                                if root.channel-error-details-visible : ScrollView {
+                                    height: 90px;
+                                    vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
+                                    horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                                    Text {
+                                        text: root.channel-error-details;
+                                        color: HubTheme.text-muted;
+                                        font-size: 12px;
+                                        wrap: word-wrap;
+                                    }
+                                }
                             }
 
-                            TvSecondaryButton {
-                                text: "Try again";
-                                clicked => { root.select-channel-category(root.active-channel-category); }
+                            HorizontalLayout {
+                                spacing: 10px;
+                                alignment: start;
+
+                                TvPrimaryButton {
+                                    text: "Open connection settings";
+                                    clicked => { root.switch-screen("settings"); }
+                                }
+
+                                TvSecondaryButton {
+                                    text: "Try again";
+                                    clicked => {
+                                        if (root.channel-error-kind == "categories") { root.refresh-channel-categories(); }
+                                        else { root.select-channel-category(root.active-channel-category); }
+                                    }
+                                }
                             }
                         }
                     }
@@ -2384,7 +2438,7 @@ export component MainWindow inherits Window {
                     // before a video is loaded, instead of showing an empty black canvas.
                     if !root.player-media-loaded && root.player-error-message == "" : Rectangle {
                         width: min(parent.width - 40px, 500px);
-                        height: min(270px, max(180px, parent.height - 238px));
+                        height: min(340px, max(260px, parent.height - 180px));
                         x: (parent.width - self.width) / 2;
                         y: (parent.height - self.height - 190px) / 2;
                         border-radius: 18px;
@@ -2451,6 +2505,41 @@ export component MainWindow inherits Window {
                                     text: "Browse library";
                                     custom-height: 40px;
                                     clicked => { root.switch-screen("browse"); }
+                                }
+                            }
+
+                            VerticalLayout {
+                                spacing: 6px;
+                                Text {
+                                    text: "MEDIA URL OR FILE PATH";
+                                    color: HubTheme.text-secondary;
+                                    font-size: 11px;
+                                    font-weight: 600;
+                                }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    DarkLineEdit {
+                                        horizontal-stretch: 1;
+                                        min-width: 120px;
+                                        text: root.url-text;
+                                        accessible-name: "Direct media URL or local video file path";
+                                        placeholder-text: "https://… or a local path";
+                                        edited(text) => { root.url-text = text; }
+                                        accepted(text) => {
+                                            root.url-text = text;
+                                            root.load-url(text);
+                                            keys.focus();
+                                        }
+                                    }
+                                    TvPrimaryButton {
+                                        text: "Load URL";
+                                        custom-height: 40px;
+                                        enabled: root.url-text != "";
+                                        clicked => {
+                                            root.load-url(root.url-text);
+                                            keys.focus();
+                                        }
+                                    }
                                 }
                             }
                         }
