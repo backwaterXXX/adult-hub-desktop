@@ -91,7 +91,7 @@ jobs:
         run: ./scripts/package-appimage.sh
 
       - name: Upload Linux Artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: linux-packages
           path: |
@@ -128,7 +128,7 @@ jobs:
         run: ./scripts/package-windows.sh
 
       - name: Upload Windows Artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: windows-packages
           path: |
