@@ -654,6 +654,7 @@ pub fn install_fullscreen(ui: &MainWindow) {
             let next = !fullscreen.get();
             ui.window().set_fullscreen(next);
             fullscreen.set(next);
+            ui.set_is_fullscreen(next);
         });
     }
 
@@ -665,6 +666,7 @@ pub fn install_fullscreen(ui: &MainWindow) {
             if fullscreen.get() {
                 ui.window().set_fullscreen(false);
                 fullscreen.set(false);
+                ui.set_is_fullscreen(false);
             } else if ui.get_active_screen() != "browse" {
                 ui.invoke_switch_screen("browse".into());
             }

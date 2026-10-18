@@ -515,9 +515,241 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.set_status("Ready.".into());
     }
 
+    if options.demo_capture {
+        run_demo_capture(&ui);
+    }
+
     ui.show()?;
     ui.run()?;
     Ok(())
+}
+
+fn make_demo_card(id: &str, title: &str, duration_sec: u64, studio: &str, is_played: bool, progress: f32) -> crate::VideoCardData {
+    let mut card = crate::catalog::tv_item_to_card(&adult_hub_client::TvItem {
+        id: id.into(),
+        title: title.into(),
+        runtime_ticks: Some(duration_sec as i64 * 10_000_000),
+        is_played,
+        studios: vec![studio.into()],
+        year: Some(2026),
+        ..Default::default()
+    });
+    card.progress = progress;
+    card.has_thumbnail = false;
+    card.thumbnail_state = "missing".into();
+    card
+}
+
+fn run_demo_capture(ui: &MainWindow) {
+    let weak = ui.as_weak();
+    std::thread::spawn(move || {
+        use std::fs;
+        use std::thread::sleep;
+        use std::time::Duration;
+
+        // Step 1: Home screen with featured hero and sample cards
+        sleep(Duration::from_millis(1500));
+        let _ = weak.upgrade_in_event_loop(|ui| {
+            ui.set_is_logged_in(true);
+            ui.set_active_screen("home".into());
+
+            let hero_card = make_demo_card(
+                "hero_1",
+                "Cyberpunk Odyssey: Midnight Run in Neon City",
+                6480,
+                "Sci-Fi / Cyberpunk",
+                false,
+                0.42,
+            );
+
+            let card0 = make_demo_card(
+                "demo_1",
+                "The Astonishingly Long Title of a High-Definition Video Production That Spans Across Multiple Lines and Needs Proper Truncation Without Being Cut Off at the Beginning",
+                6480,
+                "Studio Alpha",
+                true,
+                0.65,
+            );
+            let card1 = make_demo_card(
+                "demo_2",
+                "Sunset Horizons & Coastal Dreams",
+                2535,
+                "Neon Pulse",
+                false,
+                0.0,
+            );
+            let card2 = make_demo_card(
+                "demo_3",
+                "Deep Dive into Synthwave Aesthetics Episode 4",
+                1730,
+                "WaveLab",
+                true,
+                1.0,
+            );
+            let card3 = make_demo_card(
+                "demo_4",
+                "Midnight Drive Special Edition",
+                930,
+                "NightCity",
+                false,
+                0.2,
+            );
+
+            let demo_cards = vec![hero_card.clone(), card0, card1, card2, card3];
+
+            ui.set_home_resume_items(std::rc::Rc::new(slint::VecModel::from(demo_cards.clone())).into());
+            ui.set_home_latest_items(std::rc::Rc::new(slint::VecModel::from(demo_cards.clone())).into());
+            ui.set_home_history_items(std::rc::Rc::new(slint::VecModel::from(demo_cards)).into());
+        });
+        sleep(Duration::from_millis(800));
+        let _ = fs::write("/tmp/ah_demo_step_1", "step 1 home");
+
+        // Step 2: Browse
+        sleep(Duration::from_millis(1500));
+        let _ = weak.upgrade_in_event_loop(|ui| {
+            ui.set_active_screen("browse".into());
+            ui.set_active_category("Latest".into());
+            ui.set_is_catalog_search_results(false);
+
+            let card0 = make_demo_card(
+                "browse_1",
+                "The Astonishingly Long Title of a High-Definition Video Production That Spans Across Multiple Lines and Needs Proper Truncation Without Being Cut Off at the Beginning",
+                6480,
+                "Studio Alpha",
+                true,
+                0.65,
+            );
+            let card1 = make_demo_card(
+                "browse_2",
+                "Neon Horizon Volume 2",
+                2110,
+                "Pulse",
+                false,
+                0.0,
+            );
+            let card2 = make_demo_card(
+                "browse_3",
+                "Synthwave Collective Showcase",
+                3480,
+                "WaveLab",
+                false,
+                0.0,
+            );
+
+            let row = crate::VideoCardRowData {
+                card_0: card0.clone(),
+                card_1: card1.clone(),
+                card_2: card2.clone(),
+                card_3: Default::default(),
+                has_0: true,
+                has_1: true,
+                has_2: true,
+                has_3: false,
+            };
+            ui.set_catalog_items(std::rc::Rc::new(slint::VecModel::from(vec![card0, card1, card2])).into());
+            ui.set_catalog_rows(std::rc::Rc::new(slint::VecModel::from(vec![row])).into());
+        });
+        sleep(Duration::from_millis(800));
+        let _ = fs::write("/tmp/ah_demo_step_2", "step 2 browse");
+
+        // Step 3: Channels
+        sleep(Duration::from_millis(1500));
+        let _ = weak.upgrade_in_event_loop(|ui| {
+            ui.set_active_screen("channels".into());
+            ui.set_active_channel_category("Neon Pulse 4K".into());
+            ui.set_channel_loading(false);
+            ui.set_channel_error_message("".into());
+            ui.set_channel_error_kind("".into());
+
+            let card0 = make_demo_card(
+                "ch_1",
+                "Channel Premiere: Cyber Circuitry",
+                1458,
+                "Neon Pulse",
+                false,
+                0.0,
+            );
+            let card1 = make_demo_card(
+                "ch_2",
+                "Electric Dreams Behind the Scenes",
+                1125,
+                "Neon Pulse",
+                false,
+                0.0,
+            );
+            let card2 = make_demo_card(
+                "ch_3",
+                "Live Transmission Archive",
+                2712,
+                "Neon Pulse",
+                false,
+                0.0,
+            );
+
+            let row = crate::VideoCardRowData {
+                card_0: card0.clone(),
+                card_1: card1.clone(),
+                card_2: card2.clone(),
+                card_3: Default::default(),
+                has_0: true,
+                has_1: true,
+                has_2: true,
+                has_3: false,
+            };
+            ui.set_channel_items(std::rc::Rc::new(slint::VecModel::from(vec![card0, card1, card2])).into());
+            ui.set_channel_rows(std::rc::Rc::new(slint::VecModel::from(vec![row])).into());
+        });
+        sleep(Duration::from_millis(800));
+        let _ = fs::write("/tmp/ah_demo_step_3", "step 3 channels");
+
+        // Step 4: Empty Player state
+        sleep(Duration::from_millis(1500));
+        let _ = weak.upgrade_in_event_loop(|ui| {
+            ui.set_playback_ended_visible(false);
+            ui.set_player_media_loaded(false);
+            ui.set_playing(false);
+            ui.set_player_controls_visible(false);
+            ui.set_active_screen("player".into());
+        });
+        sleep(Duration::from_millis(800));
+        let _ = fs::write("/tmp/ah_demo_step_4", "step 4 player empty");
+
+        // Step 5: Player playing with visible controls
+        sleep(Duration::from_millis(1500));
+        let _ = weak.upgrade_in_event_loop(|ui| {
+            ui.set_playback_ended_visible(false);
+            ui.set_player_error_message("".into());
+            ui.invoke_load_sample();
+            ui.set_player_controls_visible(true);
+        });
+        sleep(Duration::from_millis(1200));
+        let _ = fs::write("/tmp/ah_demo_step_5", "step 5 player controls");
+
+        // Step 6: Player playing with hidden controls
+        sleep(Duration::from_millis(800));
+        let _ = weak.upgrade_in_event_loop(|ui| {
+            ui.set_playback_ended_visible(false);
+            ui.set_player_controls_visible(false);
+        });
+        sleep(Duration::from_millis(800));
+        let _ = fs::write("/tmp/ah_demo_step_6", "step 6 player clean");
+
+        // Step 7: Settings screen
+        sleep(Duration::from_millis(1000));
+        let _ = weak.upgrade_in_event_loop(|ui| {
+            ui.invoke_toggle_play(); // pauses playback before EOF
+            ui.set_playback_ended_visible(false);
+            ui.set_active_screen("settings".into());
+        });
+        sleep(Duration::from_millis(800));
+        let _ = fs::write("/tmp/ah_demo_step_7", "step 7 settings");
+
+        // Step 8: Done
+        sleep(Duration::from_millis(1500));
+        let _ = fs::write("/tmp/ah_demo_step_done", "done");
+        sleep(Duration::from_millis(500));
+        std::process::exit(0);
+    });
 }
 
 fn set_window_icon(ui: &MainWindow) {

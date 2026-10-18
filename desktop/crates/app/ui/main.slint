@@ -457,6 +457,224 @@ component SeekBar inherits Rectangle {
         }
     }
 }
+
+component HomeFeaturedHero inherits Rectangle {
+    in property <VideoCardData> item;
+    in property <bool> is-resume: false;
+    in property <bool> has-item: false;
+    callback play(string);
+    callback open-detail(string);
+    callback surprise-me();
+    callback refresh();
+
+    height: 248px;
+    border-radius: HubTheme.dialog-radius;
+    background: HubTheme.surface-raised;
+    clip: true;
+
+    // Right-aligned backdrop artwork with cinematic fade
+    if root.has-item && root.item.has_thumbnail : Rectangle {
+        x: parent.width - self.width;
+        y: 0px;
+        width: min(parent.width * 0.62, 540px);
+        height: 100%;
+        clip: true;
+
+        Image {
+            source: root.item.thumbnail;
+            width: 100%;
+            height: 100%;
+            image-fit: cover;
+        }
+
+        // Gradient overlay to guarantee high text contrast on left
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            background: @linear-gradient(90deg, HubTheme.surface-raised 0%, #1C1E24EE 25%, #1C1E2470 65%, #1C1E2415 100%);
+        }
+    }
+
+    // Left content area
+    VerticalLayout {
+        padding-left: 28px;
+        padding-right: 28px;
+        padding-top: 22px;
+        padding-bottom: 22px;
+        spacing: 10px;
+        alignment: start;
+        width: min(parent.width - 56px, 640px);
+
+        // Eyebrow row with discrete action icons
+        HorizontalLayout {
+            height: 28px;
+            spacing: 8px;
+            alignment: start;
+
+            Rectangle {
+                height: 22px;
+                border-radius: 4px;
+                background: root.is-resume ? #C2185B28 : #272A32;
+                border-width: 1px;
+                border-color: root.is-resume ? HubTheme.accent-outline : HubTheme.separator;
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    alignment: center;
+                    Text {
+                        text: root.is-resume ? "CONTINUE WATCHING" : "FEATURED";
+                        color: root.is-resume ? HubTheme.accent-text : HubTheme.text-secondary;
+                        font-size: 10px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            if root.item.studio != "" : Text {
+                text: "· " + root.item.studio;
+                color: HubTheme.text-muted;
+                font-size: 12px;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+
+            Rectangle { horizontal-stretch: 1; }
+
+            // Secondary action: Surprise Me
+            TvSecondaryButton {
+                text: "Surprise Me";
+                custom-height: 28px;
+                clicked => { root.surprise-me(); }
+            }
+
+            // Discrete Refresh icon with tooltip
+            Rectangle {
+                width: 28px;
+                height: 28px;
+                border-radius: 6px;
+                background: refresh-touch.has-hover ? HubTheme.surface-hover : transparent;
+                border-width: refresh-focus.has-focus ? 1px : 0px;
+                border-color: HubTheme.focus-ring;
+                forward-focus: refresh-focus;
+                accessible-role: button;
+                accessible-label: "Refresh library";
+                accessible-action-default => { root.refresh(); }
+
+                Image {
+                    source: @image-url("../../../assets/icons/refresh.svg");
+                    width: 15px;
+                    height: 15px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    image-fit: contain;
+                }
+
+                refresh-touch := TouchArea {
+                    clicked => { root.refresh(); }
+                }
+                refresh-focus := FocusScope {
+                    width: 0px;
+                    height: 0px;
+                    key-pressed(event) => {
+                        if (event.text == Key.Space || event.text == Key.Return) {
+                            root.refresh();
+                            return accept;
+                        }
+                        reject
+                    }
+                }
+            }
+        }
+
+        // Title: 32px font, bold, left-aligned, max 2 lines with elide
+        Text {
+            text: root.item.title;
+            color: HubTheme.text-primary;
+            font-size: HubTheme.hero-title-size;
+            font-weight: 700;
+            horizontal-alignment: left;
+            vertical-alignment: top;
+            wrap: word-wrap;
+            overflow: elide;
+            width: 100%;
+            height: 68px;
+        }
+
+        // Metadata row: duration, year, genre, remaining time
+        HorizontalLayout {
+            height: 18px;
+            spacing: 8px;
+            alignment: start;
+
+            if root.item.duration != "" : Text {
+                text: root.item.duration;
+                color: HubTheme.text-secondary;
+                font-size: HubTheme.body-size;
+                font-weight: 500;
+                vertical-alignment: center;
+            }
+
+            if root.item.year != "" : Text {
+                text: "· " + root.item.year;
+                color: HubTheme.text-secondary;
+                font-size: HubTheme.body-size;
+                vertical-alignment: center;
+            }
+
+            if root.item.genre != "" : Text {
+                text: "· " + root.item.genre;
+                color: HubTheme.text-muted;
+                font-size: HubTheme.body-size;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+
+            if root.is-resume && root.item.progress > 0.0 : Text {
+                text: "· " + round(root.item.progress * 100.0) + "% completed";
+                color: HubTheme.accent-text;
+                font-size: HubTheme.metadata-size;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+        }
+
+        // Progress bar for resume item
+        if root.is-resume && root.item.progress > 0.0 : Rectangle {
+            width: 220px;
+            height: 4px;
+            border-radius: 2px;
+            background: #30333C;
+            Rectangle {
+                x: 0px;
+                y: 0px;
+                width: parent.width * max(0.0, min(1.0, root.item.progress));
+                height: 100%;
+                border-radius: 2px;
+                background: HubTheme.accent;
+            }
+        }
+
+        // Action buttons row
+        HorizontalLayout {
+            spacing: 12px;
+            alignment: start;
+
+            TvPrimaryButton {
+                text: root.is-resume ? "Resume" : "Play";
+                custom-height: 40px;
+                clicked => { root.play(root.item.id); }
+            }
+
+            TvSecondaryButton {
+                text: "Details";
+                custom-height: 40px;
+                clicked => { root.open-detail(root.item.id); }
+            }
+        }
+    }
+}
+
 export component MainWindow inherits Window {
     title: "Adult Hub Desktop";
     icon: @image-url("../../../assets/adult-hub-desktop.svg");
@@ -471,6 +689,8 @@ export component MainWindow inherits Window {
     // View state: "browse", "player", "settings" / "login"
     in-out property <string> active-screen: "home";
     in-out property <string> settings-section: "connection";
+    in-out property <bool> is-fullscreen: false;
+    in-out property <bool> nav-collapsed: false;
 
     // Player state
     in-out property <image> video-image;
@@ -863,14 +1083,15 @@ export component MainWindow inherits Window {
 
         // Persistent desktop navigation rail.
         Rectangle {
-            width: root.active-screen == "player" && root.player-media-loaded && root.playing && !root.player-controls-visible
+            width: root.is-fullscreen || (root.active-screen == "player" && root.player-media-loaded) || root.nav-collapsed
                 ? 0px
                 : (root.compact-layout ? 72px : 216px);
             vertical-stretch: 1;
             background: HubTheme.navigation-background;
-            opacity: root.active-screen == "player" && root.player-media-loaded && root.playing && !root.player-controls-visible ? 0 : 1;
+            opacity: root.is-fullscreen || (root.active-screen == "player" && root.player-media-loaded) || root.nav-collapsed ? 0 : 1;
             clip: true;
-            animate opacity { duration: 180ms; }
+            animate width { duration: 150ms; }
+            animate opacity { duration: 150ms; }
             Rectangle {
                 x: parent.width - 1px;
                 width: 1px;
@@ -1034,65 +1255,46 @@ export component MainWindow inherits Window {
                     padding-bottom: HubTheme.content-padding;
                     spacing: 16px;
 
-                    if root.is-logged-in : Rectangle {
-                        height: 68px;
-                        background: transparent;
-                        border-width: 0px;
+                    if root.is-logged-in && (root.home-resume-items.length > 0 || root.home-latest-items.length > 0) : HomeFeaturedHero {
+                        item: root.home-resume-items.length > 0 ? root.home-resume-items[0] : root.home-latest-items[0];
+                        is-resume: root.home-resume-items.length > 0;
+                        has-item: true;
+                        play(id) => { root.play-item(id); }
+                        open-detail(id) => { root.open-item-detail(id); }
+                        surprise-me => { root.play-random(); }
+                        refresh => { root.refresh-home(); }
+                    }
 
-                        Rectangle {
-                        x: 0px;
-                            width: 3px;
-                            height: parent.height - 24px;
-                            y: 12px;
-                            border-radius: 2px;
-                            background: HubTheme.accent;
-                        }
+                    if root.is-logged-in && root.home-resume-items.length == 0 && root.home-latest-items.length == 0 && !root.home-is-loading : Rectangle {
+                        height: 72px;
+                        border-radius: HubTheme.dialog-radius;
+                        background: HubTheme.surface-raised;
+                        border-width: 1px;
+                        border-color: HubTheme.separator;
 
                         HorizontalLayout {
-                            width: 100%;
                             padding-left: 20px;
-                            padding-right: 18px;
+                            padding-right: 20px;
                             spacing: 12px;
-                            alignment: start;
+                            alignment: center;
 
-                            VerticalLayout {
+                            Text {
+                                text: root.current-library != "" ? root.current-library : "Media Library";
+                                color: HubTheme.text-primary;
+                                font-size: HubTheme.section-title-size;
+                                font-weight: 600;
+                                vertical-alignment: center;
                                 horizontal-stretch: 1;
-                                spacing: 2px;
-
-                                Text {
-                                    text: root.current-library == "" ? "Your library" : root.current-library;
-                                    color: HubTheme.text-primary;
-                                    font-size: HubTheme.title-size;
-                                    font-weight: 600;
-                                }
-
-                                Text {
-                                    text: "Continue watching and recently added media";
-                                    color: HubTheme.text-secondary;
-                                    font-size: 14px;
-                                }
-
                             }
 
-                            VerticalLayout {
-                                height: 100%;
-                                preferred-width: 220px;
-                                alignment: center;
+                            TvSecondaryButton {
+                                text: "Surprise Me";
+                                clicked => { root.play-random(); }
+                            }
 
-                                HorizontalLayout {
-                                    spacing: 12px;
-                                    alignment: end;
-
-                                    TvSecondaryButton {
-                                        text: "Surprise Me";
-                                        clicked => { root.play-random(); }
-                                    }
-
-                                    TvSecondaryButton {
-                                        text: "Refresh";
-                                        clicked => { root.refresh-home(); }
-                                    }
-                                }
+                            TvSecondaryButton {
+                                text: "Refresh";
+                                clicked => { root.refresh-home(); }
                             }
                         }
                     }
@@ -1309,7 +1511,9 @@ export component MainWindow inherits Window {
                             : (root.catalog-category-drilldown
                                 ? root.catalog-genre-query
                                 : root.active-category);
-                        metadata: root.catalog-items.length + (root.is-catalog-search-results ? " results" : " items");
+                        metadata: (root.is-loading-catalog || (root.is-catalog-search-results && root.search-error-message != ""))
+                            ? ""
+                            : (root.catalog-items.length + (root.is-catalog-search-results ? " results" : " items"));
                     }
 
                     if root.catalog-category-drilldown : TvSecondaryButton {
@@ -2047,7 +2251,6 @@ export component MainWindow inherits Window {
                     padding-top: HubTheme.content-padding;
                     padding-bottom: HubTheme.content-padding;
                     spacing: 0px;
-                    alignment: start;
 
                     if root.compact-layout : VerticalLayout {
                         spacing: 6px;
@@ -2072,25 +2275,45 @@ export component MainWindow inherits Window {
                         Rectangle { height: 12px; }
                     }
 
-                    // Channel Title
-                    Text {
-                        text: root.active-channel-category;
-                        color: HubTheme.text-primary;
-                        font-size: HubTheme.title-size;
-                        font-weight: 600;
+                    // Channel Header: Title + Count Badge
+                    HorizontalLayout {
+                        height: 36px;
+                        spacing: HubTheme.space-3;
+                        Text {
+                            text: root.active-channel-category;
+                            color: HubTheme.text-primary;
+                            font-size: HubTheme.title-size;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                        if !root.channel-loading && root.channel-error-message == "" && root.channel-error-kind == "" : Rectangle {
+                            height: 24px;
+                            border-radius: HubTheme.control-radius;
+                            background: HubTheme.surface-raised;
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                Text {
+                                    text: root.channel-items.length + (root.channel-items.length == 1 ? " video" : " videos");
+                                    color: HubTheme.text-secondary;
+                                    font-size: HubTheme.metadata-size;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
                     }
 
-                    // Description with 8px spacing from title
-                    Rectangle { height: 8px; }
+                    Rectangle { height: 4px; }
 
                     Text {
-                        text: "Telegram channel media · " + root.channel-items.length + " loaded";
+                        text: "Telegram channel media";
                         color: HubTheme.text-secondary;
-                        font-size: HubTheme.body-size;
+                        font-size: HubTheme.metadata-size;
                     }
 
-                    // Toolbar with 20px spacing from description
-                    Rectangle { height: 20px; }
+                    // Toolbar with 16px spacing from description
+                    Rectangle { height: 16px; }
 
                     HorizontalLayout {
                         spacing: 8px;
@@ -2205,46 +2428,48 @@ export component MainWindow inherits Window {
                             padding: 18px;
                             spacing: 10px;
                             Text {
-                            text: root.channel-error-kind == "categories"
-                                ? "Could not load channel categories"
-                                : (root.channel-error-kind == "access-denied"
-                                ? "Access denied"
-                                : (root.channel-error-kind == "offline"
-                                    ? "No connection"
-                                    : (root.channel-error-kind == "connection"
-                                        ? "Connect a Resolver"
-                                        : (root.channel-search-query != "" && root.channel-error-message == ""
-                                    ? "No results found"
-                                    : (root.channel-error-message != ""
-                                        ? "Could not load channel videos"
-                                : (root.resolver-url-input == "" && !root.is-logged-in
-                                    ? "Configure a Resolver to browse channels"
-                                    : "No channel videos available"))))));
-                            color: HubTheme.text-primary;
-                            font-size: 22px;
-                            font-weight: 700;
-                            horizontal-alignment: left;
-                        }
-                            Text {
-                            text: root.channel-error-kind == "categories"
-                                ? "Channel categories could not be loaded. Check the Resolver connection and retry."
-                                : (root.channel-error-kind == "access-denied"
-                                ? "The Resolver denied access. Check the account and permissions configured for this channel."
-                                : (root.channel-error-kind == "offline"
-                                    ? "Check your network and Resolver availability, then try again."
-                                    : (root.channel-error-kind == "connection"
-                                        ? "Add or verify the Resolver URL in connection settings."
+                                text: root.channel-error-kind == "categories"
+                                    ? "Could not load channel categories"
+                                    : (root.channel-error-kind == "access-denied"
+                                    ? "Access denied"
+                                    : (root.channel-error-kind == "offline"
+                                        ? "No connection"
+                                        : (root.channel-error-kind == "connection"
+                                            ? "Connect a Resolver"
+                                            : (root.channel-search-query != "" && root.channel-error-message == ""
+                                        ? "No matching videos"
                                         : (root.channel-error-message != ""
-                                    ? "The channel data could not be loaded. Check the connection and try again."
-                                : (root.resolver-url-input == "" && !root.is-logged-in
-                                    ? "Add a Resolver URL in Settings to load channel categories and videos."
-                                    : "Try another category or check the Resolver connection in Settings.")))));
-                            color: root.channel-error-kind == "access-denied" ? HubTheme.text-secondary : (root.channel-error-message != "" ? HubTheme.error : HubTheme.text-secondary);
-                            font-size: 14px;
-                            horizontal-alignment: left;
-                            wrap: word-wrap;
-                            horizontal-stretch: 1;
-                        }
+                                            ? "Could not load channel videos"
+                                    : (root.resolver-url-input == "" && !root.is-logged-in
+                                        ? "Configure a Resolver to browse channels"
+                                        : "Channel is empty"))))));
+                                color: HubTheme.text-primary;
+                                font-size: 22px;
+                                font-weight: 700;
+                                horizontal-alignment: left;
+                            }
+                            Text {
+                                text: root.channel-error-kind == "categories"
+                                    ? "Channel categories could not be loaded. Check the Resolver connection and retry."
+                                    : (root.channel-error-kind == "access-denied"
+                                    ? "The Resolver denied access to this channel. Verify your account permissions or channel subscription."
+                                    : (root.channel-error-kind == "offline"
+                                        ? "Check your network and Resolver availability, then try again."
+                                        : (root.channel-error-kind == "connection"
+                                            ? "Add or verify the Resolver URL in connection settings."
+                                            : (root.channel-error-message != ""
+                                        ? "The channel data could not be loaded. Check the connection and try again."
+                                    : (root.resolver-url-input == "" && !root.is-logged-in
+                                        ? "Add a Resolver URL in Settings to load channel categories and videos."
+                                        : (root.channel-search-query != ""
+                                            ? "No videos match '" + root.channel-search-query + "'. Try a different search query."
+                                            : "This channel does not contain any videos yet."))))));
+                                color: root.channel-error-kind == "access-denied" ? HubTheme.text-secondary : (root.channel-error-message != "" ? HubTheme.error : HubTheme.text-secondary);
+                                font-size: 14px;
+                                horizontal-alignment: left;
+                                wrap: word-wrap;
+                                horizontal-stretch: 1;
+                            }
 
                             if root.channel-error-details != "" : VerticalLayout {
                                 spacing: 6px;
@@ -2817,280 +3042,372 @@ export component MainWindow inherits Window {
                     y: parent.height - self.height;
                     width: 100%;
                     visible: root.player-media-loaded;
-                    height: root.player-controls-visible || !root.playing || !root.player-media-loaded ? (root.player-more-controls-visible ? (root.player-advanced-controls-visible ? 236px : 190px) : 108px) : 0px;
+                    height: root.player-controls-visible || !root.playing || !root.player-media-loaded
+                        ? (root.player-more-controls-visible ? 180px : 96px)
+                        : 0px;
                     opacity: root.player-controls-visible || !root.playing || !root.player-media-loaded ? 1 : 0;
-                    background: @linear-gradient(180deg, #0B0D1200 0%, #0B0D129c 32%, #0B0D12e8 100%);
+                    background: @linear-gradient(180deg, #00000000 0%, #10111499 25%, #101114FA 100%);
                     clip: true;
                     animate height { duration: 180ms; }
                     animate opacity { duration: 180ms; }
 
-                    Rectangle {
-                        y: 0px;
-                        height: 1px;
-                        width: 100%;
-                        background: @linear-gradient(90deg, #F3F4F600 0%, #F3F4F61c 18%, #BE185D66 50%, #F3F4F61c 82%, #F3F4F600 100%);
-                    }
-
                     VerticalLayout {
-                        width: root.width;
-                        padding-left: 30px;
-                        padding-right: 30px;
-                        padding-top: 12px;
-                        padding-bottom: 10px;
+                        width: 100%;
+                        padding-left: 24px;
+                        padding-right: 24px;
+                        padding-top: 8px;
+                        padding-bottom: 12px;
                         spacing: 8px;
 
-                        // Playback timeline
+                        // Row 1: Full-width Timeline
                         HorizontalLayout {
                             width: 100%;
-                            spacing: 12px;
+                            height: 16px;
                             alignment: center;
-
-                            Text {
-                                text: root.player-media-loaded ? root.position-text : "—:—";
-                                color: root.player-media-loaded ? #dedbe4 : #595761;
-                                font-size: 12px;
-                                font-weight: 700;
-                                width: 62px;
-                                horizontal-alignment: right;
-                                vertical-alignment: center;
-                            }
 
                             SeekBar {
                                 enabled: root.player-media-loaded;
                                 horizontal-stretch: 1;
-                                width: max(160px, root.width - 250px);
                                 value: root.position;
                                 maximum: max(0.001, root.duration);
                                 activity => { root.player-controls-visible = true; player-controls-hide-timer.restart(); }
                                 seek(value) => { root.seek-to(value); }
                             }
-
-                            Text {
-                                text: root.player-media-loaded ? root.duration-text : "—:—";
-                                color: root.player-media-loaded ? #8a8792 : #595761;
-                                font-size: 12px;
-                                font-weight: 600;
-                                width: 62px;
-                                vertical-alignment: center;
-                            }
                         }
 
-                        // Essential controls stay visible; advanced tuning lives in More.
+                        // Row 2: Playback Actions & Tools
                         HorizontalLayout {
-                            spacing: 9px;
+                            height: 44px;
+                            spacing: 12px;
                             alignment: center;
 
-                            TvSecondaryButton {
-                                text: "−" + root.seek-step-sec + "s";
-                                glass: true;
-                                activity => { root.player-controls-visible = true; player-controls-hide-timer.restart(); }
-                                enabled: root.player-media-loaded;
-                                custom-height: 38px;
-                                clicked => { root.seek-with-acceleration(-1); }
-                            }
+                            // Left: Play/Pause, -10s, +10s, Time
+                            HorizontalLayout {
+                                spacing: 8px;
+                                alignment: start;
 
-                            TvPrimaryButton {
-                                text: root.playing ? "Pause" : "Play";
-                                glass: true;
-                                activity => { root.player-controls-visible = true; player-controls-hide-timer.restart(); }
-                                enabled: root.player-media-loaded;
-                                custom-height: 44px;
-                                clicked => { root.toggle-play(); }
-                            }
+                                // Prominent circular Play / Pause button
+                                Rectangle {
+                                    width: 44px;
+                                    height: 44px;
+                                    border-radius: 22px;
+                                    background: play-touch.pressed ? HubTheme.accent-pressed : (play-touch.has-hover ? HubTheme.accent-hover : HubTheme.accent);
+                                    border-width: play-focus.has-focus ? 2px : 0px;
+                                    border-color: HubTheme.focus-ring;
+                                    forward-focus: play-focus;
+                                    accessible-role: button;
+                                    accessible-label: root.playing ? "Pause" : "Play";
+                                    accessible-action-default => { root.toggle-play(); }
 
-                            TvSecondaryButton {
-                                text: "+" + root.seek-step-sec + "s";
-                                glass: true;
-                                activity => { root.player-controls-visible = true; player-controls-hide-timer.restart(); }
-                                enabled: root.player-media-loaded;
-                                custom-height: 38px;
-                                clicked => { root.seek-with-acceleration(1); }
-                            }
-
-                            Rectangle { width: 1px; height: 24px; background: #F3F4F620; }
-
-                            SeekBar {
-                                width: 112px;
-                                value: root.volume;
-                                maximum: 130;
-                                activity => { root.player-controls-visible = true; player-controls-hide-timer.restart(); }
-                                seek(value) => { root.set-volume(value); }
-                            }
-
-                            TvSecondaryButton {
-                                text: root.muted ? "Unmute" : "Mute";
-                                glass: true;
-                                activity => { root.player-controls-visible = true; player-controls-hide-timer.restart(); }
-                                active: root.muted;
-                                custom-height: 36px;
-                                clicked => { root.toggle-mute(); }
-                            }
-
-                            TvSecondaryButton {
-                                text: root.player-more-controls-visible ? "Less" : "More";
-                                glass: true;
-                                activity => { root.player-controls-visible = true; player-controls-hide-timer.restart(); }
-                                custom-height: 36px;
-                                clicked => {
-                                    if (root.player-more-controls-visible) {
-                                        root.player-advanced-controls-visible = false;
+                                    Image {
+                                        source: root.playing ? @image-url("../../../assets/icons/pause.svg") : @image-url("../../../assets/icons/play.svg");
+                                        width: 20px;
+                                        height: 20px;
+                                        x: (parent.width - self.width) / 2 + (root.playing ? 0px : 1px);
+                                        y: (parent.height - self.height) / 2;
+                                        image-fit: contain;
                                     }
-                                    root.player-more-controls-visible = !root.player-more-controls-visible;
-                                    root.player-controls-visible = true;
-                                    player-controls-hide-timer.restart();
+
+                                    play-touch := TouchArea {
+                                        pointer-event(event) => {
+                                            if (event.kind == PointerEventKind.move) {
+                                                root.player-controls-visible = true;
+                                                player-controls-hide-timer.restart();
+                                            }
+                                        }
+                                        clicked => {
+                                            root.player-controls-visible = true;
+                                            player-controls-hide-timer.restart();
+                                            root.toggle-play();
+                                        }
+                                    }
+
+                                    play-focus := FocusScope {
+                                        width: 0px;
+                                        height: 0px;
+                                        key-pressed(event) => {
+                                            if (event.text == Key.Space || event.text == Key.Return) {
+                                                root.player-controls-visible = true;
+                                                player-controls-hide-timer.restart();
+                                                root.toggle-play();
+                                                return accept;
+                                            }
+                                            reject
+                                        }
+                                    }
+                                }
+
+                                TvSecondaryButton {
+                                    text: "−" + root.seek-step-sec + "s";
+                                    glass: true;
+                                    custom-height: 38px;
+                                    activity => { root.player-controls-visible = true; player-controls-hide-timer.restart(); }
+                                    clicked => { root.seek-with-acceleration(-1); }
+                                }
+
+                                TvSecondaryButton {
+                                    text: "+" + root.seek-step-sec + "s";
+                                    glass: true;
+                                    custom-height: 38px;
+                                    activity => { root.player-controls-visible = true; player-controls-hide-timer.restart(); }
+                                    clicked => { root.seek-with-acceleration(1); }
+                                }
+
+                                HorizontalLayout {
+                                    padding-left: 6px;
+                                    padding-right: 6px;
+                                    alignment: center;
+                                    Text {
+                                        text: (root.player-media-loaded ? root.position-text : "0:00") + " / " + (root.player-media-loaded ? root.duration-text : "0:00");
+                                        color: HubTheme.text-primary;
+                                        font-size: 13px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+
+                            // Center: Volume with mute icon and slider
+                            HorizontalLayout {
+                                spacing: 6px;
+                                alignment: center;
+
+                                Rectangle {
+                                    width: 36px;
+                                    height: 36px;
+                                    border-radius: 6px;
+                                    background: mute-touch.has-hover ? #F5F6F818 : transparent;
+                                    border-width: mute-focus.has-focus ? 1px : 0px;
+                                    border-color: HubTheme.focus-ring;
+                                    forward-focus: mute-focus;
+                                    accessible-role: button;
+                                    accessible-label: root.muted ? "Unmute" : "Mute";
+                                    accessible-action-default => { root.toggle-mute(); }
+
+                                    Image {
+                                        source: root.muted ? @image-url("../../../assets/icons/volume-mute.svg") : @image-url("../../../assets/icons/volume.svg");
+                                        width: 18px;
+                                        height: 18px;
+                                        x: (parent.width - self.width) / 2;
+                                        y: (parent.height - self.height) / 2;
+                                        image-fit: contain;
+                                    }
+
+                                    mute-touch := TouchArea {
+                                        pointer-event(event) => {
+                                            if (event.kind == PointerEventKind.move) {
+                                                root.player-controls-visible = true;
+                                                player-controls-hide-timer.restart();
+                                            }
+                                        }
+                                        clicked => {
+                                            root.player-controls-visible = true;
+                                            player-controls-hide-timer.restart();
+                                            root.toggle-mute();
+                                        }
+                                    }
+
+                                    mute-focus := FocusScope {
+                                        width: 0px;
+                                        height: 0px;
+                                        key-pressed(event) => {
+                                            if (event.text == Key.Space || event.text == Key.Return) {
+                                                root.toggle-mute();
+                                                return accept;
+                                            }
+                                            reject
+                                        }
+                                    }
+                                }
+
+                                SeekBar {
+                                    width: 96px;
+                                    value: root.volume;
+                                    maximum: 130;
+                                    activity => { root.player-controls-visible = true; player-controls-hide-timer.restart(); }
+                                    seek(value) => { root.set-volume(value); }
+                                }
+                            }
+
+                            Rectangle { horizontal-stretch: 1; }
+
+                            // Right: Speed, Options, Fullscreen
+                            HorizontalLayout {
+                                spacing: 8px;
+                                alignment: end;
+
+                                TvSecondaryButton {
+                                    text: root.speed-label;
+                                    glass: true;
+                                    custom-height: 36px;
+                                    activity => { root.player-controls-visible = true; player-controls-hide-timer.restart(); }
+                                    clicked => { root.cycle-speed(); }
+                                }
+
+                                TvSecondaryButton {
+                                    text: root.player-more-controls-visible ? "Close options" : "Options";
+                                    glass: true;
+                                    active: root.player-more-controls-visible;
+                                    custom-height: 36px;
+                                    activity => { root.player-controls-visible = true; player-controls-hide-timer.restart(); }
+                                    clicked => {
+                                        root.player-more-controls-visible = !root.player-more-controls-visible;
+                                        root.player-controls-visible = true;
+                                        player-controls-hide-timer.restart();
+                                    }
+                                }
+
+                                // Fullscreen icon button
+                                Rectangle {
+                                    width: 38px;
+                                    height: 38px;
+                                    border-radius: 6px;
+                                    background: fs-touch.has-hover ? #F5F6F818 : transparent;
+                                    border-width: fs-focus.has-focus ? 1px : 0px;
+                                    border-color: HubTheme.focus-ring;
+                                    forward-focus: fs-focus;
+                                    accessible-role: button;
+                                    accessible-label: "Toggle fullscreen";
+                                    accessible-action-default => { root.toggle-fullscreen(); }
+
+                                    Image {
+                                        source: @image-url("../../../assets/icons/fullscreen.svg");
+                                        width: 18px;
+                                        height: 18px;
+                                        x: (parent.width - self.width) / 2;
+                                        y: (parent.height - self.height) / 2;
+                                        image-fit: contain;
+                                    }
+
+                                    fs-touch := TouchArea {
+                                        pointer-event(event) => {
+                                            if (event.kind == PointerEventKind.move) {
+                                                root.player-controls-visible = true;
+                                                player-controls-hide-timer.restart();
+                                            }
+                                        }
+                                        clicked => {
+                                            root.player-controls-visible = true;
+                                            player-controls-hide-timer.restart();
+                                            root.toggle-fullscreen();
+                                        }
+                                    }
+
+                                    fs-focus := FocusScope {
+                                        width: 0px;
+                                        height: 0px;
+                                        key-pressed(event) => {
+                                            if (event.text == Key.Space || event.text == Key.Return) {
+                                                root.toggle-fullscreen();
+                                                return accept;
+                                            }
+                                            reject
+                                        }
+                                    }
                                 }
                             }
                         }
 
-                        // Common playback options are available after expanding More.
+                        // Expanded Options Tray
                         if root.player-more-controls-visible : HorizontalLayout {
-                            spacing: 9px;
+                            spacing: 8px;
                             alignment: center;
+                            height: 36px;
 
                             TvSecondaryButton {
-                                text: root.autoplay-active ? "Autoplay on" : "Autoplay";
+                                text: root.autoplay-active ? "Autoplay: On" : "Autoplay: Off";
                                 glass: true;
-                                activity => { root.player-controls-visible = true; player-controls-hide-timer.restart(); }
                                 active: root.autoplay-active;
-                                custom-height: 40px;
+                                custom-height: 34px;
+                                activity => { root.player-controls-visible = true; player-controls-hide-timer.restart(); }
                                 clicked => { root.toggle-autoplay(); }
                             }
 
                             TvSecondaryButton {
                                 text: root.player-is-favorite ? "Favorite" : "Add to favorites";
                                 glass: true;
-                                activity => { root.player-controls-visible = true; player-controls-hide-timer.restart(); }
                                 active: root.player-is-favorite;
                                 enabled: root.player-favorite-enabled;
-                                custom-height: 40px;
+                                custom-height: 34px;
+                                activity => { root.player-controls-visible = true; player-controls-hide-timer.restart(); }
                                 clicked => { root.toggle-player-favorite(); }
                             }
 
                             TvSecondaryButton {
                                 text: root.aspect-label;
                                 glass: true;
+                                custom-height: 34px;
                                 activity => { root.player-controls-visible = true; player-controls-hide-timer.restart(); }
-                                custom-height: 40px;
                                 clicked => { root.cycle-aspect(); }
-                            }
-
-                            TvSecondaryButton {
-                                text: "Fullscreen";
-                                glass: true;
-                                activity => { root.player-controls-visible = true; player-controls-hide-timer.restart(); }
-                                custom-height: 40px;
-                                clicked => { root.toggle-fullscreen(); }
-                            }
-
-                            TvSecondaryButton {
-                                text: root.player-advanced-controls-visible ? "Hide playback options" : "Playback options";
-                                glass: true;
-                                active: root.player-advanced-controls-visible;
-                                activity => { root.player-controls-visible = true; player-controls-hide-timer.restart(); }
-                                custom-height: 40px;
-                                clicked => {
-                                    root.player-advanced-controls-visible = !root.player-advanced-controls-visible;
-                                    root.player-controls-visible = true;
-                                    player-controls-hide-timer.restart();
-                                }
-                            }
-                        }
-
-                        if root.player-more-controls-visible && root.player-advanced-controls-visible : HorizontalLayout {
-                            spacing: 9px;
-                            alignment: center;
-
-                            TvSecondaryButton {
-                                text: root.speed-label;
-                                glass: true;
-                                activity => { root.player-controls-visible = true; player-controls-hide-timer.restart(); }
-                                active: root.speed-label != "1.0x";
-                                custom-height: 40px;
-                                clicked => { root.cycle-speed(); }
                             }
 
                             TvSecondaryButton {
                                 text: root.buffer-profile-label;
                                 glass: true;
+                                custom-height: 34px;
                                 activity => { root.player-controls-visible = true; player-controls-hide-timer.restart(); }
-                                custom-height: 40px;
                                 clicked => { root.cycle-buffer-profile(); }
                             }
 
                             TvSecondaryButton {
-                                text: root.hwdec-active ? "Hardware decode" : "Software decode";
+                                text: root.hwdec-active ? "HW Decode" : "SW Decode";
                                 glass: true;
-                                activity => { root.player-controls-visible = true; player-controls-hide-timer.restart(); }
                                 active: root.hwdec-active;
-                                custom-height: 40px;
+                                custom-height: 34px;
+                                activity => { root.player-controls-visible = true; player-controls-hide-timer.restart(); }
                                 clicked => { root.toggle-hwdec(); }
                             }
 
                             TvSecondaryButton {
                                 text: root.hud-visible ? "Hide stats" : "Stats";
                                 glass: true;
-                                activity => { root.player-controls-visible = true; player-controls-hide-timer.restart(); }
                                 active: root.hud-visible;
-                                enabled: root.player-media-loaded;
-                                custom-height: 40px;
+                                custom-height: 34px;
+                                activity => { root.player-controls-visible = true; player-controls-hide-timer.restart(); }
                                 clicked => { root.toggle-hud(); }
                             }
 
                             TvSecondaryButton {
                                 text: "Shuffle";
                                 glass: true;
+                                custom-height: 34px;
                                 activity => { root.player-controls-visible = true; player-controls-hide-timer.restart(); }
-                                custom-height: 40px;
                                 clicked => { root.play-random(); }
                             }
                         }
 
-                        // Direct URL / Path Load Input
+                        // Open Media Input (when Options are open)
                         if root.player-more-controls-visible : HorizontalLayout {
-                            width: 100%;
-                            spacing: 10px;
-                            alignment: start;
+                            spacing: 8px;
+                            alignment: center;
+                            height: 36px;
 
-                            Text {
-                                text: "OPEN MEDIA";
-                                color: #666671;
-                                font-size: 12px;
-                                font-weight: 700;
-                                vertical-alignment: center;
+                            DarkLineEdit {
+                                horizontal-stretch: 1;
+                                text: root.url-text;
+                                placeholder-text: "Direct media URL or local video file path…";
+                                edited(text) => { root.url-text = text; }
+                                accepted(text) => {
+                                    root.url-text = text;
+                                    root.load-url(text);
+                                }
                             }
 
                             TvSecondaryButton {
                                 text: "Browse…";
                                 glass: true;
+                                custom-height: 34px;
                                 activity => { root.player-controls-visible = true; player-controls-hide-timer.restart(); }
-                                custom-height: 40px;
-                                clicked => {
-                                    root.open-file();
-                                    keys.focus();
-                                }
-                            }
-
-                            DarkLineEdit {
-                                width: max(140px, root.width - 430px);
-                                text: root.url-text;
-                                placeholder-text: "Direct media URL or local video file path...";
-                                edited(text) => { root.url-text = text; }
-                                accepted(text) => {
-                                    root.url-text = text;
-                                    root.load-url(text);
-                                    keys.focus();
-                                }
+                                clicked => { root.open-file(); }
                             }
 
                             TvSecondaryButton {
                                 text: "Load";
                                 glass: true;
+                                enabled: root.url-text != "";
+                                custom-height: 34px;
                                 activity => { root.player-controls-visible = true; player-controls-hide-timer.restart(); }
-                                custom-height: 40px;
-                                clicked => {
-                                    root.load-url(root.url-text);
-                                    keys.focus();
-                                }
+                                clicked => { root.load-url(root.url-text); }
                             }
                         }
                     }

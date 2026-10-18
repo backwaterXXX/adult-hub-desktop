@@ -602,14 +602,107 @@ pub fn set_discovered_servers(ui: &MainWindow, items: Vec<DiscoveredServerItem>)
     ui.set_discovered_servers(model.into());
 }
 
+fn titlecase(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut capitalize_next = true;
+    for c in s.chars() {
+        if c.is_whitespace() {
+            capitalize_next = true;
+            result.push(c);
+        } else if capitalize_next {
+            result.extend(c.to_uppercase());
+            capitalize_next = false;
+        } else {
+            result.extend(c.to_lowercase());
+        }
+    }
+    result
+}
+
 pub(crate) fn display_title(item: &TvItem) -> String {
     let title = item.title.trim();
-    let looks_like_hash =
-        title.len() >= 24 && title.chars().all(|character| character.is_ascii_hexdigit());
-    if title.is_empty() || title == item.id || looks_like_hash || title.starts_with("telegram:") {
-        "Untitled video".into()
+    let is_hash = |s: &str| -> bool {
+        let clean = s.trim();
+        (clean.len() >= 24 && clean.chars().all(|c| c.is_ascii_hexdigit()))
+            || (clean.len() == 36 && clean.chars().filter(|&c| c == '-').count() == 4)
+    };
+
+    // 1. Poprawny tytuł
+    if !title.is_empty()
+        && title != item.id
+        && !is_hash(title)
+        && !title.starts_with("telegram:")
+        && !title.starts_with("direct:")
+        && !title.eq_ignore_ascii_case("untitled")
+        && !title.eq_ignore_ascii_case("untitled video")
+    {
+        if let Some(pos) = title.rfind('.') {
+            let ext = &title[pos + 1..];
+            if matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "mp4" | "mkv" | "avi" | "mov" | "webm" | "ts" | "m4v" | "wmv"
+            ) {
+                let stem = &title[..pos];
+                if !stem.is_empty() && !is_hash(stem) {
+                    return stem.replace(['_', '.'], " ").trim().to_string();
+                }
+            }
+        }
+        return title.to_string();
+    }
+
+    // 2. Czytelna nazwa pliku z item.id lub ścieżki
+    let source_id = item.id.strip_prefix("direct:").unwrap_or(&item.id);
+    if let Some(pos) = source_id.rfind('.') {
+        let ext = &source_id[pos + 1..];
+        if matches!(
+            ext.to_ascii_lowercase().as_str(),
+            "mp4" | "mkv" | "avi" | "mov" | "webm" | "ts" | "m4v" | "wmv"
+        ) {
+            let filename = source_id[..pos]
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(&source_id[..pos]);
+            if !filename.is_empty() && !is_hash(filename) {
+                return filename.replace(['_', '.'], " ").trim().to_string();
+            }
+        }
+    }
+
+    // 3. Źródło lub kanał wraz z dostępnym kontekstem
+    if item.is_telegram() || item.id.starts_with("telegram:") {
+        let parts: Vec<&str> = item.id.split(':').collect();
+        if parts.len() >= 3 {
+            let channel_raw = parts[1].replace(['_', '-'], " ");
+            let channel = titlecase(&channel_raw);
+            let msg_id = parts[2];
+            if !channel.is_empty() {
+                if let Some(studio) = item.studios.first().filter(|s| !s.trim().is_empty()) {
+                    return format!("{studio} #{msg_id}");
+                }
+                return format!("{channel} #{msg_id}");
+            }
+        }
+    }
+    if let Some(studio) = item.studios.first().filter(|s| !s.trim().is_empty()) {
+        if let Some(year) = item.year {
+            return format!("{studio} ({year})");
+        }
+        return format!("{studio} Video");
+    }
+
+    // 4. Neutralna nazwa z krótkim rozróżniającym oznaczeniem
+    let short_marker = if let Some(pos) = item.id.rfind(':') {
+        &item.id[pos + 1..]
+    } else if item.id.len() >= 6 {
+        &item.id[..6]
     } else {
-        title.into()
+        &item.id
+    };
+    if !short_marker.is_empty() && short_marker != "sample" {
+        format!("Video #{short_marker}")
+    } else {
+        "Video".to_string()
     }
 }
 
@@ -1141,7 +1234,19 @@ mod tests {
             title: "8b61a0c8267a2e346d96e68b07d94354".into(),
             ..Default::default()
         };
-        assert_eq!(display_title(&item), "Untitled video");
+        assert_eq!(display_title(&item), "Channel #123");
+        let hash_only = TvItem {
+            id: "8b61a0c8267a2e346d96e68b07d94354".into(),
+            title: "8b61a0c8267a2e346d96e68b07d94354".into(),
+            ..Default::default()
+        };
+        assert_eq!(display_title(&hash_only), "Video #8b61a0");
+        let filename_item = TvItem {
+            id: "sample.mp4".into(),
+            title: "my_summer_video.mp4".into(),
+            ..Default::default()
+        };
+        assert_eq!(display_title(&filename_item), "my summer video");
         let named = TvItem {
             title: "A named film".into(),
             ..item

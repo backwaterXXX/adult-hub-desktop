@@ -5,6 +5,7 @@ use std::path::PathBuf;
 pub struct Options {
     pub url: Option<String>,
     pub headers: Vec<String>,
+    pub demo_capture: bool,
 }
 
 impl Options {
@@ -13,6 +14,9 @@ impl Options {
         let mut args = args.into_iter();
         while let Some(argument) = args.next() {
             match argument.as_str() {
+                "--demo-capture" => {
+                    options.demo_capture = true;
+                }
                 "--header" => {
                     let value = args
                         .next()
@@ -69,6 +73,10 @@ pub fn resolve_sample_media() -> String {
     let local = PathBuf::from("sample.mp4");
     if local.is_file() {
         return local.to_string_lossy().into_owned();
+    }
+    let repo_sample = PathBuf::from("desktop/sample.mp4");
+    if repo_sample.is_file() {
+        return repo_sample.to_string_lossy().into_owned();
     }
     // 3. Fallback to hardcoded remote public MP4 stream URL
     PUBLIC_SAMPLE_MP4_URL.to_string()

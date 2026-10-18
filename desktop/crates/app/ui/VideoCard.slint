@@ -81,6 +81,10 @@ export component VideoCard inherits Rectangle {
                 root.open-detail();
                 return accept;
             }
+            if ((event.text == "r" || event.text == "R") && root.item.thumbnail_state == "failed") {
+                root.thumbnail-retry(root.item);
+                return accept;
+            }
             reject
         }
     }
@@ -105,90 +109,69 @@ export component VideoCard inherits Rectangle {
             if !root.item.has-thumbnail : Rectangle {
                 width: 100%;
                 height: 100%;
-                background: root.item.thumbnail_state == "loading" ? HubTheme.surface-raised : HubTheme.surface;
+                background: HubTheme.surface-raised;
 
+                // Subtle, elegant media placeholder icon
+                Image {
+                    source: @image-url("../../../assets/icons/player.svg");
+                    width: 28px;
+                    height: 28px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    image-fit: contain;
+                    opacity: 0.35;
+                }
+
+                // Shimmer line during loading
                 if root.item.thumbnail_state == "loading" : Rectangle {
-                    x: 12px;
-                    y: parent.height - 14px;
-                    width: parent.width - 24px;
-                    height: 4px;
-                    border-radius: 2px;
+                    x: 0px;
+                    y: parent.height - 3px;
+                    width: 100%;
+                    height: 3px;
                     background: HubTheme.separator;
                     Rectangle {
-                        width: parent.width * 0.42;
+                        x: 0px;
+                        width: parent.width * 0.45;
                         height: 100%;
-                        border-radius: 2px;
-                        background: HubTheme.text-muted;
+                        background: HubTheme.accent;
                     }
                 }
 
-                Rectangle {
-                    x: (parent.width - 40px) / 2;
-                    y: root.item.thumbnail_state == "failed"
-                        ? max(8px, (parent.height - 96px) / 2)
-                        : (parent.height - 60px) / 2;
-                    width: 40px;
-                    height: 28px;
-                    border-radius: 6px;
-                    border-width: 1px;
-                    border-color: HubTheme.separator;
-                    background: HubTheme.surface-raised;
-
-                    Rectangle {
-                    x: 8px;
-                    y: 6px;
-                    width: 7px;
-                    height: 7px;
-                    border-radius: 4px;
-                    background: HubTheme.text-muted;
-                    }
-                    Rectangle {
-                        x: 7px;
-                    y: 18px;
-                    width: 24px;
-                        height: 1px;
-                        background: HubTheme.separator;
-                    }
-                }
-
-                Text {
-                    x: 8px;
-                    y: root.item.thumbnail_state == "failed"
-                        ? max(42px, (parent.height - 96px) / 2 + 32px)
-                        : (parent.height - 60px) / 2 + 34px;
-                    width: parent.width - 16px;
-                    height: 16px;
-                    text: root.item.thumbnail_state == "loading"
-                        ? "Loading artwork…"
-                        : (root.item.thumbnail_state == "failed" ? "Couldn’t load artwork" : "No artwork available");
-                    color: HubTheme.text-secondary;
-                    font-size: 12px;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                    overflow: elide;
-                }
-
+                // Discrete retry button on failure
                 if root.item.thumbnail_state == "failed" && root.retry-enabled : Rectangle {
-                    x: (parent.width - 52px) / 2;
-                    y: min(parent.height - 28px, max(60px, (parent.height - 96px) / 2 + 52px));
-                    width: 52px;
-                    height: 26px;
-                    border-radius: HubTheme.control-radius;
-                    background: retry-focus.has-focus ? HubTheme.surface-hover : transparent;
+                    x: parent.width - self.width - 8px;
+                    y: 8px;
+                    height: 24px;
+                    width: 68px;
+                    border-radius: 12px;
+                    background: retry-touch.has-hover ? HubTheme.surface-hover : #00000099;
                     border-width: retry-focus.has-focus ? 1px : 0px;
                     border-color: HubTheme.focus-ring;
                     forward-focus: retry-focus;
                     accessible-role: button;
-                    accessible-label: "Retry artwork download";
+                    accessible-label: "Retry artwork for " + root.item.title;
                     accessible-action-default => { root.thumbnail-retry(root.item); }
 
-                    Text {
-                        text: "Retry";
-                        color: HubTheme.text-primary;
-                        font-size: HubTheme.metadata-size;
-                        font-weight: 500;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        spacing: 4px;
+                        alignment: center;
+
+                        Image {
+                            source: @image-url("../../../assets/icons/refresh.svg");
+                            width: 12px;
+                            height: 12px;
+                            image-fit: contain;
+                        }
+
+                        Text {
+                            text: "Retry";
+                            color: HubTheme.text-primary;
+                            font-size: 11px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
                     }
 
                     retry-touch := TouchArea {
@@ -209,6 +192,7 @@ export component VideoCard inherits Rectangle {
                 }
             }
 
+            // Top badges (Watched & Favorite)
             HorizontalLayout {
                 x: 8px;
                 y: 8px;
@@ -216,16 +200,15 @@ export component VideoCard inherits Rectangle {
                 alignment: start;
 
                 if root.item.is_played || root.item.progress >= 0.90 : Rectangle {
-                    width: watched-label.preferred-width + 14px;
+                    width: watched-label.preferred-width + 12px;
                     height: 20px;
                     border-radius: 4px;
                     background: #000000B3;
-                    border-width: 0px;
 
                     watched-label := Text {
-                        x: 7px;
+                        x: 6px;
                         y: 0px;
-                        width: parent.width - 14px;
+                        width: parent.width - 12px;
                         height: parent.height;
                         text: "Watched";
                         color: #FFFFFF;
@@ -237,16 +220,15 @@ export component VideoCard inherits Rectangle {
                 }
 
                 if root.item.is_favorite : Rectangle {
-                    width: fav-label.preferred-width + 14px;
+                    width: fav-label.preferred-width + 12px;
                     height: 20px;
                     border-radius: 4px;
                     background: #000000B3;
-                    border-width: 0px;
 
                     fav-label := Text {
-                        x: 7px;
+                        x: 6px;
                         y: 0px;
-                        width: parent.width - 14px;
+                        width: parent.width - 12px;
                         height: parent.height;
                         text: "Favorite";
                         color: #FFFFFF;
@@ -258,6 +240,7 @@ export component VideoCard inherits Rectangle {
                 }
             }
 
+            // Duration badge in bottom-right corner
             if root.item.duration != "" : Rectangle {
                 width: duration-label.preferred-width + 12px;
                 height: 20px;
@@ -265,7 +248,6 @@ export component VideoCard inherits Rectangle {
                 y: parent.height - self.height - 8px;
                 border-radius: 4px;
                 background: #000000B3;
-                border-width: 0px;
 
                 duration-label := Text {
                     x: 6px;
@@ -281,33 +263,35 @@ export component VideoCard inherits Rectangle {
                 }
             }
 
-            if root.active && root.item.has-thumbnail : Rectangle {
-                width: 40px;
-                height: 40px;
+            // Prominent Play action on hover/focus
+            if root.active : Rectangle {
+                width: 44px;
+                height: 44px;
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
-                border-radius: 8px;
-                background: HubTheme.accent;
+                border-radius: 22px;
+                background: play-touch.pressed ? HubTheme.accent-pressed : (play-touch.has-hover ? HubTheme.accent-hover : HubTheme.accent);
                 border-width: 1px;
                 border-color: HubTheme.focus-ring;
                 accessible-role: button;
-                accessible-label: "Play";
+                accessible-label: "Play " + root.item.title;
                 accessible-action-default => { root.play(); }
 
                 Image {
                     source: @image-url("../../../assets/icons/play.svg");
-                    x: (parent.width - 18px) / 2;
-                    y: (parent.height - 18px) / 2;
-                    width: 18px;
-                    height: 18px;
+                    x: (parent.width - 20px) / 2 + 1px;
+                    y: (parent.height - 20px) / 2;
+                    width: 20px;
+                    height: 20px;
                     image-fit: contain;
                 }
 
-                TouchArea {
+                play-touch := TouchArea {
                     clicked => { root.play(); }
                 }
             }
 
+            // Watched progress bar at bottom edge
             if root.item.progress > 0.0 && !root.item.is_played && root.item.progress < 0.90 : Rectangle {
                 x: 0px;
                 y: parent.height - 3px;
@@ -327,18 +311,20 @@ export component VideoCard inherits Rectangle {
 
         VerticalLayout {
             height: 82px;
-            padding-left: 12px;
-            padding-right: 12px;
+            padding-left: 10px;
+            padding-right: 10px;
             padding-top: 10px;
             padding-bottom: 8px;
-            spacing: 2px;
+            spacing: 3px;
 
+            // Title: always left-aligned, vertical top, max 2 lines, ending with ellipsis
             Text {
                 text: root.item.title;
                 color: HubTheme.text-primary;
                 font-size: HubTheme.card-title-size;
                 font-weight: 600;
-                vertical-alignment: center;
+                horizontal-alignment: left;
+                vertical-alignment: top;
                 wrap: word-wrap;
                 overflow: elide;
                 width: 100%;
@@ -348,6 +334,7 @@ export component VideoCard inherits Rectangle {
             HorizontalLayout {
                 height: 16px;
                 spacing: 6px;
+                alignment: start;
 
                 if root.item.year != "" : Text {
                     text: root.item.year;
@@ -359,8 +346,9 @@ export component VideoCard inherits Rectangle {
                 if root.item.year != "" && root.source-label != "" : Rectangle {
                     width: 3px;
                     height: 3px;
-                    border-radius: 2px;
+                    border-radius: 1.5px;
                     background: HubTheme.separator;
+                    y: 6px;
                 }
 
                 Text {
