@@ -98,11 +98,54 @@ impl From<&VideoCardData> for ThumbnailRequest {
     }
 }
 
-fn card_index_by_id(model: &slint::ModelRc<VideoCardData>, id: &str) -> Option<usize> {
-    (0..model.row_count()).find(|index| model.row_data(*index).is_some_and(|card| card.id == id))
+pub(crate) fn thumbnail_request_matches_card(
+    request: &ThumbnailRequest,
+    card: &VideoCardData,
+) -> bool {
+    if card.id != request.id || card.provider != request.provider {
+        return false;
+    }
+    let mut requested_urls = [
+        request.primary_url.as_str(),
+        request.fallback_url.as_str(),
+        request.alternate_url.as_str(),
+    ]
+    .into_iter()
+    .filter(|url| !url.is_empty())
+    .map(str::to_owned)
+    .collect::<Vec<_>>();
+    let mut current_urls = [
+        card.thumbnail_url.as_str(),
+        card.fallback_thumbnail_url.as_str(),
+        card.alternate_thumbnail_url.as_str(),
+    ]
+    .into_iter()
+    .filter(|url| !url.is_empty())
+    .map(str::to_owned)
+    .collect::<Vec<_>>();
+    requested_urls.sort_unstable();
+    requested_urls.dedup();
+    current_urls.sort_unstable();
+    current_urls.dedup();
+    requested_urls == current_urls
 }
 
-fn no_thumbnail_state(has_source_url: bool) -> &'static str {
+pub(crate) fn card_index_by_request(
+    model: &slint::ModelRc<VideoCardData>,
+    request: &ThumbnailRequest,
+) -> Option<usize> {
+    (0..model.row_count()).find(|index| {
+        model
+            .row_data(*index)
+            .is_some_and(|card| thumbnail_request_matches_card(request, &card))
+    })
+}
+
+fn thumbnail_generation_is_current(generation: &AtomicU64, request_id: u64) -> bool {
+    generation.load(Ordering::SeqCst) == request_id
+}
+
+pub(crate) fn no_thumbnail_state(has_source_url: bool) -> &'static str {
     if has_source_url { "failed" } else { "missing" }
 }
 
@@ -316,23 +359,22 @@ pub fn reflow_grid(ui: &MainWindow, catalog_columns: usize, channel_columns: usi
 fn update_catalog_thumbnail(
     ui: &MainWindow,
     index: usize,
-    expected_id: &str,
+    request: &ThumbnailRequest,
     thumbnail: &FetchedThumbnail,
 ) {
     let items = ui.get_catalog_items();
     let Some(mut card) = items.row_data(index) else {
         return;
     };
-    if card.id != expected_id {
+    if !thumbnail_request_matches_card(request, &card) {
         return;
     }
     let Some(image) = crate::thumbnails::image_from_bytes(&thumbnail.bytes) else {
-        update_thumbnail_state(ui, index, expected_id, "failed", false);
+        update_thumbnail_state(ui, index, &request.id, "failed", false);
         return;
     };
     card.thumbnail = image;
     card.thumbnail_state = "ready".into();
-    card.thumbnail_url = thumbnail.url.clone().into();
     card.has_thumbnail = true;
     items.set_row_data(index, card.clone());
 
@@ -350,20 +392,25 @@ fn update_catalog_thumbnail(
     }
 }
 
-fn update_channel_thumbnail(ui: &MainWindow, index: usize, thumbnail: &FetchedThumbnail) {
+fn update_channel_thumbnail(
+    ui: &MainWindow,
+    index: usize,
+    request: &ThumbnailRequest,
+    thumbnail: &FetchedThumbnail,
+) {
     let items = ui.get_channel_items();
     let Some(mut card) = items.row_data(index) else {
         return;
     };
+    if !thumbnail_request_matches_card(request, &card) {
+        return;
+    }
     let Some(image) = crate::thumbnails::image_from_bytes(&thumbnail.bytes) else {
-        if let Some(id) = items.row_data(index).map(|card| card.id.to_string()) {
-            update_thumbnail_state(ui, index, &id, "failed", true);
-        }
+        update_thumbnail_state(ui, index, &request.id, "failed", true);
         return;
     };
     card.thumbnail = image;
     card.thumbnail_state = "ready".into();
-    card.thumbnail_url = thumbnail.url.clone().into();
     card.has_thumbnail = true;
     items.set_row_data(index, card.clone());
 
@@ -424,7 +471,7 @@ fn update_thumbnail_state(
 
 pub fn retry_thumbnail_async(
     ui: slint::Weak<MainWindow>,
-    id: String,
+    request: ThumbnailRequest,
     token: Option<String>,
     channel: bool,
 ) {
@@ -434,22 +481,18 @@ pub fn retry_thumbnail_async(
     } else {
         handle.get_catalog_items()
     };
-    let Some((index, card)) = (0..items.row_count())
-        .filter_map(|index| items.row_data(index).map(|card| (index, card)))
-        .find(|(_, card)| card.id == id)
-    else {
+    let Some(index) = card_index_by_request(&items, &request) else {
         return;
     };
-    if card.thumbnail_url.is_empty()
-        && card.fallback_thumbnail_url.is_empty()
-        && card.alternate_thumbnail_url.is_empty()
+    if request.primary_url.is_empty()
+        && request.fallback_url.is_empty()
+        && request.alternate_url.is_empty()
     {
-        update_thumbnail_state(&handle, index, &id, "missing", channel);
+        update_thumbnail_state(&handle, index, &request.id, "missing", channel);
         return;
     }
 
-    update_thumbnail_state(&handle, index, &id, "loading", channel);
-    let request = ThumbnailRequest::from(&card);
+    update_thumbnail_state(&handle, index, &request.id, "loading", channel);
     let weak = ui.clone();
     std::thread::spawn(move || {
         invalidate_thumbnail_request_cache(&request);
@@ -461,19 +504,17 @@ pub fn retry_thumbnail_async(
             } else {
                 ui.get_catalog_items()
             };
-            let Some(index) = (0..items.row_count())
-                .find(|index| items.row_data(*index).is_some_and(|card| card.id == id))
-            else {
+            let Some(index) = card_index_by_request(&items, &request) else {
                 return;
             };
             if let Some(thumbnail) = thumbnail {
                 if channel {
-                    update_channel_thumbnail(&ui, index, &thumbnail);
+                    update_channel_thumbnail(&ui, index, &request, &thumbnail);
                 } else {
-                    update_catalog_thumbnail(&ui, index, &id, &thumbnail);
+                    update_catalog_thumbnail(&ui, index, &request, &thumbnail);
                 }
             } else {
-                update_thumbnail_state(&ui, index, &id, "failed", channel);
+                update_thumbnail_state(&ui, index, &request.id, "failed", channel);
             }
         });
     });
@@ -496,34 +537,33 @@ fn home_thumbnail_models(ui: &MainWindow) -> Vec<slint::ModelRc<VideoCardData>> 
     models
 }
 
-fn update_home_thumbnail_state(ui: &MainWindow, id: &str, state: &str) -> Option<ThumbnailRequest> {
-    let mut request = None;
+fn update_home_thumbnail_state(ui: &MainWindow, request: &ThumbnailRequest, state: &str) {
     for model in home_thumbnail_models(ui) {
         for index in 0..model.row_count() {
             let Some(mut card) = model.row_data(index) else {
                 continue;
             };
-            if card.id != id {
+            if !thumbnail_request_matches_card(&request, &card) {
                 continue;
             }
             card.thumbnail_state = state.into();
-            request.get_or_insert_with(|| ThumbnailRequest::from(&card));
             model.set_row_data(index, card);
         }
     }
-    request
 }
 
-pub fn retry_home_thumbnail_async(ui: slint::Weak<MainWindow>, id: String, token: Option<String>) {
+pub fn retry_home_thumbnail_async(
+    ui: slint::Weak<MainWindow>,
+    request: ThumbnailRequest,
+    token: Option<String>,
+) {
     let Some(handle) = ui.upgrade() else { return };
-    let Some(request) = update_home_thumbnail_state(&handle, &id, "loading") else {
-        return;
-    };
+    update_home_thumbnail_state(&handle, &request, "loading");
     if request.primary_url.is_empty()
         && request.fallback_url.is_empty()
         && request.alternate_url.is_empty()
     {
-        update_home_thumbnail_state(&handle, &id, "missing");
+        update_home_thumbnail_state(&handle, &request, "missing");
         return;
     }
     std::thread::spawn(move || {
@@ -536,14 +576,13 @@ pub fn retry_home_thumbnail_async(ui: slint::Weak<MainWindow>, id: String, token
                     let Some(mut card) = model.row_data(index) else {
                         continue;
                     };
-                    if card.id != id {
+                    if !thumbnail_request_matches_card(&request, &card) {
                         continue;
                     }
                     if let Some(thumbnail) = thumbnail.as_ref() {
                         if let Some(image) = crate::thumbnails::image_from_bytes(&thumbnail.bytes) {
                             card.thumbnail = image;
                             card.thumbnail_state = "ready".into();
-                            card.thumbnail_url = thumbnail.url.clone().into();
                             card.has_thumbnail = true;
                         } else {
                             card.thumbnail_state = "failed".into();
@@ -563,7 +602,7 @@ pub fn set_discovered_servers(ui: &MainWindow, items: Vec<DiscoveredServerItem>)
     ui.set_discovered_servers(model.into());
 }
 
-fn display_title(item: &TvItem) -> String {
+pub(crate) fn display_title(item: &TvItem) -> String {
     let title = item.title.trim();
     let looks_like_hash =
         title.len() >= 24 && title.chars().all(|character| character.is_ascii_hexdigit());
@@ -910,14 +949,10 @@ pub fn refresh_catalog_thumbnails_async(
     generation: Option<(Arc<AtomicU64>, u64)>,
 ) {
     let requests = cards.iter().map(ThumbnailRequest::from).collect::<Vec<_>>();
-    let expected_ids = requests
-        .iter()
-        .map(|card| card.id.clone())
-        .collect::<Vec<_>>();
     std::thread::spawn(move || {
         for start in (0..requests.len()).step_by(THUMBNAIL_BATCH_SIZE) {
             if generation.as_ref().is_some_and(|(generation, request_id)| {
-                generation.load(Ordering::SeqCst) != *request_id
+                !thumbnail_generation_is_current(generation, *request_id)
             }) {
                 break;
             }
@@ -935,21 +970,21 @@ pub fn refresh_catalog_thumbnails_async(
                         || !request.alternate_url.is_empty()
                 })
                 .collect::<Vec<_>>();
-            let expected_ids = expected_ids.clone();
+            let batch_requests = requests[start..end].to_vec();
             let generation = generation.clone();
             let ui = ui.clone();
             let _ = slint::invoke_from_event_loop(move || {
                 if generation.as_ref().is_some_and(|(generation, request_id)| {
-                    generation.load(Ordering::SeqCst) != *request_id
+                    !thumbnail_generation_is_current(generation, *request_id)
                 }) {
                     return;
                 }
                 if let Some(ui) = ui.upgrade() {
                     for (offset, thumbnail) in thumbnails {
-                        if let Some(expected_id) = expected_ids.get(start + offset) {
+                        if let Some(request) = batch_requests.get(offset) {
                             let items = ui.get_catalog_items();
-                            if let Some(index) = card_index_by_id(&items, expected_id) {
-                                update_catalog_thumbnail(&ui, index, expected_id, &thumbnail);
+                            if let Some(index) = card_index_by_request(&items, request) {
+                                update_catalog_thumbnail(&ui, index, request, &thumbnail);
                             }
                         }
                     }
@@ -957,13 +992,13 @@ pub fn refresh_catalog_thumbnails_async(
                         if successful_offsets.contains(&offset) {
                             continue;
                         }
-                        if let Some(expected_id) = expected_ids.get(start + offset) {
+                        if let Some(request) = batch_requests.get(offset) {
                             let state = no_thumbnail_state(
                                 source_available.get(offset).copied().unwrap_or(false),
                             );
                             let items = ui.get_catalog_items();
-                            if let Some(index) = card_index_by_id(&items, expected_id) {
-                                update_thumbnail_state(&ui, index, expected_id, state, false);
+                            if let Some(index) = card_index_by_request(&items, request) {
+                                update_thumbnail_state(&ui, index, &request.id, state, false);
                             }
                         }
                     }
@@ -981,13 +1016,9 @@ pub fn refresh_channel_thumbnails_async(
     request_id: u64,
 ) {
     let requests = cards.iter().map(ThumbnailRequest::from).collect::<Vec<_>>();
-    let expected_ids = requests
-        .iter()
-        .map(|card| card.id.clone())
-        .collect::<Vec<_>>();
     std::thread::spawn(move || {
         for start in (0..requests.len()).step_by(THUMBNAIL_BATCH_SIZE) {
-            if generation.load(Ordering::SeqCst) != request_id {
+            if !thumbnail_generation_is_current(&generation, request_id) {
                 break;
             }
             let end = (start + THUMBNAIL_BATCH_SIZE).min(requests.len());
@@ -1004,24 +1035,19 @@ pub fn refresh_channel_thumbnails_async(
                         || !request.alternate_url.is_empty()
                 })
                 .collect::<Vec<_>>();
-            let expected_ids = expected_ids.clone();
+            let batch_requests = requests[start..end].to_vec();
             let generation = generation.clone();
             let ui = ui.clone();
             let _ = slint::invoke_from_event_loop(move || {
-                if generation.load(Ordering::SeqCst) != request_id {
+                if !thumbnail_generation_is_current(&generation, request_id) {
                     return;
                 }
                 if let Some(ui) = ui.upgrade() {
                     for (offset, thumbnail) in thumbnails {
-                        if let Some(expected_id) = expected_ids.get(start + offset) {
+                        if let Some(request) = batch_requests.get(offset) {
                             let items = ui.get_channel_items();
-                            if let Some(index) = card_index_by_id(&items, expected_id) {
-                                if items
-                                    .row_data(index)
-                                    .is_some_and(|card| card.id == *expected_id)
-                                {
-                                    update_channel_thumbnail(&ui, index, &thumbnail);
-                                }
+                            if let Some(index) = card_index_by_request(&items, request) {
+                                update_channel_thumbnail(&ui, index, request, &thumbnail);
                             }
                         }
                     }
@@ -1029,13 +1055,13 @@ pub fn refresh_channel_thumbnails_async(
                         if successful_offsets.contains(&offset) {
                             continue;
                         }
-                        if let Some(expected_id) = expected_ids.get(start + offset) {
+                        if let Some(request) = batch_requests.get(offset) {
                             let state = no_thumbnail_state(
                                 source_available.get(offset).copied().unwrap_or(false),
                             );
                             let items = ui.get_channel_items();
-                            if let Some(index) = card_index_by_id(&items, expected_id) {
-                                update_thumbnail_state(&ui, index, expected_id, state, true);
+                            if let Some(index) = card_index_by_request(&items, request) {
+                                update_thumbnail_state(&ui, index, &request.id, state, true);
                             }
                         }
                     }
@@ -1130,14 +1156,44 @@ mod tests {
     }
 
     #[test]
+    fn timeout_or_cancelled_request_with_a_known_source_is_not_missing() {
+        assert_eq!(no_thumbnail_state(true), "failed");
+        assert_eq!(no_thumbnail_state(false), "missing");
+    }
+
+    #[test]
+    fn cancelled_generation_is_not_current_for_later_batches() {
+        let generation = AtomicU64::new(7);
+        assert!(thumbnail_generation_is_current(&generation, 7));
+        generation.store(8, Ordering::SeqCst);
+        assert!(!thumbnail_generation_is_current(&generation, 7));
+    }
+
+    #[test]
     fn stale_thumbnail_results_are_matched_by_id_after_reordering() {
         let model: slint::ModelRc<VideoCardData> = Rc::new(slint::VecModel::from(vec![
             card("item-b", "B"),
             card("item-a", "A"),
         ]))
         .into();
-        assert_eq!(card_index_by_id(&model, "item-a"), Some(1));
-        assert_eq!(card_index_by_id(&model, "removed-item"), None);
+        let request = ThumbnailRequest::from(&card("item-a", "A"));
+        assert_eq!(card_index_by_request(&model, &request), Some(1));
+        let missing_request = ThumbnailRequest::from(&card("removed-item", "Missing"));
+        assert_eq!(card_index_by_request(&model, &missing_request), None);
+    }
+
+    #[test]
+    fn stale_thumbnail_result_is_rejected_when_same_id_now_has_another_source() {
+        let mut original = card("same-id", "Original");
+        original.thumbnail_url = "https://resolver.example/image/one".into();
+        let request = ThumbnailRequest::from(&original);
+
+        let mut replacement = card("same-id", "Replacement");
+        replacement.thumbnail_url = "https://resolver.example/image/two".into();
+        let model: slint::ModelRc<VideoCardData> =
+            Rc::new(slint::VecModel::from(vec![replacement])).into();
+
+        assert_eq!(card_index_by_request(&model, &request), None);
     }
 
     #[test]

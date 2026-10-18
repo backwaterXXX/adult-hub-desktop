@@ -1,5 +1,6 @@
 import { HubTheme, KeyboardState } from "theme.slint";
 import { ScrollView } from "std-widgets.slint";
+import { IconButton } from "common-controls.slint";
 
 // =============================================================================
 // SettingsView.slint - Isolated Desktop Settings Component for Adult Hub
@@ -410,11 +411,13 @@ component SettingsCategoryOptionItem inherits Rectangle {
         spacing: 10px;
         alignment: center;
 
-        Text {
-            text: root.selected ? "●" : "○";
-            color: root.selected ? HubTheme.focus-ring : HubTheme.text-muted;
-            font-size: 11px;
-            vertical-alignment: center;
+        Image {
+            source: root.selected
+                ? @image-url("../../../assets/icons/radio-selected.svg")
+                : @image-url("../../../assets/icons/radio.svg");
+            width: 16px;
+            height: 16px;
+            image-fit: contain;
         }
 
         Text {
@@ -427,13 +430,6 @@ component SettingsCategoryOptionItem inherits Rectangle {
             overflow: elide;
         }
 
-        if root.selected : Text {
-            text: "✓";
-            color: HubTheme.focus-ring;
-            font-size: 14px;
-            font-weight: 700;
-            vertical-alignment: center;
-        }
     }
 
     touch := TouchArea {
@@ -673,11 +669,11 @@ export component SettingsView inherits Rectangle {
                         spacing: 10px;
                         alignment: center;
 
-                        Text {
-                            text: "●";
-                            color: root.status-color;
-                            font-size: 13px;
-                            vertical-alignment: center;
+                        Image {
+                            source: @image-url("../../../assets/icons/info.svg");
+                            width: 18px;
+                            height: 18px;
+                            image-fit: contain;
                         }
 
                         Text {
@@ -705,11 +701,11 @@ export component SettingsView inherits Rectangle {
                         spacing: 10px;
                         alignment: center;
 
-                        Text {
-                            text: "⚠";
-                            color: HubTheme.error;
-                            font-size: 15px;
-                            vertical-alignment: center;
+                        Image {
+                            source: @image-url("../../../assets/icons/alert.svg");
+                            width: 18px;
+                            height: 18px;
+                            image-fit: contain;
                         }
 
                         Text {
@@ -1111,7 +1107,7 @@ export component SettingsView inherits Rectangle {
                                     // Quick Connect PIN banner
                                     if root.quick-connect-active || root.quick-connect-expired : Rectangle {
                                         border-radius: HubTheme.control-radius;
-                                        background: @linear-gradient(105deg, #21131f 0%, #17151c 100%);
+                                        background: HubTheme.surface;
                                         border-width: 1px;
                                         border-color: #BE185D77;
 
@@ -1123,20 +1119,19 @@ export component SettingsView inherits Rectangle {
                                                 alignment: center;
 
                                                 Text {
-                                                    text: "QUICK CONNECT";
+                                                    text: "Quick Connect";
                                                     color: HubTheme.focus-ring;
                                                     font-size: 12px;
-                                                    font-weight: 800;
-                                                    letter-spacing: 1.5px;
+                                                    font-weight: 600;
                                                     horizontal-stretch: 1;
                                                 }
 
                                                 Text {
                                                     text: root.quick-connect-expired
-                                                        ? "CODE EXPIRED"
+                                                        ? "Code expired"
                                                         : (root.quick-connect-authenticating
-                                                            ? "AUTHORIZED · SIGNING IN"
-                                                            : (root.quick-connect-code == "" ? "CONNECTING TO JELLYFIN" : "WAITING FOR AUTHORIZATION"));
+                                                            ? "Signing in"
+                                                            : (root.quick-connect-code == "" ? "Connecting to Jellyfin" : "Waiting for authorization"));
                                                     color: root.quick-connect-expired ? HubTheme.error : HubTheme.text-muted;
                                                     font-size: 11px;
                                                     font-weight: 700;
@@ -1293,12 +1288,20 @@ export component SettingsView inherits Rectangle {
                                                 alignment: center;
 
                                                 Text {
-                                                    text: library.selected ? "✓  " + library.name : library.name;
+                                                    text: library.name;
                                                     color: library.selected ? HubTheme.text-primary : HubTheme.text-secondary;
                                                     font-size: 13px;
                                                     font-weight: library.selected ? 700 : 500;
                                                     vertical-alignment: center;
                                                     horizontal-stretch: 1;
+                                                }
+
+                                                if library.selected : Image {
+                                                    source: @image-url("../../../assets/icons/radio-selected.svg");
+                                                    width: 18px;
+                                                    height: 18px;
+                                                    colorize: HubTheme.accent;
+                                                    vertical-alignment: center;
                                                 }
                                             }
                                         }
@@ -1701,15 +1704,15 @@ export component SettingsView inherits Rectangle {
                                 if root.excluded-tags-list.length > 0 : HorizontalLayout {
                                     spacing: 8px;
                                     for tag in root.excluded-tags-list : Rectangle {
-                                        height: 32px;
-                                        border-radius: 16px;
+                                        height: 40px;
+                                        border-radius: 20px;
                                         background: HubTheme.surface-hover;
                                         border-width: 1px;
                                         border-color: #BE185D88;
 
                                         HorizontalLayout {
                                             padding-left: 12px;
-                                            padding-right: 10px;
+                                            padding-right: 6px;
                                             spacing: 8px;
                                             alignment: center;
 
@@ -1720,18 +1723,10 @@ export component SettingsView inherits Rectangle {
                                                 vertical-alignment: center;
                                             }
 
-                                            tag-touch := TouchArea {
-                                                width: 18px;
-                                                height: 18px;
+                                            IconButton {
+                                                icon: @image-url("../../../assets/icons/close.svg");
+                                                accessible-name: "Remove excluded tag " + tag;
                                                 clicked => { root.remove-excluded-tag(tag); }
-                                                Text {
-                                                    text: "✕";
-                                                    color: tag-touch.has-hover ? HubTheme.accent-text : HubTheme.text-muted;
-                                                    font-size: 11px;
-                                                    font-weight: 700;
-                                                    horizontal-alignment: center;
-                                                    vertical-alignment: center;
-                                                }
                                             }
                                         }
                                     }

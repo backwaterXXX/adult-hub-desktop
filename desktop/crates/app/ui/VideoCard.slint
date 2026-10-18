@@ -41,12 +41,10 @@ export component VideoCard inherits Rectangle {
     callback clicked();
     callback play();
     callback open-detail();
-    callback thumbnail-retry(string);
+    callback thumbnail-retry(VideoCardData);
 
     forward-focus: focus-scope;
-    accessible-role: button;
-    accessible-label: root.item.title;
-    accessible-action-default => { root.open-detail(); }
+    accessible-role: none;
 
     property <length> artwork-height: min(220px, root.width * 0.5625);
     property <bool> active: root.is-focused || root.has-focus || touch.has-hover;
@@ -66,6 +64,9 @@ export component VideoCard inherits Rectangle {
     animate border-color { duration: 150ms; }
 
     touch := TouchArea {
+        accessible-role: button;
+        accessible-label: root.item.title;
+        accessible-action-default => { root.open-detail(); }
         clicked => { root.open-detail(); }
     }
 
@@ -122,27 +123,29 @@ export component VideoCard inherits Rectangle {
                 }
 
                 Rectangle {
-                    x: (parent.width - 44px) / 2;
-                    y: (parent.height - 44px) / 2 - 8px;
-                    width: 44px;
-                    height: 32px;
+                    x: (parent.width - 40px) / 2;
+                    y: root.item.thumbnail_state == "failed"
+                        ? max(8px, (parent.height - 96px) / 2)
+                        : (parent.height - 60px) / 2;
+                    width: 40px;
+                    height: 28px;
                     border-radius: 6px;
                     border-width: 1px;
                     border-color: #64748b;
                     background: #171c26;
 
                     Rectangle {
-                        x: 8px;
-                        y: 8px;
-                        width: 6px;
-                        height: 6px;
-                        border-radius: 3px;
-                        background: #94a3b8;
+                    x: 8px;
+                    y: 6px;
+                    width: 7px;
+                    height: 7px;
+                    border-radius: 4px;
+                    background: #94a3b8;
                     }
                     Rectangle {
                         x: 7px;
-                        y: 20px;
-                        width: 30px;
+                    y: 18px;
+                    width: 24px;
                         height: 1px;
                         background: #64748b;
                     }
@@ -150,8 +153,11 @@ export component VideoCard inherits Rectangle {
 
                 Text {
                     x: 8px;
-                    y: parent.height / 2 + 18px;
+                    y: root.item.thumbnail_state == "failed"
+                        ? max(42px, (parent.height - 96px) / 2 + 32px)
+                        : (parent.height - 60px) / 2 + 34px;
                     width: parent.width - 16px;
+                    height: 16px;
                     text: root.item.thumbnail_state == "loading"
                         ? "Loading artwork…"
                         : (root.item.thumbnail_state == "failed" ? "Couldn’t load artwork" : "No artwork available");
@@ -163,30 +169,30 @@ export component VideoCard inherits Rectangle {
                 }
 
                 if root.item.thumbnail_state == "failed" && root.retry-enabled : Rectangle {
-                    x: (parent.width - 84px) / 2;
-                    y: parent.height / 2 + 38px;
-                    width: 84px;
-                    height: 28px;
+                    x: (parent.width - 96px) / 2;
+                    y: max(60px, (parent.height - 96px) / 2 + 52px);
+                    width: 96px;
+                    height: 40px;
                     border-radius: 6px;
                     background: HubTheme.surface-hover;
                     border-width: 2px;
-                    border-color: HubTheme.control-border;
+                    border-color: retry-focus.has-focus ? HubTheme.focus-ring : HubTheme.control-border;
                     forward-focus: retry-focus;
                     accessible-role: button;
                     accessible-label: "Retry artwork download";
-                    accessible-action-default => { root.thumbnail-retry(root.item.id); }
+                    accessible-action-default => { root.thumbnail-retry(root.item); }
 
                     Text {
                         text: "Retry";
                         color: HubTheme.text-primary;
-                        font-size: 12px;
+                        font-size: 13px;
                         font-weight: 600;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
 
                     retry-touch := TouchArea {
-                        clicked => { root.thumbnail-retry(root.item.id); }
+                        clicked => { root.thumbnail-retry(root.item); }
                     }
 
                     retry-focus := FocusScope {
@@ -194,7 +200,7 @@ export component VideoCard inherits Rectangle {
                         height: 0px;
                         key-pressed(event) => {
                             if (event.text == Key.Return || event.text == Key.Space) {
-                                root.thumbnail-retry(root.item.id);
+                                root.thumbnail-retry(root.item);
                                 return accept;
                             }
                             reject
@@ -218,7 +224,7 @@ export component VideoCard inherits Rectangle {
                         padding-left: 7px;
                         padding-right: 7px;
                         Text {
-                            text: "FAVORITE";
+                            text: "Favorite";
                             color: #f3f4f6;
                             font-size: 10px;
                             font-weight: 600;
@@ -237,7 +243,7 @@ export component VideoCard inherits Rectangle {
                         padding-left: 7px;
                         padding-right: 7px;
                         Text {
-                            text: "WATCHED";
+                            text: "Watched";
                             color: #f3f4f6;
                             font-size: 10px;
                             font-weight: 600;
@@ -269,7 +275,7 @@ export component VideoCard inherits Rectangle {
                 }
             }
 
-            if root.active : Rectangle {
+            if root.active && root.item.has-thumbnail : Rectangle {
                 width: 40px;
                 height: 40px;
                 x: (parent.width - self.width) / 2;

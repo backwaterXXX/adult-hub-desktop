@@ -1,3 +1,5 @@
+import { HubTheme } from "theme.slint";
+
 export component Toast inherits Rectangle {
     in property <bool> is-open: false;
     in property <string> message: "";
@@ -10,11 +12,9 @@ export component Toast inherits Rectangle {
     z: 1000;
     height: 48px;
     border-radius: 8px;
-    background: #141416f5;
-    border-width: 1.5px;
-    border-color: root.toast-type == "error" ? #e50914 : (root.toast-type == "warning" ? #ff9800 : (root.toast-type == "success" ? #4caf50 : #29b6f6));
-    drop-shadow-blur: 16px;
-    drop-shadow-color: #00000088;
+    background: HubTheme.surface;
+    border-width: 1px;
+    border-color: root.toast-type == "error" ? HubTheme.error : (root.toast-type == "warning" ? HubTheme.warning : (root.toast-type == "success" ? HubTheme.success : HubTheme.separator));
 
     HorizontalLayout {
         padding-left: 16px;
@@ -27,15 +27,19 @@ export component Toast inherits Rectangle {
             width: 28px;
             height: 28px;
             border-radius: 14px;
-            background: root.toast-type == "error" ? #e5091428 : (root.toast-type == "warning" ? #ff980028 : (root.toast-type == "success" ? #4caf5028 : #29b6f628));
+            background: root.toast-type == "error" ? #FB718518 : (root.toast-type == "warning" ? #FBBF2418 : (root.toast-type == "success" ? #4ADE8018 : HubTheme.navigation-background));
 
-            Text {
-                text: root.toast-type == "error" || root.toast-type == "warning" ? "!" : (root.toast-type == "success" ? "✓" : "i");
-                color: root.toast-type == "error" ? #ff6670 : (root.toast-type == "warning" ? #ffbd52 : (root.toast-type == "success" ? #7bdd80 : #67cefa));
-                font-size: 14px;
-                font-weight: 800;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+            Image {
+                source: root.toast-type == "error" || root.toast-type == "warning"
+                    ? @image-url("../../../assets/icons/alert.svg")
+                    : (root.toast-type == "success"
+                        ? @image-url("../../../assets/icons/check-circle.svg")
+                        : @image-url("../../../assets/icons/info.svg"));
+                x: 6px;
+                y: 6px;
+                width: 16px;
+                height: 16px;
+                image-fit: contain;
             }
         }
 
@@ -52,9 +56,9 @@ export component Toast inherits Rectangle {
 
         // Optional action button
         if root.action-text != "" : Rectangle {
-            height: 30px;
+            height: 40px;
             border-radius: 6px;
-            background: root.toast-type == "error" ? #e50914 : (root.toast-type == "warning" ? #ff9800 : #29b6f6);
+            background: HubTheme.accent;
 
             HorizontalLayout {
                 padding-left: 12px;
@@ -62,7 +66,7 @@ export component Toast inherits Rectangle {
                 Text {
                     text: root.action-text;
                     color: #ffffff;
-                    font-size: 12px;
+                    font-size: HubTheme.metadata-size;
                     font-weight: 700;
                     vertical-alignment: center;
                 }
@@ -79,17 +83,18 @@ export component Toast inherits Rectangle {
 
         // Close button
         Rectangle {
-            width: 28px;
-            height: 28px;
-            border-radius: 14px;
+            width: 40px;
+            height: 40px;
+            border-radius: 8px;
             background: close-touch.has-hover ? #ffffff22 : transparent;
 
-            Text {
-                text: "✕";
-                color: #888888;
-                font-size: 14px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+            Image {
+                source: @image-url("../../../assets/icons/close.svg");
+                x: 12px;
+                y: 12px;
+                width: 16px;
+                height: 16px;
+                image-fit: contain;
             }
 
             accessible-role: button;

@@ -1,7 +1,8 @@
 use crate::catalog::{
-    FetchedThumbnail, ThumbnailRequest, fetch_thumbnail_batch, filter_catalog_items,
-    refresh_catalog_thumbnails_async, sample_catalog_tv_items, set_catalog, set_discovered_servers,
-    tv_item_to_card, tv_item_to_card_for_server,
+    FetchedThumbnail, ThumbnailRequest, card_index_by_request, fetch_thumbnail_batch,
+    filter_catalog_items, no_thumbnail_state, refresh_catalog_thumbnails_async,
+    sample_catalog_tv_items, set_catalog, set_discovered_servers, tv_item_to_card,
+    tv_item_to_card_for_server,
 };
 use crate::context::AppContext;
 use crate::playback::{show_error, start_item_playback};
@@ -67,9 +68,50 @@ fn set_home_shelves(ui: &MainWindow, shelves: &[Vec<VideoCardData>]) {
     ));
 }
 
+fn update_home_thumbnail_model(
+    items: slint::ModelRc<VideoCardData>,
+    requests: &[ThumbnailRequest],
+    start: usize,
+    end: usize,
+    thumbnails: &[(usize, FetchedThumbnail)],
+) {
+    for request_index in start..end {
+        let Some(request) = requests.get(request_index) else {
+            continue;
+        };
+        let Some(index) = card_index_by_request(&items, request) else {
+            continue;
+        };
+        let Some(mut card) = items.row_data(index) else {
+            continue;
+        };
+        if let Some((_, thumbnail)) = thumbnails
+            .iter()
+            .find(|(offset, _)| *offset == request_index)
+        {
+            if let Some(image) = crate::thumbnails::image_from_bytes(&thumbnail.bytes) {
+                card.thumbnail = image;
+                card.has_thumbnail = true;
+                card.thumbnail_state = "ready".into();
+            } else {
+                card.thumbnail_state = "failed".into();
+            }
+        } else {
+            let has_source = !request.primary_url.is_empty()
+                || !request.fallback_url.is_empty()
+                || !request.alternate_url.is_empty();
+            card.thumbnail_state = no_thumbnail_state(has_source).into();
+        }
+        items.set_row_data(index, card);
+    }
+}
+
 fn update_home_shelf_thumbnails(
     ui: &MainWindow,
     shelf_index: usize,
+    requests: &[ThumbnailRequest],
+    start: usize,
+    end: usize,
     thumbnails: &[(usize, FetchedThumbnail)],
 ) {
     let items = match shelf_index {
@@ -79,39 +121,27 @@ fn update_home_shelf_thumbnails(
         3 => ui.get_home_random_items(),
         _ => ui.get_home_performer_items(),
     };
-    for (index, thumbnail) in thumbnails {
-        let Some(mut card) = items.row_data(*index) else {
-            continue;
-        };
-        let Some(image) = crate::thumbnails::image_from_bytes(&thumbnail.bytes) else {
-            continue;
-        };
-        card.thumbnail_url = thumbnail.url.clone().into();
-        card.thumbnail = image;
-        card.has_thumbnail = true;
-        items.set_row_data(*index, card);
-    }
+    update_home_thumbnail_model(items, requests, start, end, thumbnails);
 }
 
 fn update_home_category_thumbnails(
     ui: &MainWindow,
-    category_index: usize,
+    category_name: &str,
+    requests: &[ThumbnailRequest],
+    start: usize,
+    end: usize,
     thumbnails: &[(usize, FetchedThumbnail)],
 ) {
     let categories = ui.get_home_category_shelves();
-    if let Some(category) = categories.row_data(category_index) {
-        for (index, thumbnail) in thumbnails {
-            let Some(mut card) = category.items.row_data(*index) else {
-                continue;
-            };
-            let Some(image) = crate::thumbnails::image_from_bytes(&thumbnail.bytes) else {
-                continue;
-            };
-            card.thumbnail_url = thumbnail.url.clone().into();
-            card.thumbnail = image;
-            card.has_thumbnail = true;
-            category.items.set_row_data(*index, card);
+    for index in 0..categories.row_count() {
+        let Some(category) = categories.row_data(index) else {
+            continue;
+        };
+        if category.name != category_name {
+            continue;
         }
+        update_home_thumbnail_model(category.items, requests, start, end, thumbnails);
+        break;
     }
 }
 
@@ -140,6 +170,9 @@ fn refresh_home_thumbnails_async(
     std::thread::spawn(move || {
         for (shelf_index, shelf) in shelves.iter().enumerate() {
             for start in (0..shelf.len()).step_by(crate::catalog::THUMBNAIL_BATCH_SIZE) {
+                if generation.load(Ordering::SeqCst) != request_id {
+                    return;
+                }
                 let end = (start + crate::catalog::THUMBNAIL_BATCH_SIZE).min(shelf.len());
                 let thumbnails = fetch_thumbnail_batch(&shelf[start..end], Some(&token))
                     .into_iter()
@@ -147,18 +180,29 @@ fn refresh_home_thumbnails_async(
                     .collect::<Vec<_>>();
                 let generation = generation.clone();
                 let ui = ui.clone();
+                let requests = shelf.clone();
                 let _ = slint::invoke_from_event_loop(move || {
                     if generation.load(Ordering::SeqCst) != request_id {
                         return;
                     }
                     if let Some(ui) = ui.upgrade() {
-                        update_home_shelf_thumbnails(&ui, shelf_index, &thumbnails);
+                        update_home_shelf_thumbnails(
+                            &ui,
+                            shelf_index,
+                            &requests,
+                            start,
+                            end,
+                            &thumbnails,
+                        );
                     }
                 });
             }
         }
-        for (category_index, (_, shelf, _)) in category_shelves.iter().enumerate() {
+        for (category_name, shelf, _) in &category_shelves {
             for start in (0..shelf.len()).step_by(crate::catalog::THUMBNAIL_BATCH_SIZE) {
+                if generation.load(Ordering::SeqCst) != request_id {
+                    return;
+                }
                 let end = (start + crate::catalog::THUMBNAIL_BATCH_SIZE).min(shelf.len());
                 let thumbnails = fetch_thumbnail_batch(&shelf[start..end], Some(&token))
                     .into_iter()
@@ -166,12 +210,21 @@ fn refresh_home_thumbnails_async(
                     .collect::<Vec<_>>();
                 let generation = generation.clone();
                 let ui = ui.clone();
+                let category_name = category_name.clone();
+                let requests = shelf.clone();
                 let _ = slint::invoke_from_event_loop(move || {
                     if generation.load(Ordering::SeqCst) != request_id {
                         return;
                     }
                     if let Some(ui) = ui.upgrade() {
-                        update_home_category_thumbnails(&ui, category_index, &thumbnails);
+                        update_home_category_thumbnails(
+                            &ui,
+                            &category_name,
+                            &requests,
+                            start,
+                            end,
+                            &thumbnails,
+                        );
                     }
                 });
             }

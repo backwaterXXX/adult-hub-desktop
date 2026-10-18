@@ -209,6 +209,13 @@ fn handle_event(
 
             let pos_ms = (player.position().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
             let current_item = current_item.lock().unwrap().clone();
+            ui.set_player_title(
+                current_item
+                    .as_ref()
+                    .map(crate::catalog::display_title)
+                    .unwrap_or(name)
+                    .into(),
+            );
             let report_to_jellyfin = current_item
                 .as_ref()
                 .is_some_and(|item| uuid::Uuid::parse_str(&item.id).is_ok());

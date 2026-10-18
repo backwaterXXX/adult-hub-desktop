@@ -3,7 +3,7 @@ import { VideoCard, VideoCardData, VideoCardRowData } from "VideoCard.slint";
 import { DashboardShelf, PerformerCard } from "DashboardShelf.slint";
 import { Toast } from "Toast.slint";
 import { HubTheme, KeyboardState } from "theme.slint";
-import { Button } from "common-controls.slint";
+import { Button, IconButton } from "common-controls.slint";
 import { SettingsView, DiscoveredServerItem, HomeCategoryOption, LibraryOptionData } from "SettingsView.slint";
 export { DiscoveredServerItem, HomeCategoryOption, LibraryOptionData }
 export { VideoCardData, VideoCardRowData }
@@ -400,7 +400,7 @@ component SeekBar inherits Rectangle {
         height: 100%;
         width: root.enabled && root.maximum > 0 ? max(0px, min(root.width, root.width * root.value / root.maximum)) : 0px;
         border-radius: 3px;
-        background: root.enabled ? @linear-gradient(0deg, #d70a52 0%, #ff6295 100%) : #26252d;
+                        background: root.enabled ? HubTheme.accent : HubTheme.surface-hover;
     }
 
     // Scrub thumb
@@ -450,6 +450,7 @@ export component MainWindow inherits Window {
     in-out property <float> duration: 0;
     in-out property <bool> playing: false;
     in-out property <bool> player-media-loaded: false;
+    in-out property <string> player-title: "";
     in-out property <bool> player-controls-visible: true;
     in-out property <bool> player-more-controls-visible: false;
     in-out property <bool> player-advanced-controls-visible: false;
@@ -581,7 +582,7 @@ export component MainWindow inherits Window {
     // Callbacks
     callback switch-screen(string);
     callback refresh-home();
-    callback retry-thumbnail(string);
+    callback retry-thumbnail(VideoCardData);
     callback refresh-home-categories();
     callback toggle-home-category(string);
     callback toggle-home-random-filter();
@@ -1035,7 +1036,7 @@ export component MainWindow inherits Window {
                                     spacing: 12px;
                                     alignment: end;
 
-                                    TvPrimaryButton {
+                                    TvSecondaryButton {
                                         text: "Surprise Me";
                                         clicked => { root.play-random(); }
                                     }
@@ -1163,7 +1164,7 @@ export component MainWindow inherits Window {
                         empty-message: root.is-logged-in && !root.home-is-loading && root.home-error-message == "" && root.home-resume-items.length == 0 ? "Unfinished titles will appear here, ready for you to pick up where you left off." : "";
                         play-item(id) => { root.play-item(id); }
                         open-item(id) => { root.open-item-detail(id); }
-                        thumbnail-retry(id) => { root.retry-thumbnail(id); }
+                        thumbnail-retry(item) => { root.retry-thumbnail(item); }
                         open-performer(name) => { root.open-performer-profile(name); }
                         show-all(category-name) => { root.active-category = "Resume"; root.switch-screen("browse"); root.filter-category("Resume"); }
                         retry => { root.refresh-home(); }
@@ -1174,7 +1175,7 @@ export component MainWindow inherits Window {
                         items: root.home-history-items;
                         play-item(id) => { root.play-item(id); }
                         open-item(id) => { root.open-item-detail(id); }
-                        thumbnail-retry(id) => { root.retry-thumbnail(id); }
+                        thumbnail-retry(item) => { root.retry-thumbnail(item); }
                         open-performer(name) => { root.open-performer-profile(name); }
                         show-all(category-name) => { root.active-category = "Watch History"; root.switch-screen("browse"); root.filter-category("Watch History"); }
                     }
@@ -1187,7 +1188,7 @@ export component MainWindow inherits Window {
                         empty-message: root.is-logged-in && !root.home-is-loading && root.home-error-message == "" && root.home-latest-items.length == 0 ? "No recent additions were found in the active library." : "";
                         play-item(id) => { root.play-item(id); }
                         open-item(id) => { root.open-item-detail(id); }
-                        thumbnail-retry(id) => { root.retry-thumbnail(id); }
+                        thumbnail-retry(item) => { root.retry-thumbnail(item); }
                         open-performer(name) => { root.open-performer-profile(name); }
                         show-all(category-name) => { root.active-category = "Latest"; root.switch-screen("browse"); root.filter-category("Latest"); }
                         retry => { root.refresh-home(); }
@@ -1199,10 +1200,10 @@ export component MainWindow inherits Window {
                         loading: root.home-is-loading;
                         error-message: root.home-random-error;
                         empty-message: root.is-logged-in && !root.home-is-loading && root.home-error-message == "" && root.home-random-items.length == 0 ? "There are no titles available for a random pick yet." : "";
-                        action-label: root.home-random-unwatched-only ? "Unwatched only ✓" : "Include watched";
+                        action-label: root.home-random-unwatched-only ? "Unwatched only" : "Include watched";
                         play-item(id) => { root.play-item(id); }
                         open-item(id) => { root.open-item-detail(id); }
-                        thumbnail-retry(id) => { root.retry-thumbnail(id); }
+                        thumbnail-retry(item) => { root.retry-thumbnail(item); }
                         open-performer(name) => { root.open-performer-profile(name); }
                         show-all(category-name) => { root.toggle-home-random-filter(); }
                         retry => { root.refresh-home(); }
@@ -1218,7 +1219,7 @@ export component MainWindow inherits Window {
                         empty-message: root.is-logged-in && !root.home-is-loading && root.home-error-message == "" && root.home-performer-items.length == 0 ? "Performer profiles will appear here when available." : "";
                         play-item(id) => { root.play-item(id); }
                         open-item(id) => { root.open-item-detail(id); }
-                        thumbnail-retry(id) => { root.retry-thumbnail(id); }
+                        thumbnail-retry(item) => { root.retry-thumbnail(item); }
                         open-performer(name) => { root.open-performer-profile(name); }
                         show-all(category-name) => { root.active-category = "Performers"; root.switch-screen("browse"); root.filter-category("Performers"); }
                         retry => { root.refresh-home(); }
@@ -1233,7 +1234,7 @@ export component MainWindow inherits Window {
                         empty-message: root.is-logged-in && !root.home-is-loading && root.home-error-message == "" && shelf.items.length == 0 ? "No titles in this category yet." : "";
                         play-item(id) => { root.play-item(id); }
                         open-item(id) => { root.open-item-detail(id); }
-                        thumbnail-retry(id) => { root.retry-thumbnail(id); }
+                        thumbnail-retry(item) => { root.retry-thumbnail(item); }
                         open-performer(name) => { root.open-performer-profile(name); }
                         show-all(category-name) => {
                             root.active-category = "Latest";
@@ -1253,39 +1254,46 @@ export component MainWindow inherits Window {
                 padding: root.compact-layout ? 16px : 24px;
                 spacing: 16px;
 
-                // Clear hierarchy above the filter controls, with a compact
-                // category label that remains useful in search mode.
                 HorizontalLayout {
                     height: 44px;
                     spacing: 12px;
                     alignment: center;
 
-                    VerticalLayout {
-                        spacing: 1px;
-                        horizontal-stretch: 1;
+                    Text {
+                        text: root.is-catalog-search-results
+                            ? "Search"
+                            : (root.catalog-category-drilldown
+                                ? root.catalog-genre-query
+                                : root.active-category);
+                        color: HubTheme.text-primary;
+                        font-size: HubTheme.title-size;
+                        font-weight: 600;
+                        width: min(parent.width - (root.catalog-category-drilldown ? 240px : 120px), self.preferred-width);
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
 
-                        Text {
-                            text: root.is-catalog-search-results
-                                ? "SEARCH RESULTS"
-                                : (root.catalog-category-drilldown ? "CATEGORY" : "YOUR LIBRARY");
-                            color: HubTheme.focus-ring;
-                            font-size: 12px;
-                            font-weight: 800;
-                            letter-spacing: 1.8px;
-                        }
+                    Rectangle {
+                        height: 26px;
+                        border-radius: HubTheme.control-radius;
+                        background: HubTheme.surface;
+                        border-width: 1px;
+                        border-color: HubTheme.separator;
 
-                        Text {
-                            text: root.is-catalog-search-results
-                                ? "Search"
-                                : (root.catalog-category-drilldown
-                                    ? root.catalog-genre-query
-                                    : root.active-category);
-                            color: HubTheme.text-primary;
-                            font-size: 28px;
-                            font-weight: 700;
-                            vertical-alignment: center;
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            Text {
+                                text: root.catalog-items.length + (root.is-catalog-search-results ? " results" : " items");
+                                color: HubTheme.text-secondary;
+                                font-size: HubTheme.metadata-size;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
                         }
                     }
+
+                    Rectangle { horizontal-stretch: 1; }
 
                     if root.catalog-category-drilldown : TvSecondaryButton {
                         text: "Back to Categories";
@@ -1295,26 +1303,6 @@ export component MainWindow inherits Window {
                             root.catalog-genre-query = "";
                             root.active-category = "Categories";
                             root.set-catalog-text-filter("genre", "");
-                        }
-                    }
-
-                    Rectangle {
-                        height: 26px;
-                        border-radius: 13px;
-                        background: HubTheme.surface;
-                        border-width: 1px;
-                        border-color: #F3F4F618;
-
-                        HorizontalLayout {
-                            padding-left: 10px;
-                            padding-right: 10px;
-                            Text {
-                                text: root.catalog-items.length + " shown";
-                                color: HubTheme.text-secondary;
-                                font-size: 12px;
-                                font-weight: 600;
-                                vertical-alignment: center;
-                            }
                         }
                     }
                 }
@@ -1341,11 +1329,10 @@ export component MainWindow inherits Window {
                             border-width: 1px;
                             border-color: #BE185D55;
                             Text {
-                                text: "OFFLINE";
+                                text: "Offline";
                                 color: HubTheme.focus-ring;
                                 font-size: 12px;
-                                font-weight: 800;
-                                letter-spacing: 1px;
+                                font-weight: 600;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
                                 width: 100%;
@@ -1909,7 +1896,7 @@ export component MainWindow inherits Window {
                             is-focused: root.focused-card-index == row.card-0.card-index;
                             play => { root.play-item(row.card-0.id); }
                             open-detail => { root.open-item-detail(row.card-0.id); }
-                            thumbnail-retry(id) => { root.retry-thumbnail(id); }
+                            thumbnail-retry(item) => { root.retry-thumbnail(item); }
                         }
 
                         if row.has-1 && row.card-1.provider == "performer" : PerformerCard {
@@ -1924,7 +1911,7 @@ export component MainWindow inherits Window {
                             is-focused: root.focused-card-index == row.card-1.card-index;
                             play => { root.play-item(row.card-1.id); }
                             open-detail => { root.open-item-detail(row.card-1.id); }
-                            thumbnail-retry(id) => { root.retry-thumbnail(id); }
+                            thumbnail-retry(item) => { root.retry-thumbnail(item); }
                         }
 
                         if row.has-2 && row.card-2.provider == "performer" : PerformerCard {
@@ -1939,7 +1926,7 @@ export component MainWindow inherits Window {
                             is-focused: root.focused-card-index == row.card-2.card-index;
                             play => { root.play-item(row.card-2.id); }
                             open-detail => { root.open-item-detail(row.card-2.id); }
-                            thumbnail-retry(id) => { root.retry-thumbnail(id); }
+                            thumbnail-retry(item) => { root.retry-thumbnail(item); }
                         }
 
                         if row.has-3 && row.card-3.provider == "performer" : PerformerCard {
@@ -1954,7 +1941,7 @@ export component MainWindow inherits Window {
                             is-focused: root.focused-card-index == row.card-3.card-index;
                             play => { root.play-item(row.card-3.id); }
                             open-detail => { root.open-item-detail(row.card-3.id); }
-                            thumbnail-retry(id) => { root.retry-thumbnail(id); }
+                            thumbnail-retry(item) => { root.retry-thumbnail(item); }
                         }
                     }
                 }
@@ -2342,7 +2329,7 @@ export component MainWindow inherits Window {
                                 is-focused: root.focused-channel-card-index == row.card-0.card-index;
                                 play => { root.play-item(row.card-0.id); }
                                 open-detail => { root.open-item-detail(row.card-0.id); }
-                                thumbnail-retry(id) => { root.retry-thumbnail(id); }
+                                thumbnail-retry(item) => { root.retry-thumbnail(item); }
                             }
 
                             if row.has-1 : VideoCard {
@@ -2352,7 +2339,7 @@ export component MainWindow inherits Window {
                                 is-focused: root.focused-channel-card-index == row.card-1.card-index;
                                 play => { root.play-item(row.card-1.id); }
                                 open-detail => { root.open-item-detail(row.card-1.id); }
-                                thumbnail-retry(id) => { root.retry-thumbnail(id); }
+                                thumbnail-retry(item) => { root.retry-thumbnail(item); }
                             }
 
                             if row.has-2 : VideoCard {
@@ -2362,7 +2349,7 @@ export component MainWindow inherits Window {
                                 is-focused: root.focused-channel-card-index == row.card-2.card-index;
                                 play => { root.play-item(row.card-2.id); }
                                 open-detail => { root.open-item-detail(row.card-2.id); }
-                                thumbnail-retry(id) => { root.retry-thumbnail(id); }
+                                thumbnail-retry(item) => { root.retry-thumbnail(item); }
                             }
 
                             if row.has-3 : VideoCard {
@@ -2372,7 +2359,7 @@ export component MainWindow inherits Window {
                                 is-focused: root.focused-channel-card-index == row.card-3.card-index;
                                 play => { root.play-item(row.card-3.id); }
                                 open-detail => { root.open-item-detail(row.card-3.id); }
-                                thumbnail-retry(id) => { root.retry-thumbnail(id); }
+                                thumbnail-retry(item) => { root.retry-thumbnail(item); }
                             }
                         }
                     }
@@ -2464,7 +2451,7 @@ export component MainWindow inherits Window {
                             spacing: 0px;
 
                             Text {
-                                text: "NO MEDIA SELECTED";
+                                text: "No media selected";
                                 color: HubTheme.focus-ring;
                                 font-size: 12px;
                                 font-weight: 800;
@@ -2511,7 +2498,7 @@ export component MainWindow inherits Window {
                             VerticalLayout {
                                 spacing: 6px;
                                 Text {
-                                    text: "MEDIA URL OR FILE PATH";
+                                    text: "Media URL or file path";
                                     color: HubTheme.text-secondary;
                                     font-size: 11px;
                                     font-weight: 600;
@@ -2556,8 +2543,6 @@ export component MainWindow inherits Window {
                         background: #0B0D1288;
                         border-width: 1.5px;
                         border-color: #F3F4F655;
-                        drop-shadow-blur: 24px;
-                        drop-shadow-color: #000000aa;
 
                         Rectangle {
                             x: 4px;
@@ -2623,8 +2608,6 @@ export component MainWindow inherits Window {
                         background: #0B0D12d9;
                         border-width: 1.5px;
                         border-color: #BE185D88;
-                        drop-shadow-blur: 22px;
-                        drop-shadow-color: #000000aa;
 
                         Text {
                             text: root.seek-feedback;
@@ -2704,7 +2687,7 @@ export component MainWindow inherits Window {
                             spacing: 14px;
 
                             TvSecondaryButton {
-                                text: "← Browse";
+                                text: "Back to Browse";
                                 glass: true;
                                 activity => { root.player-controls-visible = true; player-controls-hide-timer.restart(); }
                                 custom-height: 32px;
@@ -2712,7 +2695,7 @@ export component MainWindow inherits Window {
                             }
 
                             Text {
-                                text: root.player-error-message != "" ? "Playback interrupted" : root.status;
+                                text: root.player-error-message != "" ? "Playback interrupted" : (root.player-title != "" ? root.player-title : "No media selected");
                                 color: HubTheme.text-primary;
                                 font-size: 14px;
                                 font-weight: 600;
@@ -3465,28 +3448,12 @@ export component MainWindow inherits Window {
                     }
 
                     // Keep close affordance high contrast over poster art.
-                    Rectangle {
-                        x: parent.width - 48px;
+                    IconButton {
+                        x: parent.width - 52px;
                         y: 14px;
-                        width: 34px;
-                        height: 34px;
-                        border-radius: 17px;
-                        background: close-touch.has-hover ? HubTheme.accent : #111116cc;
-                        border-width: 1px;
-                        border-color: #F3F4F633;
-
-                        Text {
-                            text: "✕";
-                            color: HubTheme.text-primary;
-                            font-size: 14px;
-                            font-weight: 700;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-
-                        close-touch := TouchArea {
-                            clicked => { root.detail-more-actions-visible = false; root.close-item-detail(); }
-                        }
+                        icon: @image-url("../../../assets/icons/close.svg");
+                        accessible-name: "Close video details";
+                        clicked => { root.detail-more-actions-visible = false; root.close-item-detail(); }
                     }
                 }
 
@@ -3795,13 +3762,13 @@ export component MainWindow inherits Window {
                     }
 
                     TvSecondaryButton {
-                        text: root.detail-is-favorite ? "❤️ Favorited" : "🤍 Favorite";
+                        text: root.detail-is-favorite ? "Favorited" : "Favorite";
                         active: root.detail-is-favorite;
                         clicked => { root.toggle-detail-favorite(root.detail-id); }
                     }
 
                     TvSecondaryButton {
-                        text: root.detail-is-played ? "✓ Played" : "Mark Watched";
+                        text: root.detail-is-played ? "Played" : "Mark watched";
                         active: root.detail-is-played;
                         clicked => { root.toggle-detail-played(root.detail-id); }
                     }
@@ -3958,7 +3925,7 @@ export component MainWindow inherits Window {
                     }
 
                     TvSecondaryButton {
-                        text: "✕ Close";
+                        text: "Close";
                         clicked => { root.close-performer-profile(); }
                     }
                 }
@@ -4183,7 +4150,7 @@ export component MainWindow inherits Window {
                     }
 
                     TvSecondaryButton {
-                        text: "✕ Close";
+                        text: "Close";
                         clicked => { root.close-studio-profile(); }
                     }
                 }
@@ -4643,7 +4610,7 @@ export component MainWindow inherits Window {
                         horizontal-stretch: 1;
                     }
                     TvSecondaryButton {
-                        text: "✕";
+                        text: "Close";
                         custom-height: 40px;
                         clicked => { root.close-login-modal(); }
                     }
@@ -4841,7 +4808,7 @@ export component MainWindow inherits Window {
 
                         for option in root.catalog-filter-options : TvSecondaryButton {
                             width: 100%;
-                            text: option.selected ? option.name + "  ✓" : option.name;
+                            text: option.name;
                             active: option.selected;
                             custom-height: 38px;
                             clicked => {

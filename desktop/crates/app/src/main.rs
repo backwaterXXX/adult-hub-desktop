@@ -223,20 +223,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let weak = ui.as_weak();
         let credential_store = credential_store.clone();
-        ui.on_retry_thumbnail(move |id| {
+        ui.on_retry_thumbnail(move |item| {
             let Some(handle) = weak.upgrade() else { return };
             let active_screen = handle.get_active_screen();
+            let request = catalog::ThumbnailRequest::from(&item);
             let token = credential_store
                 .get()
                 .ok()
                 .flatten()
                 .map(|session| session.access_token);
             if active_screen == "home" {
-                catalog::retry_home_thumbnail_async(weak.clone(), id.to_string(), token);
+                catalog::retry_home_thumbnail_async(weak.clone(), request, token);
                 return;
             }
             let channel = active_screen == "channels";
-            catalog::retry_thumbnail_async(weak.clone(), id.to_string(), token, channel);
+            catalog::retry_thumbnail_async(weak.clone(), request, token, channel);
         });
     }
 

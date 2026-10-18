@@ -109,6 +109,14 @@ pub fn load_media(ui: &MainWindow, player: &Player, input: &str, headers: &[Stri
     ui.set_player_controls_visible(true);
     ui.set_player_more_controls_visible(false);
     ui.set_player_media_loaded(false);
+    ui.set_player_title(
+        Path::new(&path)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "Media".to_owned())
+            .into(),
+    );
     ui.set_player_error_message(String::new().into());
     ui.set_status(format!("Loading: {path}").into());
     ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
@@ -153,6 +161,7 @@ pub fn stop_active_playback_for_navigation(
     ui.set_player_controls_visible(true);
     ui.set_player_more_controls_visible(false);
     ui.set_player_media_loaded(false);
+    ui.set_player_title("".into());
     ui.set_position(0.0);
     ui.set_duration(0.0);
     ui.set_position_text("0:00".into());
@@ -356,6 +365,7 @@ pub fn start_item_playback_with_resume(
     ui.set_player_controls_visible(true);
     ui.set_player_more_controls_visible(false);
     ui.set_player_media_loaded(false);
+    ui.set_player_title(crate::catalog::display_title(&item).into());
     ui.set_url_text(stream_url.clone().into());
     ui.set_status(format!("Loading: {}", item.title).into());
     ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));

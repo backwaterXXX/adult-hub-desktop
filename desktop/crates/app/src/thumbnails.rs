@@ -359,6 +359,7 @@ fn retryable_image_status(status: reqwest::StatusCode) -> bool {
         || status.is_server_error()
 }
 
+#[derive(Debug)]
 enum ImageRequestError {
     Transport(reqwest::Error),
     InvalidRedirect,
@@ -452,7 +453,34 @@ mod tests {
         cache_url_variants, decode_dynamic_image, is_non_image_content_type,
         is_resolver_origin_request, resolve_resolver_thumbnail_url_at, retryable_image_status,
     };
-    use std::io::Cursor;
+    use std::io::{Cursor, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::Mutex;
+
+    static RESOLVER_REQUEST_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn read_request(stream: &mut TcpStream) -> String {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        loop {
+            let Ok(count) = stream.read(&mut buffer) else {
+                break;
+            };
+            if count == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..count]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&request).into_owned()
+    }
+
+    fn respond(stream: &mut TcpStream, response: &[u8]) {
+        stream.write_all(response).unwrap();
+        stream.flush().unwrap();
+    }
 
     #[test]
     fn resolves_absolute_resolver_admin_urls_to_configured_origin() {
@@ -535,6 +563,51 @@ mod tests {
     }
 
     #[test]
+    fn resolver_thumbnail_request_sends_token_only_to_configured_origin() {
+        let _guard = RESOLVER_REQUEST_TEST_LOCK.lock().unwrap();
+        let resolver = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let resolver_address = resolver.local_addr().unwrap();
+        let cdn = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let cdn_address = cdn.local_addr().unwrap();
+
+        let cdn_server = std::thread::spawn(move || {
+            let (mut stream, _) = cdn.accept().unwrap();
+            let request = read_request(&mut stream);
+            respond(
+                &mut stream,
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+            );
+            request
+        });
+        let resolver_server = std::thread::spawn(move || {
+            let (mut stream, _) = resolver.accept().unwrap();
+            let request = read_request(&mut stream);
+            let location = format!("http://{cdn_address}/thumbnail.jpg");
+            let response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            respond(&mut stream, response.as_bytes());
+            request
+        });
+
+        super::set_resolver_base_url(&format!("http://{resolver_address}"));
+        super::set_resolver_auth_token(Some("test-resolver-token"));
+        let result = super::send_image_request(
+            &format!("http://{resolver_address}/admin/api/v2/video-phash/thumbnail?id=anonymous"),
+            None,
+        );
+        assert!(result.is_ok());
+        assert!(result.unwrap().status().is_success());
+
+        let resolver_request = resolver_server.join().unwrap().to_ascii_lowercase();
+        let cdn_request = cdn_server.join().unwrap().to_ascii_lowercase();
+        assert!(resolver_request.contains("x-emby-token: test-resolver-token"));
+        assert!(!cdn_request.contains("x-emby-token:"));
+        super::set_resolver_auth_token(None);
+        super::set_resolver_base_url("");
+    }
+
+    #[test]
     fn rejects_html_and_json_success_responses_as_invalid_image_responses() {
         assert!(is_non_image_content_type("text/html; charset=utf-8"));
         assert!(is_non_image_content_type("application/json"));
@@ -556,6 +629,26 @@ mod tests {
             "https://jellyfin.example/Items/abc/Images/Primary?quality=90"
         );
         assert!(cache_url_variants("").is_empty());
+    }
+
+    #[test]
+    fn retry_removes_existing_tagged_and_untagged_cache_entries() {
+        let url = format!(
+            "https://jellyfin.example/Items/retry-test/Images/Primary?tag=retry-{}&quality=90",
+            std::process::id()
+        );
+        let paths = cache_url_variants(&url)
+            .iter()
+            .map(|variant| super::url_to_cache_path_without_create(variant))
+            .collect::<Vec<_>>();
+        for path in &paths {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"stale-error-cache-entry").unwrap();
+        }
+
+        super::invalidate_cached_image(&url);
+
+        assert!(paths.iter().all(|path| !path.exists()));
     }
 
     #[test]
