@@ -108,8 +108,11 @@ export component PerformerCard inherits Rectangle {
 }
 
 component DashboardSkeletonCard inherits Rectangle {
-    width: 250px;
-    height: 219px;
+    property <length> artwork-height: min(220px, root.width * 0.5625);
+    preferred-width: 240px;
+    min-width: 160px;
+    horizontal-stretch: 1;
+    height: root.artwork-height + 82px;
     border-radius: HubTheme.card-radius;
     background: HubTheme.surface;
     border-width: 1px;
@@ -119,13 +122,14 @@ component DashboardSkeletonCard inherits Rectangle {
     VerticalLayout {
         spacing: 0px;
         Rectangle {
-            height: 140px;
+            height: root.artwork-height;
             background: HubTheme.surface-hover;
         }
 
         VerticalLayout {
             padding-left: 12px;
             padding-right: 12px;
+            height: 82px;
             padding-top: 12px;
             spacing: 8px;
             Rectangle {
@@ -168,37 +172,25 @@ export component DashboardShelf inherits VerticalLayout {
         SectionHeader {
             title: root.title;
             action-label: root.action-label;
-            show-scroll-controls: !root.performer-cards && root.items.length > 2;
-            scroll-left-disabled: shelf-scroll.content-x >= 0px;
-            scroll-right-disabled: shelf-scroll.content-x <= min(0px, root.width - max(root.width, root.items.length * 266px - 16px));
+            show-scroll-controls: false;
             action => { root.show-all(root.category-name); }
-            scroll-left => {
-                shelf-scroll.content-x = min(0px, shelf-scroll.content-x + 266px);
-            }
-            scroll-right => {
-                shelf-scroll.content-x = max(min(0px, root.width - max(root.width, root.items.length * 266px - 16px)), shelf-scroll.content-x - 266px);
-            }
         }
 
         if root.error-message != "" : Rectangle {
             height: 54px;
             border-radius: 9px;
-            background: #21151a;
-            border-width: 1px;
-                border-color: #FB718555;
+            background: HubTheme.surface;
+            border-width: 0px;
             HorizontalLayout {
                 padding-left: 14px;
                 padding-right: 10px;
                 spacing: 10px;
                 alignment: center;
-                Text {
-                    text: "!";
-                    width: 20px;
-                    color: HubTheme.error;
-                    font-size: 15px;
-                    font-weight: 800;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
+                Image {
+                    source: @image-url("../../../assets/icons/alert.svg");
+                    width: 18px;
+                    height: 18px;
+                    image-fit: contain;
                 }
                 Text {
                     text: root.error-message;
@@ -211,9 +203,8 @@ export component DashboardShelf inherits VerticalLayout {
                 Rectangle {
                     height: 30px;
                     border-radius: 6px;
-                    background: retry-touch.has-hover ? #34202a : #281a21;
-                    border-width: 1px;
-                border-color: #FB718570;
+                    background: retry-touch.has-hover ? HubTheme.surface-hover : transparent;
+                    border-width: 0px;
                     HorizontalLayout {
                         padding-left: 10px;
                         padding-right: 10px;
@@ -235,54 +226,68 @@ export component DashboardShelf inherits VerticalLayout {
             }
         }
 
-        shelf-scroll := ScrollView {
-            height: root.items.length == 0 ? 0px : (root.performer-cards ? 284px : 240px);
-            vertical-scrollbar-policy: ScrollBarPolicy.always-off;
-            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
-            mouse-drag-pan-enabled: true;
-
-            if root.performer-cards && root.items.length > 0 : HorizontalLayout {
-                width: max(root.width, root.items.length * 156px - 16px);
-                height: 270px;
-                spacing: HubTheme.space-4;
-
-                for card in root.items : PerformerCard {
-                    item: card;
-                    clicked => { root.open-performer(card.title); }
-                }
+        if root.items.length > 0 && root.performer-cards : HorizontalLayout {
+            height: 270px;
+            spacing: HubTheme.space-4;
+            if root.items.length > 0 : PerformerCard {
+                horizontal-stretch: 1;
+                item: root.items[0];
+                clicked => { root.open-performer(root.items[0].title); }
             }
-
-            if !root.performer-cards && root.items.length > 0 : HorizontalLayout {
-                width: max(root.width, root.items.length * 266px - 16px);
-                height: 224px;
-                spacing: HubTheme.space-4;
-
-                for card in root.items : VideoCard {
-                    item: card;
-                    card-width: 250px;
-                    fixed-width: true;
-                    play => { root.play-item(card.id); }
-                    open-detail => { root.open-item(card.id); }
-                    thumbnail-retry(item) => { root.thumbnail-retry(item); }
-                }
+            if root.items.length > 1 : PerformerCard {
+                horizontal-stretch: 1;
+                item: root.items[1];
+                clicked => { root.open-performer(root.items[1].title); }
+            }
+            if root.items.length > 2 : PerformerCard {
+                horizontal-stretch: 1;
+                item: root.items[2];
+                clicked => { root.open-performer(root.items[2].title); }
             }
         }
 
-        if root.items.length == 0 && root.loading : ScrollView {
-                height: 240px;
-                vertical-scrollbar-policy: ScrollBarPolicy.always-off;
-                horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+        if root.items.length > 0 && !root.performer-cards : HorizontalLayout {
+            height: root.items.length == 1
+                ? min(302px, min(220px, min(root.width, 560px) * 0.5625) + 82px)
+                : (root.items.length == 2
+                    ? min(302px, min(220px, ((root.width - 16px) / 2) * 0.5625) + 82px)
+                    : min(302px, max(206px, min(220px, ((root.width - 32px) / 3) * 0.5625) + 82px)));
+            spacing: HubTheme.space-4;
+            if root.items.length > 0 : VideoCard {
+                item: root.items[0];
+                card-width: 240px;
+                max-width: 560px;
+                fixed-width: false;
+                play => { root.play-item(root.items[0].id); }
+                open-detail => { root.open-item(root.items[0].id); }
+                thumbnail-retry(item) => { root.thumbnail-retry(item); }
+            }
+            if root.items.length > 1 : VideoCard {
+                item: root.items[1];
+                card-width: 240px;
+                max-width: 560px;
+                fixed-width: false;
+                play => { root.play-item(root.items[1].id); }
+                open-detail => { root.open-item(root.items[1].id); }
+                thumbnail-retry(item) => { root.thumbnail-retry(item); }
+            }
+            if root.items.length > 2 : VideoCard {
+                item: root.items[2];
+                card-width: 240px;
+                max-width: 560px;
+                fixed-width: false;
+                play => { root.play-item(root.items[2].id); }
+                open-detail => { root.open-item(root.items[2].id); }
+                thumbnail-retry(item) => { root.thumbnail-retry(item); }
+            }
+        }
 
-                HorizontalLayout {
-                    width: max(root.width, 4 * 266px - 16px);
-                    height: 224px;
-                    spacing: HubTheme.space-4;
-
-                    DashboardSkeletonCard {}
-                    DashboardSkeletonCard {}
-                    DashboardSkeletonCard {}
-                    DashboardSkeletonCard {}
-                }
+        if root.items.length == 0 && root.loading : HorizontalLayout {
+            height: min(302px, max(206px, min(220px, ((root.width - 32px) / 3) * 0.5625) + 82px));
+            spacing: HubTheme.space-4;
+            DashboardSkeletonCard { horizontal-stretch: 1; }
+            DashboardSkeletonCard { horizontal-stretch: 1; }
+            DashboardSkeletonCard { horizontal-stretch: 1; }
         }
 
         if root.items.length == 0 && !root.loading && root.error-message == "" && root.empty-message != "" : Rectangle {

@@ -1,6 +1,6 @@
 import { HubTheme, KeyboardState } from "theme.slint";
 import { ScrollView } from "std-widgets.slint";
-import { IconButton } from "common-controls.slint";
+import { IconButton, PageHeader, StatusBadge } from "common-controls.slint";
 
 // =============================================================================
 // SettingsView.slint - Isolated Desktop Settings Component for Adult Hub
@@ -11,8 +11,8 @@ import { IconButton } from "common-controls.slint";
 // - Explicit UI state and callbacks
 // - Left-aligned compact responsive form layout
 // - Category navigation with a dedicated narrow-window selector
-// - 40-44px touch/click friendly controls
-// - Dark neutral theme with pink accent (#BE185D / #F9A8D4)
+// - 36-40px touch/click friendly controls
+// - Fluent 2 Dark surfaces with a restrained pink accent (#C2185B)
 // - Comprehensive keyboard focus support and accessible labels
 // =============================================================================
 
@@ -37,28 +37,6 @@ export struct HomeCategoryOption {
 // -----------------------------------------------------------------------------
 // Internal Subcomponents & Helpers
 // -----------------------------------------------------------------------------
-
-component PersonPlaceholder inherits Rectangle {
-    background: transparent;
-
-    Rectangle {
-        x: (parent.width - min(parent.width, parent.height)) / 2 + min(parent.width, parent.height) * 0.36;
-        y: (parent.height - min(parent.width, parent.height)) / 2 + min(parent.width, parent.height) * 0.20;
-        width: min(parent.width, parent.height) * 0.28;
-        height: min(parent.width, parent.height) * 0.28;
-        border-radius: min(parent.width, parent.height) * 0.14;
-        background: #ff9abc;
-    }
-
-    Rectangle {
-        x: (parent.width - min(parent.width, parent.height)) / 2 + min(parent.width, parent.height) * 0.20;
-        y: (parent.height - min(parent.width, parent.height)) / 2 + min(parent.width, parent.height) * 0.54;
-        width: min(parent.width, parent.height) * 0.60;
-        height: min(parent.width, parent.height) * 0.30;
-        border-radius: min(parent.width, parent.height) * 0.15;
-        background: #ff9abc;
-    }
-}
 
 component DiagnosticCodecBadge inherits Rectangle {
     in property <string> codec-name;
@@ -93,40 +71,6 @@ component DiagnosticCodecBadge inherits Rectangle {
     }
 }
 
-component SettingsStatusBadge inherits Rectangle {
-    in property <string> text;
-    in property <string> status: "neutral"; // "success", "warning", "error", "neutral"
-    in property <string> accessible-name: root.text;
-
-    accessible-role: none;
-    accessible-label: root.accessible-name;
-    height: 30px;
-    min-width: badge-label.preferred-width + 20px;
-    border-radius: 15px;
-    border-width: 1px;
-    border-color: root.status == "success" ? #4ADE8066
-        : (root.status == "warning" ? #FBBF2466
-        : (root.status == "error" ? #FB718566 : HubTheme.separator));
-    background: root.status == "success" ? #4ADE8018
-        : (root.status == "warning" ? #FBBF2418
-        : (root.status == "error" ? #FB718518 : HubTheme.navigation-background));
-
-    badge-label := Text {
-        x: 10px;
-        width: parent.width - 20px;
-        height: parent.height;
-        text: root.text;
-        color: root.status == "success" ? HubTheme.success
-            : (root.status == "warning" ? HubTheme.warning
-            : (root.status == "error" ? HubTheme.error : HubTheme.text-secondary));
-        font-size: HubTheme.metadata-size;
-        font-weight: 600;
-        vertical-alignment: center;
-        horizontal-alignment: center;
-        overflow: elide;
-    }
-}
-
 component SettingsButton inherits Rectangle {
     in property <string> text;
     in property <string> accessible-name: root.text;
@@ -134,7 +78,7 @@ component SettingsButton inherits Rectangle {
     in property <bool> active: false;
     in property <bool> disabled: false;
     in property <bool> danger: false;
-    in property <length> custom-height: 42px;
+    in property <length> custom-height: 40px;
     in property <length> custom-width: 0px;
     out property <bool> has-focus: focus-target.has-focus;
     callback clicked();
@@ -149,11 +93,8 @@ component SettingsButton inherits Rectangle {
     height: root.custom-height;
     width: root.custom-width > 0px ? root.custom-width : max(90px, btn-label.preferred-width + 28px);
     border-radius: HubTheme.control-radius;
-    border-width: 2px;
-    border-color: root.has-focus ? HubTheme.focus-ring
-        : (root.danger ? HubTheme.error
-        : (root.primary || root.active ? HubTheme.accent
-        : (touch.has-hover ? #BE185D88 : #F3F4F624)));
+    border-width: root.has-focus ? 1px : 0px;
+    border-color: root.has-focus ? HubTheme.focus-ring : transparent;
     background: root.disabled ? #171C2688
         : (touch.pressed ? (root.danger ? #7F1D1D : HubTheme.accent-pressed)
         : (touch.has-hover ? (root.danger ? #991B1B : (root.primary ? HubTheme.accent-hover : HubTheme.surface-hover))
@@ -204,11 +145,11 @@ component SettingsTextInput inherits Rectangle {
     callback accepted(string);
 
     forward-focus: input;
-    height: 44px;
+    height: 40px;
     border-radius: HubTheme.control-radius;
-    background: root.enabled ? #141418 : #19191e;
-    border-width: 2px;
-    border-color: input.has-focus ? HubTheme.focus-ring : (root.enabled ? #F3F4F624 : #F3F4F612);
+    background: root.enabled ? HubTheme.surface : HubTheme.navigation-background;
+    border-width: 1px;
+    border-color: input.has-focus ? HubTheme.focus-ring : HubTheme.separator;
     clip: true;
     animate border-color { duration: 120ms; }
 
@@ -260,9 +201,9 @@ component SettingsCategoryTab inherits Rectangle {
     height: 42px;
     min-width: max(88px, tab-label.preferred-width + 24px);
     border-radius: HubTheme.control-radius;
-    border-width: 2px;
-    border-color: root.has-focus ? HubTheme.focus-ring : (root.selected ? HubTheme.accent-outline : transparent);
-    background: root.selected ? #BE185D24 : (touch.has-hover ? HubTheme.surface-hover : transparent);
+    border-width: root.has-focus ? 1px : 0px;
+    border-color: root.has-focus ? HubTheme.focus-ring : transparent;
+    background: root.selected ? HubTheme.surface-raised : (touch.has-hover ? HubTheme.surface-hover : transparent);
 
     animate background { duration: 120ms; }
 
@@ -624,33 +565,14 @@ export component SettingsView inherits Rectangle {
             VerticalLayout {
                 padding-left: root.is-narrow ? HubTheme.compact-content-padding : HubTheme.content-padding;
                 padding-right: root.is-narrow ? HubTheme.compact-content-padding : HubTheme.content-padding;
-                padding-top: 24px;
+                padding-top: 28px;
                 padding-bottom: 40px;
                 spacing: HubTheme.space-4;
                 alignment: start;
 
-                // -------------------------------------------------------------
-                // 1. Header & Version Banner
-                // -------------------------------------------------------------
-                HorizontalLayout {
-                    spacing: HubTheme.space-3;
-                    alignment: center;
-
-                    Text {
-                        text: "Settings & Preferences";
-                        color: HubTheme.text-primary;
-                        font-size: HubTheme.section-title-size;
-                        font-weight: 700;
-                        horizontal-stretch: 1;
-                    }
-
-                    Text {
-                        text: "Adult Hub Desktop v" + root.app-version;
-                        color: HubTheme.accent-text;
-                        font-size: HubTheme.metadata-size;
-                        font-weight: 600;
-                        vertical-alignment: center;
-                    }
+                PageHeader {
+                    title: "Settings";
+                    description: "Manage connections, library, and playback preferences.";
                 }
 
                 // -------------------------------------------------------------
@@ -884,43 +806,51 @@ export component SettingsView inherits Rectangle {
                 }
 
                 // -------------------------------------------------------------
-                // 4. Compact Left-Aligned Form Content
+                // 4. Compact Left-Aligned Form Content (max 880px)
                 // -------------------------------------------------------------
-                Rectangle {
-                    max-width: 920px;
-                    width: 100%;
-                    background: transparent;
+                HorizontalLayout {
+                    alignment: start;
 
-                    VerticalLayout {
-                        spacing: 20px;
+                    Rectangle {
+                        width: min(880px, root.width - (root.is-narrow ? HubTheme.compact-content-padding : HubTheme.content-padding) * 2);
+                        background: transparent;
 
-                        // =====================================================
-                        // SECTION: CONNECTION & SERVER
-                        // =====================================================
-                        if root.active-category == "connection" : Rectangle {
-                            border-radius: HubTheme.card-radius;
-                            background: HubTheme.surface;
-                            border-width: 1px;
-                            border-color: #F3F4F614;
+                        VerticalLayout {
+                            spacing: 20px;
 
-                            VerticalLayout {
-                                padding: HubTheme.form-card-padding;
-                                spacing: 16px;
+                            // =====================================================
+                            // SECTION: CONNECTION & SERVER
+                            // =====================================================
+                            if root.active-category == "connection" : Rectangle {
+                                border-radius: HubTheme.card-radius;
+                                background: HubTheme.surface;
+                                border-width: 1px;
+                                border-color: #F3F4F614;
 
-                                HorizontalLayout {
-                                    Text {
-                                        text: "Jellyfin Server";
-                                        color: HubTheme.accent-text;
-                                        font-size: HubTheme.card-title-size;
-                                        font-weight: 700;
-                                        horizontal-stretch: 1;
+                                VerticalLayout {
+                                    padding: HubTheme.form-card-padding;
+                                    spacing: 16px;
+
+                                    HorizontalLayout {
+                                        spacing: 12px;
+                                        alignment: start;
+                                        height: 26px;
+
+                                        Text {
+                                            text: "Jellyfin Server";
+                                            color: HubTheme.text-primary;
+                                            font-size: HubTheme.card-title-size;
+                                            font-weight: 700;
+                                            vertical-alignment: center;
+                                        }
+
+                                        StatusBadge {
+                                            text: root.is-logged-in ? "Connected" : "Disconnected";
+                                            status: root.is-logged-in ? "success" : "neutral";
+                                        }
+
+                                        Rectangle { horizontal-stretch: 1; }
                                     }
-
-                                    SettingsStatusBadge {
-                                        text: root.is-logged-in ? "Connected" : "Disconnected";
-                                        status: root.is-logged-in ? "success" : "neutral";
-                                    }
-                                }
 
                                 if !root.is-logged-in : VerticalLayout {
                                     spacing: 12px;
@@ -1205,32 +1135,37 @@ export component SettingsView inherits Rectangle {
                                     spacing: 16px;
 
                                     HorizontalLayout {
-                                        alignment: center;
-                                        spacing: 16px;
+                                        spacing: 14px;
 
                                         Rectangle {
-                                            width: 48px;
-                                            height: 48px;
-                                            border-radius: 24px;
-                                            background: #BE185D33;
-                                            border-width: 2px;
-                                            border-color: HubTheme.accent-outline;
+                                            width: 44px;
+                                            height: 44px;
+                                            border-radius: 22px;
+                                            background: #C2185B22;
+                                            border-width: 1px;
+                                            border-color: HubTheme.accent;
 
-                                            PersonPlaceholder {
-                                                width: 100%;
-                                                height: 100%;
+                                            Image {
+                                                source: @image-url("../../../assets/icons/person.svg");
+                                                width: 20px;
+                                                height: 20px;
+                                                x: (parent.width - self.width) / 2;
+                                                y: (parent.height - self.height) / 2;
+                                                image-fit: contain;
                                             }
                                         }
 
                                         VerticalLayout {
                                             horizontal-stretch: 1;
                                             spacing: 2px;
+                                            alignment: center;
 
                                             Text {
                                                 text: root.logged-in-user;
                                                 color: HubTheme.text-primary;
-                                                font-size: HubTheme.card-title-size;
-                                                font-weight: 700;
+                                                font-size: 15px;
+                                                font-weight: 600;
+                                                overflow: elide;
                                             }
 
                                             Text {
@@ -1244,14 +1179,13 @@ export component SettingsView inherits Rectangle {
                                         SettingsButton {
                                             text: "Log Out";
                                             danger: true;
-                                            custom-height: 42px;
+                                            custom-height: 36px;
                                             clicked => { root.perform-logout(); }
                                         }
                                     }
 
                                     HorizontalLayout {
                                         spacing: 12px;
-                                        alignment: center;
 
                                         Text {
                                             text: "Active Library: " + root.current-library;
@@ -1264,7 +1198,7 @@ export component SettingsView inherits Rectangle {
 
                                         SettingsButton {
                                             text: "Refresh Libraries";
-                                            custom-height: 40px;
+                                            custom-height: 36px;
                                             clicked => { root.refresh-library-list(); }
                                         }
                                     }
@@ -1323,7 +1257,7 @@ export component SettingsView inherits Rectangle {
 
                                 Text {
                                     text: "Trusted LAN HTTP Origins";
-                                    color: HubTheme.accent-text;
+                                    color: HubTheme.text-primary;
                                     font-size: HubTheme.card-title-size;
                                     font-weight: 700;
                                 }
@@ -1392,7 +1326,7 @@ export component SettingsView inherits Rectangle {
 
                                 Text {
                                     text: "Playback & Video Engine Preferences";
-                                    color: HubTheme.accent-text;
+                                    color: HubTheme.text-primary;
                                     font-size: HubTheme.card-title-size;
                                     font-weight: 700;
                                 }
@@ -1409,14 +1343,14 @@ export component SettingsView inherits Rectangle {
 
                                     SettingsButton {
                                         text: root.buffer-profile-label;
-                                        custom-height: 42px;
+                                        custom-height: 40px;
                                         horizontal-stretch: 1;
                                         clicked => { root.cycle-buffer-profile(); }
                                     }
 
                                     SettingsButton {
                                         text: root.seek-step-label;
-                                        custom-height: 42px;
+                                        custom-height: 40px;
                                         horizontal-stretch: 1;
                                         clicked => { root.cycle-seek-step(); }
                                     }
@@ -1428,7 +1362,7 @@ export component SettingsView inherits Rectangle {
                                     SettingsButton {
                                         text: root.hwdec-active ? "Hardware Decode: ON" : "Hardware Decode: OFF";
                                         active: root.hwdec-active;
-                                        custom-height: 42px;
+                                        custom-height: 40px;
                                         horizontal-stretch: 1;
                                         clicked => { root.toggle-hwdec(); }
                                     }
@@ -1436,7 +1370,7 @@ export component SettingsView inherits Rectangle {
                                     SettingsButton {
                                         text: root.autoplay-active ? "Autoplay Next: ON" : "Autoplay Next: OFF";
                                         active: root.autoplay-active;
-                                        custom-height: 42px;
+                                        custom-height: 40px;
                                         horizontal-stretch: 1;
                                         clicked => { root.toggle-autoplay(); }
                                     }
@@ -1448,7 +1382,7 @@ export component SettingsView inherits Rectangle {
                                     SettingsButton {
                                         text: root.low-ram-active ? "Low-RAM Mode: ON" : "Low-RAM Mode: OFF";
                                         active: root.low-ram-active;
-                                        custom-height: 42px;
+                                        custom-height: 40px;
                                         horizontal-stretch: 1;
                                         clicked => { root.toggle-low-ram(); }
                                     }
@@ -1471,7 +1405,7 @@ export component SettingsView inherits Rectangle {
 
                                 Text {
                                     text: "Resolver API & Video Matching";
-                                    color: HubTheme.accent-text;
+                                    color: HubTheme.text-primary;
                                     font-size: HubTheme.card-title-size;
                                     font-weight: 700;
                                 }
@@ -1563,7 +1497,7 @@ export component SettingsView inherits Rectangle {
                                     SettingsButton {
                                         text: "Save Resolver URL";
                                         primary: true;
-                                        custom-height: 42px;
+                                        custom-height: 40px;
                                         horizontal-stretch: 1;
                                         clicked => {
                                             root.save-resolver-url(root.resolver-url-input);
@@ -1572,7 +1506,7 @@ export component SettingsView inherits Rectangle {
 
                                     SettingsButton {
                                         text: "Test Connection";
-                                        custom-height: 42px;
+                                        custom-height: 40px;
                                         horizontal-stretch: 1;
                                         clicked => {
                                             root.test-resolver-connection();
@@ -1588,7 +1522,7 @@ export component SettingsView inherits Rectangle {
                                     SettingsButton {
                                         text: root.phash-active ? "Video Matching (pHash on playback): ON" : "Video Matching (pHash on playback): OFF";
                                         active: root.phash-active;
-                                        custom-height: 42px;
+                                        custom-height: 40px;
                                         clicked => { root.toggle-phash(); }
                                     }
 
@@ -1616,7 +1550,7 @@ export component SettingsView inherits Rectangle {
 
                                 Text {
                                     text: "Home Screen Categories & Shelves";
-                                    color: HubTheme.accent-text;
+                                    color: HubTheme.text-primary;
                                     font-size: HubTheme.card-title-size;
                                     font-weight: 700;
                                 }
@@ -1668,7 +1602,7 @@ export component SettingsView inherits Rectangle {
 
                                 Text {
                                     text: "Content Exclusions & Hidden Channels";
-                                    color: HubTheme.accent-text;
+                                    color: HubTheme.text-primary;
                                     font-size: HubTheme.card-title-size;
                                     font-weight: 700;
                                 }
@@ -1691,7 +1625,7 @@ export component SettingsView inherits Rectangle {
 
                                     SettingsButton {
                                         text: "Exclude Tag";
-                                        custom-height: 42px;
+                                        custom-height: 40px;
                                         clicked => {
                                             if (root.new-tag-input != "") {
                                                 root.add-excluded-tag(root.new-tag-input);
@@ -1770,7 +1704,7 @@ export component SettingsView inherits Rectangle {
 
                                 Text {
                                     text: "Thumbnail Cache & Local Storage";
-                                    color: HubTheme.accent-text;
+                                    color: HubTheme.text-primary;
                                     font-size: HubTheme.card-title-size;
                                     font-weight: 700;
                                 }
@@ -1787,7 +1721,7 @@ export component SettingsView inherits Rectangle {
 
                                     SettingsButton {
                                         text: root.cache-limit-label;
-                                        custom-height: 42px;
+                                        custom-height: 40px;
                                         horizontal-stretch: 1;
                                         clicked => { root.cycle-cache-limit(); }
                                     }
@@ -1795,7 +1729,7 @@ export component SettingsView inherits Rectangle {
                                     SettingsButton {
                                         text: "Clear Image Cache";
                                         danger: true;
-                                        custom-height: 42px;
+                                        custom-height: 40px;
                                         horizontal-stretch: 1;
                                         clicked => {
                                             root.confirm-dialog-action = "cache";
@@ -1823,7 +1757,7 @@ export component SettingsView inherits Rectangle {
 
                                 Text {
                                     text: "Data & Privacy Controls";
-                                    color: HubTheme.accent-text;
+                                    color: HubTheme.text-primary;
                                     font-size: HubTheme.card-title-size;
                                     font-weight: 700;
                                 }
@@ -1840,7 +1774,7 @@ export component SettingsView inherits Rectangle {
 
                                     SettingsButton {
                                         text: "Clear Search History";
-                                        custom-height: 42px;
+                                        custom-height: 40px;
                                         horizontal-stretch: 1;
                                         clicked => {
                                             root.confirm-dialog-action = "search";
@@ -1852,7 +1786,7 @@ export component SettingsView inherits Rectangle {
 
                                     SettingsButton {
                                         text: "Clear Watch History";
-                                        custom-height: 42px;
+                                        custom-height: 40px;
                                         horizontal-stretch: 1;
                                         clicked => {
                                             root.confirm-dialog-action = "watch";
@@ -1864,7 +1798,7 @@ export component SettingsView inherits Rectangle {
 
                                     SettingsButton {
                                         text: "Clear Resume Progress";
-                                        custom-height: 42px;
+                                        custom-height: 40px;
                                         horizontal-stretch: 1;
                                         clicked => {
                                             root.confirm-dialog-action = "progress";
@@ -1929,7 +1863,7 @@ export component SettingsView inherits Rectangle {
                                 HorizontalLayout {
                                     Text {
                                         text: "Device & Hardware Diagnostics";
-                                        color: HubTheme.accent-text;
+                                        color: HubTheme.text-primary;
                                         font-size: HubTheme.card-title-size;
                                         font-weight: 700;
                                         vertical-alignment: center;
@@ -2012,7 +1946,7 @@ export component SettingsView inherits Rectangle {
 
                                 Text {
                                     text: "Configuration & Diagnostics Export";
-                                    color: HubTheme.accent-text;
+                                    color: HubTheme.text-primary;
                                     font-size: HubTheme.card-title-size;
                                     font-weight: 700;
                                 }
@@ -2028,21 +1962,21 @@ export component SettingsView inherits Rectangle {
 
                                     SettingsButton {
                                         text: "Export Config (JSON)";
-                                        custom-height: 42px;
+                                        custom-height: 40px;
                                         horizontal-stretch: 1;
                                         clicked => { root.export-config(); }
                                     }
 
                                     SettingsButton {
                                         text: "Import Config (JSON)";
-                                        custom-height: 42px;
+                                        custom-height: 40px;
                                         horizontal-stretch: 1;
                                         clicked => { root.import-config(); }
                                     }
 
                                     SettingsButton {
                                         text: "Export Diagnostics";
-                                        custom-height: 42px;
+                                        custom-height: 40px;
                                         horizontal-stretch: 1;
                                         clicked => { root.export-diagnostics(); }
                                     }
@@ -2063,7 +1997,7 @@ export component SettingsView inherits Rectangle {
 
                                 Text {
                                     text: "Application Updates & Release";
-                                    color: HubTheme.accent-text;
+                                    color: HubTheme.text-primary;
                                     font-size: HubTheme.card-title-size;
                                     font-weight: 700;
                                 }
@@ -2081,7 +2015,7 @@ export component SettingsView inherits Rectangle {
                                     SettingsButton {
                                         text: root.auto-update-enabled ? "Auto Update: Enabled" : "Auto Update: Disabled";
                                         active: root.auto-update-enabled;
-                                        custom-height: 42px;
+                                        custom-height: 40px;
                                         horizontal-stretch: 1;
                                         clicked => { root.toggle-auto-update(); }
                                     }
@@ -2093,7 +2027,7 @@ export component SettingsView inherits Rectangle {
                                             : (root.update-available ? "Download Update (" + root.update-version + ")" : "Check for Updates")));
                                         primary: root.update-available || root.update-ready;
                                         disabled: root.update-checking || root.update-downloading;
-                                        custom-height: 42px;
+                                        custom-height: 40px;
                                         horizontal-stretch: 1;
                                         clicked => {
                                             if (root.update-ready) {
@@ -2144,7 +2078,7 @@ export component SettingsView inherits Rectangle {
 
                                 Text {
                                     text: "About & Open Source Licenses";
-                                    color: HubTheme.accent-text;
+                                    color: HubTheme.text-primary;
                                     font-size: HubTheme.card-title-size;
                                     font-weight: 700;
                                 }
@@ -2157,7 +2091,7 @@ export component SettingsView inherits Rectangle {
 
                                 SettingsButton {
                                     text: "Third-party open-source licenses";
-                                    custom-height: 42px;
+                                    custom-height: 40px;
                                     clicked => {
                                         root.licenses-visible = true;
                                         root.view-licenses();
@@ -2170,6 +2104,7 @@ export component SettingsView inherits Rectangle {
             }
         }
     }
+}
 
     // -------------------------------------------------------------------------
     // 5. Destructive Action Confirmation Dialog Modal
