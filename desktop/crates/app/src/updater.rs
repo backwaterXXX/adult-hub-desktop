@@ -858,7 +858,7 @@ mod tests {
                 )
                 .expect("Real generated manifest must authenticate with embedded key");
                 assert_eq!(parsed.schema_version, 1);
-                assert_eq!(parsed.version, "0.1.0");
+                assert_eq!(parsed.version, env!("CARGO_PKG_VERSION"));
                 assert!(!parsed.packages.is_empty());
                 return;
             }

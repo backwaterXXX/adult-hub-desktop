@@ -14,19 +14,24 @@ export component PerformerCard inherits Rectangle {
     accessible-label: root.item.title;
     accessible-action-default => { root.clicked(); }
 
-    width: 140px;
-    height: 258px;
+    in property <length> card-width: 160px;
+    in property <bool> fixed-width: true;
+
+    preferred-width: root.fixed-width ? root.card-width : 170px;
+    min-width: root.fixed-width ? 150px : 0px;
+    max-width: 190px;
+    height: 260px;
     border-radius: HubTheme.card-radius;
-    background: root.is-focused || root.has-focus || touch.has-hover ? HubTheme.surface-hover : HubTheme.surface;
-    border-width: 1px;
-    border-color: root.has-focus ? HubTheme.focus-ring : (root.is-focused || touch.has-hover ? HubTheme.control-border : HubTheme.separator);
+    background: touch.has-hover ? HubTheme.surface-hover : ((root.is-focused || root.has-focus) ? #FFFFFF08 : HubTheme.surface);
+    border-width: (root.is-focused || root.has-focus) ? 2px : (touch.has-hover ? 1px : 0px);
+    border-color: (root.is-focused || root.has-focus) ? HubTheme.focus-ring : HubTheme.separator;
     clip: true;
 
     VerticalLayout {
         spacing: 0px;
 
         Rectangle {
-            height: 200px;
+            vertical-stretch: 1;
             background: HubTheme.navigation-background;
             clip: true;
 
@@ -67,6 +72,8 @@ export component PerformerCard inherits Rectangle {
                 font-weight: 600;
                 horizontal-alignment: left;
                 vertical-alignment: center;
+                wrap: word-wrap;
+                max-height: 38px;
                 overflow: elide;
                 width: 100%;
             }
@@ -79,6 +86,196 @@ export component PerformerCard inherits Rectangle {
                 vertical-alignment: center;
                 overflow: elide;
                 width: 100%;
+            }
+        }
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+
+    focus-scope := FocusScope {
+        width: 0px;
+        height: 0px;
+        key-pressed(event) => {
+            if (event.text == Key.Space || event.text == Key.Return) {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+}
+
+export component StudioCard inherits Rectangle {
+    in property <VideoCardData> item;
+    in property <bool> is-focused: false;
+    out property <bool> has-focus: focus-scope.has-focus;
+    callback clicked();
+
+    forward-focus: focus-scope;
+    accessible-role: button;
+    accessible-label: root.item.title;
+    accessible-action-default => { root.clicked(); }
+
+    in property <length> card-width: 240px;
+    property <length> artwork-height: min(140px, root.card-width * 0.5);
+
+    width: root.card-width;
+    preferred-width: root.card-width;
+    height: root.artwork-height + 64px;
+    border-radius: HubTheme.card-radius;
+    background: touch.has-hover ? HubTheme.surface-hover : ((root.is-focused || root.has-focus) ? #FFFFFF08 : HubTheme.surface);
+    border-width: (root.is-focused || root.has-focus) ? 2px : (touch.has-hover ? 1px : 0px);
+    border-color: (root.is-focused || root.has-focus) ? HubTheme.focus-ring : HubTheme.separator;
+    clip: true;
+
+    VerticalLayout {
+        spacing: 0px;
+
+        Rectangle {
+            height: root.artwork-height;
+            background: #181920;
+            clip: true;
+
+            if root.item.has-thumbnail : Image {
+                source: root.item.thumbnail;
+                width: 100%;
+                height: 100%;
+                image-fit: contain;
+            }
+
+            if !root.item.has-thumbnail : Rectangle {
+                width: 100%;
+                height: 100%;
+                background: @linear-gradient(135deg, #1f1b29 0%, #16151c 100%);
+                Image {
+                    source: @image-url("../../../assets/icons/browse.svg");
+                    width: 36px;
+                    height: 36px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    image-fit: contain;
+                    opacity: 0.35;
+                }
+            }
+        }
+
+        VerticalLayout {
+            height: 64px;
+            padding-left: 12px;
+            padding-right: 12px;
+            padding-top: 8px;
+            padding-bottom: 8px;
+            spacing: 2px;
+            alignment: center;
+
+            Text {
+                text: root.item.title;
+                color: HubTheme.text-primary;
+                font-size: HubTheme.card-title-size;
+                font-weight: 600;
+                horizontal-alignment: left;
+                vertical-alignment: center;
+                overflow: elide;
+                width: 100%;
+            }
+
+            Text {
+                text: "Studio";
+                color: HubTheme.text-muted;
+                font-size: 11px;
+                horizontal-alignment: left;
+                vertical-alignment: center;
+            }
+        }
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+
+    focus-scope := FocusScope {
+        width: 0px;
+        height: 0px;
+        key-pressed(event) => {
+            if (event.text == Key.Space || event.text == Key.Return) {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+}
+
+export component CategoryCard inherits Rectangle {
+    in property <VideoCardData> item;
+    in property <bool> is-focused: false;
+    out property <bool> has-focus: focus-scope.has-focus;
+    callback clicked();
+
+    forward-focus: focus-scope;
+    accessible-role: button;
+    accessible-label: root.item.title;
+    accessible-action-default => { root.clicked(); }
+
+    in property <length> card-width: 240px;
+    property <length> artwork-height: min(120px, root.card-width * 0.45);
+
+    width: root.card-width;
+    preferred-width: root.card-width;
+    height: root.artwork-height + 56px;
+    border-radius: HubTheme.card-radius;
+    background: touch.has-hover ? HubTheme.surface-hover : ((root.is-focused || root.has-focus) ? #FFFFFF08 : HubTheme.surface);
+    border-width: (root.is-focused || root.has-focus) ? 2px : (touch.has-hover ? 1px : 0px);
+    border-color: (root.is-focused || root.has-focus) ? HubTheme.focus-ring : HubTheme.separator;
+    clip: true;
+
+    VerticalLayout {
+        spacing: 0px;
+
+        Rectangle {
+            height: root.artwork-height;
+            background: @linear-gradient(135deg, #241628 0%, #14131b 100%);
+            clip: true;
+
+            Image {
+                source: @image-url("../../../assets/icons/channels.svg");
+                width: 32px;
+                height: 32px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                image-fit: contain;
+                opacity: 0.4;
+            }
+        }
+
+        VerticalLayout {
+            height: 56px;
+            padding-left: 12px;
+            padding-right: 12px;
+            padding-top: 6px;
+            padding-bottom: 6px;
+            spacing: 2px;
+            alignment: center;
+
+            Text {
+                text: root.item.title;
+                color: HubTheme.text-primary;
+                font-size: HubTheme.card-title-size;
+                font-weight: 600;
+                horizontal-alignment: left;
+                vertical-alignment: center;
+                overflow: elide;
+                width: 100%;
+            }
+
+            Text {
+                text: "Category";
+                color: HubTheme.text-muted;
+                font-size: 11px;
+                horizontal-alignment: left;
+                vertical-alignment: center;
             }
         }
     }
@@ -150,6 +347,16 @@ export component DashboardShelf inherits VerticalLayout {
     in property <string> empty-message: "";
     in property <bool> loading: false;
     in property <string> error-message: "";
+    in property <length> viewport-width: 0px;
+    property <int> visible-performer-count: root.viewport-width > 0px
+        ? max(1, min(root.items.length, min(8, Math.floor((root.viewport-width + 16px) / 176px))))
+        : min(root.items.length, 5);
+    property <int> visible-video-count: root.viewport-width > 0px
+        ? (root.viewport-width >= 1500px ? 6 : (root.viewport-width >= 1200px ? 5 : 4))
+        : 4;
+    property <length> avail-w: root.viewport-width > 0px ? root.viewport-width : 960px;
+    property <int> active-video-count: max(1, min(root.items.length, root.visible-video-count));
+    property <length> shelf-card-width: min(340px, max(160px, (root.avail-w - 48px - (root.active-video-count - 1) * 16px) / root.active-video-count));
 
     callback play-item(string);
     callback open-item(string);
@@ -220,38 +427,65 @@ export component DashboardShelf inherits VerticalLayout {
         }
 
         if root.items.length > 0 && root.performer-cards : HorizontalLayout {
-            height: 270px;
+            height: 260px;
             spacing: HubTheme.space-4;
-            if root.items.length > 0 : PerformerCard {
+            if root.items.length > 0 && root.visible-performer-count >= 1 : PerformerCard {
                 horizontal-stretch: 1;
+                fixed-width: false;
                 item: root.items[0];
                 clicked => { root.open-performer(root.items[0].title); }
             }
-            if root.items.length > 1 : PerformerCard {
+            if root.items.length > 1 && root.visible-performer-count >= 2 : PerformerCard {
                 horizontal-stretch: 1;
+                fixed-width: false;
                 item: root.items[1];
                 clicked => { root.open-performer(root.items[1].title); }
             }
-            if root.items.length > 2 : PerformerCard {
+            if root.items.length > 2 && root.visible-performer-count >= 3 : PerformerCard {
                 horizontal-stretch: 1;
+                fixed-width: false;
                 item: root.items[2];
                 clicked => { root.open-performer(root.items[2].title); }
+            }
+            if root.items.length > 3 && root.visible-performer-count >= 4 : PerformerCard {
+                horizontal-stretch: 1;
+                fixed-width: false;
+                item: root.items[3];
+                clicked => { root.open-performer(root.items[3].title); }
+            }
+            if root.items.length > 4 && root.visible-performer-count >= 5 : PerformerCard {
+                horizontal-stretch: 1;
+                fixed-width: false;
+                item: root.items[4];
+                clicked => { root.open-performer(root.items[4].title); }
+            }
+            if root.items.length > 5 && root.visible-performer-count >= 6 : PerformerCard {
+                horizontal-stretch: 1;
+                fixed-width: false;
+                item: root.items[5];
+                clicked => { root.open-performer(root.items[5].title); }
+            }
+            if root.items.length > 6 && root.visible-performer-count >= 7 : PerformerCard {
+                horizontal-stretch: 1;
+                fixed-width: false;
+                item: root.items[6];
+                clicked => { root.open-performer(root.items[6].title); }
+            }
+            if root.items.length > 7 && root.visible-performer-count >= 8 : PerformerCard {
+                horizontal-stretch: 1;
+                fixed-width: false;
+                item: root.items[7];
+                clicked => { root.open-performer(root.items[7].title); }
             }
         }
 
         if root.items.length > 0 && !root.performer-cards : HorizontalLayout {
-            height: root.items.length == 1
-                ? min(302px, min(220px, min(root.width, 560px) * 0.5625) + 82px)
-                : (root.items.length == 2
-                    ? min(302px, min(220px, ((root.width - 16px) / 2) * 0.5625) + 82px)
-                    : (root.items.length == 3
-                        ? min(302px, max(206px, min(220px, ((root.width - 32px) / 3) * 0.5625) + 82px))
-                        : min(302px, max(206px, min(220px, ((root.width - 48px) / 4) * 0.5625) + 82px))));
+            height: root.shelf-card-width * 0.5625 + 82px;
             spacing: HubTheme.space-4;
             if root.items.length > 0 : VideoCard {
                 item: root.items[0];
-                card-width: 240px;
-                max-width: 560px;
+                card-width: root.shelf-card-width;
+                max-width: 340px;
                 fixed-width: false;
                 play => { root.play-item(root.items[0].id); }
                 open-detail => { root.open-item(root.items[0].id); }
@@ -259,8 +493,8 @@ export component DashboardShelf inherits VerticalLayout {
             }
             if root.items.length > 1 : VideoCard {
                 item: root.items[1];
-                card-width: 240px;
-                max-width: 560px;
+                card-width: root.shelf-card-width;
+                max-width: 340px;
                 fixed-width: false;
                 play => { root.play-item(root.items[1].id); }
                 open-detail => { root.open-item(root.items[1].id); }
@@ -268,8 +502,8 @@ export component DashboardShelf inherits VerticalLayout {
             }
             if root.items.length > 2 : VideoCard {
                 item: root.items[2];
-                card-width: 240px;
-                max-width: 560px;
+                card-width: root.shelf-card-width;
+                max-width: 340px;
                 fixed-width: false;
                 play => { root.play-item(root.items[2].id); }
                 open-detail => { root.open-item(root.items[2].id); }
@@ -277,11 +511,29 @@ export component DashboardShelf inherits VerticalLayout {
             }
             if root.items.length > 3 : VideoCard {
                 item: root.items[3];
-                card-width: 240px;
-                max-width: 560px;
+                card-width: root.shelf-card-width;
+                max-width: 340px;
                 fixed-width: false;
                 play => { root.play-item(root.items[3].id); }
                 open-detail => { root.open-item(root.items[3].id); }
+                thumbnail-retry(item) => { root.thumbnail-retry(item); }
+            }
+            if root.items.length > 4 && root.visible-video-count >= 5 : VideoCard {
+                item: root.items[4];
+                card-width: root.shelf-card-width;
+                max-width: 340px;
+                fixed-width: false;
+                play => { root.play-item(root.items[4].id); }
+                open-detail => { root.open-item(root.items[4].id); }
+                thumbnail-retry(item) => { root.thumbnail-retry(item); }
+            }
+            if root.items.length > 5 && root.visible-video-count >= 6 : VideoCard {
+                item: root.items[5];
+                card-width: root.shelf-card-width;
+                max-width: 340px;
+                fixed-width: false;
+                play => { root.play-item(root.items[5].id); }
+                open-detail => { root.open-item(root.items[5].id); }
                 thumbnail-retry(item) => { root.thumbnail-retry(item); }
             }
         }

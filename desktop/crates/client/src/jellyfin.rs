@@ -53,6 +53,7 @@ pub struct GetItemsQuery<'a> {
     pub search_term: Option<&'a str>,
     pub name_starts_with: Option<&'a str>,
     pub person: Option<&'a str>,
+    pub person_ids: Option<&'a str>,
     pub studio: Option<&'a str>,
     pub genre: Option<&'a str>,
     pub is_favorite: Option<bool>,
@@ -371,7 +372,7 @@ impl JellyfinClient {
         query: &GetItemsQuery<'_>,
     ) -> Result<TvItemsPage> {
         let base = Self::clean_url(base_url);
-        let include_item_types = query.include_item_types.unwrap_or("Movie");
+        let include_item_types = query.include_item_types.unwrap_or("Movie,Video");
         let mut url = format!(
             "{base}/Users/{}/Items?StartIndex={}&Limit={}&Recursive=true&IncludeItemTypes={}&EnableImages=true&EnableImageTypes=Primary,Thumb,Backdrop&ImageTypeLimit=1&Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources,ChildCount",
             crate::urlencoding(user_id),
@@ -416,6 +417,14 @@ impl JellyfinClient {
                 url.push_str(&format!("&Person={}", crate::urlencoding(person.trim())));
             }
         }
+        if let Some(person_ids) = query.person_ids {
+            if !person_ids.trim().is_empty() {
+                url.push_str(&format!(
+                    "&PersonIds={}",
+                    crate::urlencoding(person_ids.trim())
+                ));
+            }
+        }
         if let Some(studio) = query.studio {
             if !studio.trim().is_empty() {
                 url.push_str(&format!("&Studios={}", crate::urlencoding(studio.trim())));
@@ -455,6 +464,35 @@ impl JellyfinClient {
             items,
             total_record_count: total,
             start_index: query.start_index,
+        })
+    }
+
+    pub fn get_person(
+        &self,
+        base_url: &str,
+        user_id: &str,
+        token: &str,
+        name: &str,
+    ) -> Result<crate::models::TvPersonDetails> {
+        let base = Self::clean_url(base_url);
+        let url = format!(
+            "{base}/Persons/{}?userId={}",
+            crate::urlencoding(name.trim()),
+            crate::urlencoding(user_id.trim())
+        );
+        let res = Self::check_res(
+            self.client
+                .get(&url)
+                .headers(self.headers(Some(token)))
+                .send()?,
+        )?;
+        let dto: BaseItemDto = res.json()?;
+        Ok(crate::models::TvPersonDetails {
+            id: dto.id,
+            name: dto.name.unwrap_or_else(|| name.to_string()),
+            overview: dto.overview,
+            primary_image_tag: dto.image_tags.as_ref().and_then(|m| m.get("Primary").cloned()),
+            child_count: dto.child_count,
         })
     }
 

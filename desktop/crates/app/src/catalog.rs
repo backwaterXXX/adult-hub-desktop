@@ -186,6 +186,20 @@ pub fn sample_catalog_tv_items() -> Vec<TvItem> {
             ..Default::default()
         },
         TvItem {
+            id: "sample2".into(),
+            title: "Local Demo Sample 2 (880Hz Tone)".into(),
+            overview: Some("Local MP4 test sample 2".into()),
+            year: Some(2026),
+            runtime_ticks: Some(150_000_000), // 15s
+            genres: vec!["Sample".into()],
+            studios: vec!["Local".into()],
+            container: Some("mp4".into()),
+            file_size_bytes: Some(350_000),
+            width: Some(1280),
+            height: Some(720),
+            ..Default::default()
+        },
+        TvItem {
             id: "telegram:demo_channel:101".into(),
             title: "Channel Highlight #101".into(),
             overview: Some("Exclusive channel video".into()),
@@ -279,7 +293,7 @@ pub fn sample_channel_items() -> Vec<VideoCardData> {
 
 pub fn cards_to_rows(cards: &[VideoCardData], cols_per_row: usize) -> Vec<VideoCardRowData> {
     let mut rows = Vec::new();
-    let cols = cols_per_row.clamp(1, 4);
+    let cols = cols_per_row.clamp(1, 8);
     for chunk in cards.chunks(cols) {
         let mut row = VideoCardRowData {
             has_0: false,
@@ -290,19 +304,23 @@ pub fn cards_to_rows(cards: &[VideoCardData], cols_per_row: usize) -> Vec<VideoC
             card_2: chunk.get(2).cloned().unwrap_or_default(),
             has_3: false,
             card_3: chunk.get(3).cloned().unwrap_or_default(),
+            has_4: false,
+            card_4: chunk.get(4).cloned().unwrap_or_default(),
+            has_5: false,
+            card_5: chunk.get(5).cloned().unwrap_or_default(),
+            has_6: false,
+            card_6: chunk.get(6).cloned().unwrap_or_default(),
+            has_7: false,
+            card_7: chunk.get(7).cloned().unwrap_or_default(),
         };
-        if !chunk.is_empty() {
-            row.has_0 = true;
-        }
-        if chunk.len() > 1 {
-            row.has_1 = true;
-        }
-        if chunk.len() > 2 {
-            row.has_2 = true;
-        }
-        if chunk.len() > 3 {
-            row.has_3 = true;
-        }
+        if !chunk.is_empty() { row.has_0 = true; }
+        if chunk.len() > 1 { row.has_1 = true; }
+        if chunk.len() > 2 { row.has_2 = true; }
+        if chunk.len() > 3 { row.has_3 = true; }
+        if chunk.len() > 4 { row.has_4 = true; }
+        if chunk.len() > 5 { row.has_5 = true; }
+        if chunk.len() > 6 { row.has_6 = true; }
+        if chunk.len() > 7 { row.has_7 = true; }
         rows.push(row);
     }
     rows
@@ -386,7 +404,11 @@ fn update_catalog_thumbnail(
             0 => row.card_0 = card,
             1 => row.card_1 = card,
             2 => row.card_2 = card,
-            _ => row.card_3 = card,
+            3 => row.card_3 = card,
+            4 => row.card_4 = card,
+            5 => row.card_5 = card,
+            6 => row.card_6 = card,
+            _ => row.card_7 = card,
         }
         rows.set_row_data(row_index, row);
     }
@@ -422,7 +444,11 @@ fn update_channel_thumbnail(
             0 => row.card_0 = card,
             1 => row.card_1 = card,
             2 => row.card_2 = card,
-            _ => row.card_3 = card,
+            3 => row.card_3 = card,
+            4 => row.card_4 = card,
+            5 => row.card_5 = card,
+            6 => row.card_6 = card,
+            _ => row.card_7 = card,
         }
         rows.set_row_data(row_index, row);
     }
@@ -463,7 +489,11 @@ fn update_thumbnail_state(
             0 => row.card_0 = card,
             1 => row.card_1 = card,
             2 => row.card_2 = card,
-            _ => row.card_3 = card,
+            3 => row.card_3 = card,
+            4 => row.card_4 = card,
+            5 => row.card_5 = card,
+            6 => row.card_6 = card,
+            _ => row.card_7 = card,
         }
         rows.set_row_data(row_index, row);
     }
@@ -619,6 +649,61 @@ fn titlecase(s: &str) -> String {
     result
 }
 
+pub fn is_decorative_emoji(c: char) -> bool {
+    let u = c as u32;
+    matches!(
+        u,
+        0x1F300..=0x1FAFF
+            | 0x2600..=0x27BF
+            | 0xFE00..=0xFE0F
+    )
+}
+
+pub fn extract_title_tags_and_clean_title(raw_title: &str) -> (String, Vec<String>) {
+    let mut extracted_tags = Vec::new();
+    let mut cleaned_words = Vec::new();
+
+    for word in raw_title.split_whitespace() {
+        let trimmed_word = word.trim_matches(|c: char| is_decorative_emoji(c));
+        if trimmed_word.starts_with('#') && trimmed_word.len() > 1 {
+            let tag_candidate = trimmed_word
+                .trim_start_matches('#')
+                .trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+            if (tag_candidate.chars().any(|c| c.is_alphabetic())
+                || tag_candidate.eq_ignore_ascii_case("4k")
+                || tag_candidate.eq_ignore_ascii_case("8k")
+                || tag_candidate.eq_ignore_ascii_case("vr"))
+                && !tag_candidate.is_empty()
+            {
+                let tag_lower = tag_candidate.to_lowercase();
+                if !extracted_tags.contains(&tag_lower) {
+                    extracted_tags.push(tag_lower);
+                }
+                continue;
+            }
+        }
+        if !word.is_empty() && word.chars().all(is_decorative_emoji) {
+            continue;
+        }
+        let cleaned = word.trim_matches(is_decorative_emoji);
+        if !cleaned.is_empty() {
+            cleaned_words.push(cleaned);
+        }
+    }
+
+    let mut clean_title = cleaned_words.join(" ");
+    clean_title = clean_title
+        .trim_matches(|c: char| is_decorative_emoji(c) || c == '-' || c == '|' || c == ':')
+        .trim()
+        .to_string();
+
+    if clean_title.is_empty() {
+        clean_title = raw_title.trim().to_string();
+    }
+
+    (clean_title, extracted_tags)
+}
+
 pub(crate) fn display_title(item: &TvItem) -> String {
     let title = item.title.trim();
     let is_hash = |s: &str| -> bool {
@@ -636,52 +721,46 @@ pub(crate) fn display_title(item: &TvItem) -> String {
         && !title.eq_ignore_ascii_case("untitled")
         && !title.eq_ignore_ascii_case("untitled video")
     {
-        if let Some(pos) = title.rfind('.') {
-            let ext = &title[pos + 1..];
+        let (cleaned, _) = extract_title_tags_and_clean_title(title);
+        if let Some(pos) = cleaned.rfind('.') {
+            let ext = &cleaned[pos + 1..];
             if matches!(
                 ext.to_ascii_lowercase().as_str(),
                 "mp4" | "mkv" | "avi" | "mov" | "webm" | "ts" | "m4v" | "wmv"
             ) {
-                let stem = &title[..pos];
+                let stem = &cleaned[..pos];
                 if !stem.is_empty() && !is_hash(stem) {
                     return stem.replace(['_', '.'], " ").trim().to_string();
                 }
             }
         }
-        return title.to_string();
-    }
-
-    // 2. Czytelna nazwa pliku z item.id lub ścieżki
-    let source_id = item.id.strip_prefix("direct:").unwrap_or(&item.id);
-    if let Some(pos) = source_id.rfind('.') {
-        let ext = &source_id[pos + 1..];
-        if matches!(
-            ext.to_ascii_lowercase().as_str(),
-            "mp4" | "mkv" | "avi" | "mov" | "webm" | "ts" | "m4v" | "wmv"
-        ) {
-            let filename = source_id[..pos]
-                .rsplit(['/', '\\'])
-                .next()
-                .unwrap_or(&source_id[..pos]);
-            if !filename.is_empty() && !is_hash(filename) {
-                return filename.replace(['_', '.'], " ").trim().to_string();
-            }
+        if !cleaned.is_empty() && !is_hash(&cleaned) {
+            return cleaned;
         }
     }
 
-    // 3. Źródło lub kanał wraz z dostępnym kontekstem
-    if item.is_telegram() || item.id.starts_with("telegram:") {
-        let parts: Vec<&str> = item.id.split(':').collect();
-        if parts.len() >= 3 {
-            let channel_raw = parts[1].replace(['_', '-'], " ");
-            let channel = titlecase(&channel_raw);
-            let msg_id = parts[2];
-            if !channel.is_empty() {
-                if let Some(studio) = item.studios.first().filter(|s| !s.trim().is_empty()) {
-                    return format!("{studio} #{msg_id}");
-                }
-                return format!("{channel} #{msg_id}");
+    // 1. Czytelna nazwa z metadanych (np. wykonawcy, studio, rok)
+    if !item.people.is_empty() {
+        let performers: Vec<String> = item
+            .people
+            .iter()
+            .filter(|p| {
+                p.person_type
+                    .as_deref()
+                    .is_none_or(|k| k.eq_ignore_ascii_case("actor"))
+            })
+            .take(2)
+            .map(|p| p.name.clone())
+            .collect();
+        if !performers.is_empty() {
+            let perf_str = performers.join(" & ");
+            if let Some(studio) = item.studios.first().filter(|s| !s.trim().is_empty()) {
+                return format!("{perf_str} - {studio}");
             }
+            if let Some(year) = item.year {
+                return format!("{perf_str} ({year})");
+            }
+            return perf_str;
         }
     }
     if let Some(studio) = item.studios.first().filter(|s| !s.trim().is_empty()) {
@@ -691,7 +770,48 @@ pub(crate) fn display_title(item: &TvItem) -> String {
         return format!("{studio} Video");
     }
 
-    // 4. Neutralna nazwa z krótkim rozróżniającym oznaczeniem
+    // 2. Sensowna nazwa pliku z item.id, provider_video_id lub ścieżki
+    for source in [&item.id, item.provider_video_id.as_deref().unwrap_or("")] {
+        let source_id = source.strip_prefix("direct:").unwrap_or(source);
+        if let Some(pos) = source_id.rfind('.') {
+            let ext = &source_id[pos + 1..];
+            if matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "mp4" | "mkv" | "avi" | "mov" | "webm" | "ts" | "m4v" | "wmv"
+            ) {
+                let filename = source_id[..pos]
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or(&source_id[..pos]);
+                if !filename.is_empty() && !is_hash(filename) {
+                    return filename.replace(['_', '.'], " ").trim().to_string();
+                }
+            }
+        }
+    }
+
+    // 3. Kanał lub źródło wraz z datą albo innym dostępnym kontekstem
+    if item.is_telegram() || item.id.starts_with("telegram:") {
+        let parts: Vec<&str> = item.id.split(':').collect();
+        if parts.len() >= 3 {
+            let channel_raw = parts[1].replace(['_', '-'], " ");
+            let channel = titlecase(&channel_raw);
+            let msg_id = parts[2];
+            if !channel.is_empty() {
+                if let Some(year) = item.year {
+                    return format!("{channel} ({year}) #{msg_id}");
+                }
+                return format!("{channel} #{msg_id}");
+            }
+        }
+    }
+    if let Some(provider) = item.source_provider.as_deref() {
+        if let Some(year) = item.year {
+            return format!("{provider} ({year})");
+        }
+    }
+
+    // 4. Neutralna nazwa z krótkim rozróżniającym oznaczeniem jako ostateczność
     let short_marker = if let Some(pos) = item.id.rfind(':') {
         &item.id[pos + 1..]
     } else if item.id.len() >= 6 {
@@ -719,7 +839,7 @@ pub fn tv_item_to_card(item: &TvItem) -> VideoCardData {
         "studio".to_string()
     } else if item.genres.iter().any(|tag| tag == "__adult_hub_genre") {
         "genre".to_string()
-    } else if item.id == "sample" || item.id.starts_with('/') || item.id.contains(":\\") {
+    } else if item.id == "sample" || item.id == "sample2" || item.id.starts_with('/') || item.id.contains(":\\") {
         "local".to_string()
     } else {
         "jellyfin".to_string()
@@ -780,10 +900,10 @@ pub fn tv_item_to_card(item: &TvItem) -> VideoCardData {
         is_played,
         provider: provider.into(),
         is_favorite: item.is_favorite,
-        studio: if item.genres.iter().any(|tag| tag == "__adult_hub_performer") {
+        studio: if item.genres.iter().any(|tag| tag == "__adult_hub_performer" || tag == "__adult_hub_studio") {
             item.child_count
                 .filter(|count| *count > 0)
-                .map(|count| format!("{count} movies"))
+                .map(|count| if count == 1 { "1 movie".to_string() } else { format!("{count} movies") })
                 .unwrap_or_default()
         } else {
             item.studios.first().cloned().unwrap_or_default()
@@ -1201,6 +1321,49 @@ pub fn filter_catalog_items(items: Vec<TvItem>, local_store: &LocalStore) -> Vec
         .collect()
 }
 
+pub fn aggregate_studio_items(items: Vec<TvItem>) -> Vec<TvItem> {
+    let mut result: Vec<TvItem> = Vec::with_capacity(items.len());
+    let mut title_to_index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for item in items {
+        if !seen_ids.insert(item.id.clone()) {
+            continue;
+        }
+
+        let norm_key = item.title.trim().to_lowercase();
+        if norm_key.is_empty() {
+            result.push(item);
+            continue;
+        }
+
+        if let Some(&existing_idx) = title_to_index.get(&norm_key) {
+            let existing = &mut result[existing_idx];
+            if existing.primary_image_tag.is_none() && item.primary_image_tag.is_some() {
+                existing.primary_image_tag = item.primary_image_tag;
+            }
+            if existing.backdrop_image_tag.is_none() && item.backdrop_image_tag.is_some() {
+                existing.backdrop_image_tag = item.backdrop_image_tag;
+            }
+            existing.child_count = match (existing.child_count, item.child_count) {
+                (Some(c1), Some(c2)) => Some(c1 + c2),
+                (Some(c1), None) => Some(c1),
+                (None, Some(c2)) => Some(c2),
+                (None, None) => None,
+            };
+            let alias_tag = format!("alias_id:{}", item.id);
+            if !existing.tags.contains(&alias_tag) {
+                existing.tags.push(alias_tag);
+            }
+        } else {
+            title_to_index.insert(norm_key, result.len());
+            result.push(item);
+        }
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1252,6 +1415,64 @@ mod tests {
             ..item
         };
         assert_eq!(display_title(&named), "A named film");
+    }
+
+    #[test]
+    fn test_extract_title_tags_and_clean_decorative_emojis() {
+        let raw = "🔥 Cyberpunk Odyssey: Midnight Run 🎬 #cyberpunk #neon #4k";
+        let (clean, tags) = extract_title_tags_and_clean_title(raw);
+        assert_eq!(clean, "Cyberpunk Odyssey: Midnight Run");
+        assert_eq!(tags, vec!["cyberpunk", "neon", "4k"]);
+
+        // Preserves series numbers like Scene #1
+        let scene = "Night Drive Scene #1";
+        let (clean_scene, tags_scene) = extract_title_tags_and_clean_title(scene);
+        assert_eq!(clean_scene, "Night Drive Scene #1");
+        assert!(tags_scene.is_empty());
+
+        // Preserves legitimate punctuation and special chars
+        let punct = "Rock & Roll: The Movie - Part 2 (Director's Cut)";
+        let (clean_punct, tags_punct) = extract_title_tags_and_clean_title(punct);
+        assert_eq!(clean_punct, "Rock & Roll: The Movie - Part 2 (Director's Cut)");
+        assert!(tags_punct.is_empty());
+    }
+
+    #[test]
+    fn test_fallback_title_precedence() {
+        // 1. Metadata: performers
+        let perf_item = TvItem {
+            id: "uuid-123".into(),
+            title: "".into(),
+            people: vec![make_sample_person("Eva Green")],
+            studios: vec!["Lust Cinema".into()],
+            ..Default::default()
+        };
+        assert_eq!(display_title(&perf_item), "Eva Green - Lust Cinema");
+
+        // 2. Sensible filename
+        let file_item = TvItem {
+            id: "/media/videos/exclusive_special.mp4".into(),
+            title: "".into(),
+            ..Default::default()
+        };
+        assert_eq!(display_title(&file_item), "exclusive special");
+
+        // 3. Channel with date
+        let ch_item = TvItem {
+            id: "telegram:neon_pulse:456".into(),
+            title: "".into(),
+            year: Some(2026),
+            ..Default::default()
+        };
+        assert_eq!(display_title(&ch_item), "Neon Pulse (2026) #456");
+
+        // 4. Fallback short marker
+        let fallback = TvItem {
+            id: "2f0a29deadbeef".into(),
+            title: "".into(),
+            ..Default::default()
+        };
+        assert_eq!(display_title(&fallback), "Video #2f0a29");
     }
 
     #[test]
@@ -1332,5 +1553,45 @@ mod tests {
             }
         });
         assert!(highest.load(Ordering::SeqCst) <= 4);
+    }
+
+    #[test]
+    fn test_aggregate_studio_items() {
+        let s1 = TvItem {
+            id: "studio-1".into(),
+            title: "Active Duty".into(),
+            child_count: Some(15),
+            primary_image_tag: Some("tag-1".into()),
+            ..Default::default()
+        };
+        let s2 = TvItem {
+            id: "studio-2".into(),
+            title: "active duty".into(),
+            child_count: Some(10),
+            backdrop_image_tag: Some("backdrop-2".into()),
+            ..Default::default()
+        };
+        let s3 = TvItem {
+            id: "studio-1".into(), // Duplicate id
+            title: "Active Duty".into(),
+            child_count: Some(5),
+            ..Default::default()
+        };
+        let s4 = TvItem {
+            id: "studio-4".into(),
+            title: "Active Duty Live".into(), // Distinct studio
+            child_count: Some(3),
+            ..Default::default()
+        };
+
+        let aggregated = aggregate_studio_items(vec![s1, s2, s3, s4]);
+        assert_eq!(aggregated.len(), 2);
+        assert_eq!(aggregated[0].title, "Active Duty");
+        assert_eq!(aggregated[0].child_count, Some(25));
+        assert_eq!(aggregated[0].primary_image_tag.as_deref(), Some("tag-1"));
+        assert_eq!(aggregated[0].backdrop_image_tag.as_deref(), Some("backdrop-2"));
+        assert!(aggregated[0].tags.contains(&"alias_id:studio-2".to_string()));
+        assert_eq!(aggregated[1].title, "Active Duty Live");
+        assert_eq!(aggregated[1].child_count, Some(3));
     }
 }

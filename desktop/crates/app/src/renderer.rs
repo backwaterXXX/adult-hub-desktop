@@ -9,12 +9,14 @@ use glow::HasContext;
 use slint::ComponentHandle;
 use std::ffi::CStr;
 use std::num::NonZeroU32;
-use std::rc::Rc;
+use std::sync::Arc;
 
 pub struct Renderer {
     gl: glow::Context,
     mpv: RenderContext,
     surface: Option<Surface>,
+    retired: Vec<Surface>,
+    current_texture_id: u32,
 }
 
 struct Surface {
@@ -32,18 +34,64 @@ struct OpenGlStateGuard<'a> {
     viewport: [i32; 4],
     active_texture: i32,
     texture_2d: Option<glow::Texture>,
+    program: Option<glow::Program>,
+    vertex_array: Option<glow::VertexArray>,
+    array_buffer: Option<glow::Buffer>,
+    element_array_buffer: Option<glow::Buffer>,
+    scissor_test: bool,
+    scissor_box: [i32; 4],
+    blend: bool,
+    blend_src_rgb: i32,
+    blend_dst_rgb: i32,
+    blend_src_alpha: i32,
+    blend_dst_alpha: i32,
+    blend_equation_rgb: i32,
+    blend_equation_alpha: i32,
+    depth_test: bool,
+    cull_face: bool,
+    unpack_alignment: i32,
+    pack_alignment: i32,
+    unpack_row_length: i32,
+    pack_row_length: i32,
+    color_clear_value: [f32; 4],
 }
 
 impl<'a> OpenGlStateGuard<'a> {
     unsafe fn capture(gl: &'a glow::Context) -> Self {
         let mut viewport = [0; 4];
-        unsafe { gl.get_parameter_i32_slice(glow::VIEWPORT, &mut viewport) };
+        let mut scissor_box = [0; 4];
+        let mut color_clear_value = [0.0; 4];
+        unsafe {
+            gl.get_parameter_i32_slice(glow::VIEWPORT, &mut viewport);
+            gl.get_parameter_i32_slice(glow::SCISSOR_BOX, &mut scissor_box);
+            gl.get_parameter_f32_slice(glow::COLOR_CLEAR_VALUE, &mut color_clear_value);
+        }
         Self {
             gl,
             framebuffer: unsafe { gl.get_parameter_framebuffer(glow::FRAMEBUFFER_BINDING) },
             viewport,
             active_texture: unsafe { gl.get_parameter_i32(glow::ACTIVE_TEXTURE) },
             texture_2d: unsafe { gl.get_parameter_texture(glow::TEXTURE_BINDING_2D) },
+            program: unsafe { gl.get_parameter_program(glow::CURRENT_PROGRAM) },
+            vertex_array: unsafe { gl.get_parameter_vertex_array(glow::VERTEX_ARRAY_BINDING) },
+            array_buffer: unsafe { gl.get_parameter_buffer(glow::ARRAY_BUFFER_BINDING) },
+            element_array_buffer: unsafe { gl.get_parameter_buffer(glow::ELEMENT_ARRAY_BUFFER_BINDING) },
+            scissor_test: unsafe { gl.is_enabled(glow::SCISSOR_TEST) },
+            scissor_box,
+            blend: unsafe { gl.is_enabled(glow::BLEND) },
+            blend_src_rgb: unsafe { gl.get_parameter_i32(glow::BLEND_SRC_RGB) },
+            blend_dst_rgb: unsafe { gl.get_parameter_i32(glow::BLEND_DST_RGB) },
+            blend_src_alpha: unsafe { gl.get_parameter_i32(glow::BLEND_SRC_ALPHA) },
+            blend_dst_alpha: unsafe { gl.get_parameter_i32(glow::BLEND_DST_ALPHA) },
+            blend_equation_rgb: unsafe { gl.get_parameter_i32(glow::BLEND_EQUATION_RGB) },
+            blend_equation_alpha: unsafe { gl.get_parameter_i32(glow::BLEND_EQUATION_ALPHA) },
+            depth_test: unsafe { gl.is_enabled(glow::DEPTH_TEST) },
+            cull_face: unsafe { gl.is_enabled(glow::CULL_FACE) },
+            unpack_alignment: unsafe { gl.get_parameter_i32(glow::UNPACK_ALIGNMENT) },
+            pack_alignment: unsafe { gl.get_parameter_i32(glow::PACK_ALIGNMENT) },
+            unpack_row_length: unsafe { gl.get_parameter_i32(glow::UNPACK_ROW_LENGTH) },
+            pack_row_length: unsafe { gl.get_parameter_i32(glow::PACK_ROW_LENGTH) },
+            color_clear_value,
         }
     }
 }
@@ -59,8 +107,58 @@ impl Drop for OpenGlStateGuard<'_> {
                 self.viewport[2],
                 self.viewport[3],
             );
+            self.gl.use_program(self.program);
+            self.gl.bind_vertex_array(self.vertex_array);
+            self.gl.bind_buffer(glow::ARRAY_BUFFER, self.array_buffer);
+            self.gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, self.element_array_buffer);
             self.gl.active_texture(self.active_texture as u32);
             self.gl.bind_texture(glow::TEXTURE_2D, self.texture_2d);
+            self.gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, self.unpack_alignment);
+            self.gl.pixel_store_i32(glow::PACK_ALIGNMENT, self.pack_alignment);
+            self.gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, self.unpack_row_length);
+            self.gl.pixel_store_i32(glow::PACK_ROW_LENGTH, self.pack_row_length);
+            self.gl.clear_color(
+                self.color_clear_value[0],
+                self.color_clear_value[1],
+                self.color_clear_value[2],
+                self.color_clear_value[3],
+            );
+            if self.scissor_test {
+                self.gl.enable(glow::SCISSOR_TEST);
+                self.gl.scissor(
+                    self.scissor_box[0],
+                    self.scissor_box[1],
+                    self.scissor_box[2],
+                    self.scissor_box[3],
+                );
+            } else {
+                self.gl.disable(glow::SCISSOR_TEST);
+            }
+            if self.blend {
+                self.gl.enable(glow::BLEND);
+                self.gl.blend_func_separate(
+                    self.blend_src_rgb as u32,
+                    self.blend_dst_rgb as u32,
+                    self.blend_src_alpha as u32,
+                    self.blend_dst_alpha as u32,
+                );
+                self.gl.blend_equation_separate(
+                    self.blend_equation_rgb as u32,
+                    self.blend_equation_alpha as u32,
+                );
+            } else {
+                self.gl.disable(glow::BLEND);
+            }
+            if self.depth_test {
+                self.gl.enable(glow::DEPTH_TEST);
+            } else {
+                self.gl.disable(glow::DEPTH_TEST);
+            }
+            if self.cull_face {
+                self.gl.enable(glow::CULL_FACE);
+            } else {
+                self.gl.disable(glow::CULL_FACE);
+            }
         }
     }
 }
@@ -68,7 +166,7 @@ impl Drop for OpenGlStateGuard<'_> {
 impl Renderer {
     /// Must be called while Slint's OpenGL context is current.
     pub fn new(
-        player: Rc<Player>,
+        player: Arc<Player>,
         get_proc_address: &dyn Fn(&CStr) -> *const std::ffi::c_void,
         flip_y: bool,
     ) -> Result<Self, String> {
@@ -79,6 +177,8 @@ impl Renderer {
             gl,
             mpv,
             surface: None,
+            retired: Vec::new(),
+            current_texture_id: 0,
         })
     }
 
@@ -93,19 +193,40 @@ impl Renderer {
         let width = width.clamp(2, 8192);
         let height = height.clamp(2, 8192);
 
-        let recreated = self
+        // Clean up previously retired surfaces only on subsequent frames,
+        // ensuring GPU commands from earlier frames have finished sampling them.
+        for old in self.retired.drain(..) {
+            unsafe { old.destroy(&self.gl) };
+        }
+
+        let size_changed = self
             .surface
             .as_ref()
             .is_none_or(|surface| surface.width != width || surface.height != height);
 
-        if recreated {
+        let mut new_image = None;
+        if size_changed {
             if let Some(old) = self.surface.take() {
-                unsafe { old.destroy(&self.gl) };
+                self.retired.push(old);
             }
-            self.surface = Some(unsafe { Surface::create(&self.gl, width, height)? });
+            let surface = unsafe { Surface::create(&self.gl, width, height)? };
+            let texture_id = surface.texture.0.get();
+            self.current_texture_id = texture_id;
+            let texture = NonZeroU32::new(texture_id)
+                .ok_or_else(|| "OpenGL returned texture id 0".to_owned())?;
+            let image = unsafe {
+                slint::BorrowedOpenGLTextureBuilder::new_gl_2d_rgba_texture(
+                    texture,
+                    (surface.width, surface.height).into(),
+                )
+                .origin(slint::BorrowedOpenGLTextureOrigin::TopLeft)
+                .build()
+            };
+            new_image = Some(image);
+            self.surface = Some(surface);
         }
 
-        let surface = self.surface.as_ref().expect("surface created above");
+        let surface = self.surface.as_ref().expect("surface initialized");
 
         unsafe {
             self.gl
@@ -123,21 +244,12 @@ impl Renderer {
 
         result.map_err(|error| format!("libmpv render failed: {error}"))?;
 
-        if recreated {
-            let texture = NonZeroU32::new(surface.texture.0.get())
-                .ok_or_else(|| "OpenGL returned texture id 0".to_owned())?;
-            let image = unsafe {
-                slint::BorrowedOpenGLTextureBuilder::new_gl_2d_rgba_texture(
-                    texture,
-                    (surface.width, surface.height).into(),
-                )
-                .origin(slint::BorrowedOpenGLTextureOrigin::TopLeft)
-                .build()
-            };
-            Ok(Some(image))
-        } else {
-            Ok(None)
+        // Explicit GPU sync to guarantee mpv writes to buffer are complete before Slint samples
+        unsafe {
+            self.gl.flush();
         }
+
+        Ok(new_image)
     }
 }
 
@@ -146,6 +258,8 @@ impl Surface {
         let texture = unsafe { gl.create_texture() }
             .map_err(|error| format!("cannot create video texture: {error}"))?;
         unsafe {
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+            gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
             gl.bind_texture(glow::TEXTURE_2D, Some(texture));
             gl.tex_image_2d(
                 glow::TEXTURE_2D,
@@ -222,6 +336,9 @@ impl Surface {
 
 impl Drop for Renderer {
     fn drop(&mut self) {
+        for s in self.retired.drain(..) {
+            unsafe { s.destroy(&self.gl) };
+        }
         if let Some(surface) = self.surface.take() {
             unsafe { surface.destroy(&self.gl) };
         }
@@ -230,7 +347,7 @@ impl Drop for Renderer {
 
 pub fn install_renderer(
     ui: &crate::MainWindow,
-    player: Rc<Player>,
+    player: Arc<Player>,
     frame_pending: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     on_renderer_ready: impl FnOnce() + 'static,
 ) -> Result<(), slint::SetRenderingNotifierError> {
@@ -247,6 +364,7 @@ pub fn install_renderer(
         .set_rendering_notifier(move |state, graphics_api| match state {
             slint::RenderingState::RenderingSetup => {
                 let slint::GraphicsAPI::NativeOpenGL { get_proc_address } = graphics_api else {
+                    eprintln!("RenderingSetup: graphics_api is NOT NativeOpenGL!");
                     if let Some(ui) = ui_weak.upgrade() {
                         crate::playback::show_error(
                             &ui,
@@ -255,8 +373,9 @@ pub fn install_renderer(
                     }
                     return;
                 };
-                match Renderer::new(Rc::clone(&player), get_proc_address, flip_y) {
+                match Renderer::new(Arc::clone(&player), get_proc_address, flip_y) {
                     Ok(mut created) => {
+                        eprintln!("RenderingSetup: Renderer initialized successfully");
                         let pending = frame_pending.clone();
                         let w = ui_weak.clone();
                         created.set_update_callback(move || {

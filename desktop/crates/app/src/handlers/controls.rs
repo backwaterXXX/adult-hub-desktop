@@ -1,7 +1,7 @@
 use crate::MainWindow;
 use crate::catalog::{filter_catalog_items, sample_catalog_tv_items};
 use crate::context::AppContext;
-use crate::playback::{pick_media_file, play_random_catalog_item, show_error, start_item_playback};
+use crate::playback::{pick_media_file, show_error};
 use adult_hub_client::{GetItemsQuery, TvItem};
 use adult_hub_player::BufferProfile;
 use slint::ComponentHandle;
@@ -29,17 +29,12 @@ struct SeekRepeatState {
 
 pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
     let player = ctx.player.clone();
-    let headers = ctx.headers.clone();
     let autoplay_active = ctx.autoplay_active.clone();
     let hwdec_active = ctx.hwdec_active.clone();
     let reporter = ctx.reporter.clone();
     let session_ctrl = ctx.session_ctrl.clone();
     let current_item = ctx.current_playing_item.clone();
-    let cached_catalog = ctx.cached_catalog.clone();
-    let credential_store = ctx.credential_store.clone();
     let local_store = ctx.local_store.clone();
-    let jellyfin = ctx.jellyfin.clone();
-    let phash_coord = ctx.phash_coord.clone();
     let seek_repeat_state = Arc::new(Mutex::new(SeekRepeatState::default()));
     let seek_feedback_generation = Arc::new(AtomicU64::new(0));
 
@@ -50,6 +45,13 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
         ui.on_toggle_play(move || {
             let Some(ui) = weak.upgrade() else { return };
             if !ui.get_player_media_loaded() {
+                if ui.get_player_state() == "loading" || ui.get_player_state() == "resolving" {
+                    ui.set_player_state("paused".into());
+                    ui.set_playing(false);
+                } else if ui.get_player_state() == "paused" {
+                    ui.set_player_state("loading".into());
+                    ui.set_playing(true);
+                }
                 return;
             }
             let Some(player) = &player else {
@@ -59,6 +61,7 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
             match player.toggle_pause() {
                 Ok(paused) => {
                     ui.set_playing(!paused);
+                    ui.set_player_state(if paused { "paused".into() } else { "playing".into() });
                     let pos_ms = (player.position().unwrap_or(0.0) * 1000.0) as u64;
                     reporter.report_progress_now(pos_ms, paused);
                 }
@@ -69,22 +72,22 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
 
     {
         let weak = ui.as_weak();
-        let player = player.clone();
+        let ctx_retry = ctx.clone();
         ui.on_retry_current_playback(move || {
             let Some(ui) = weak.upgrade() else { return };
-            let Some(player) = &player else {
-                show_error(&ui, "libmpv is not available");
-                return;
-            };
-
-            let position = player.position().unwrap_or(0.0).max(0.0);
-            match player.retry_current_at(position) {
-                Ok(()) => {
-                    ui.set_player_error_message(String::new().into());
-                    ui.set_status("Retrying playback…".into());
-                    ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
+            ui.set_player_error_message(String::new().into());
+            let current_item = ctx_retry.current_playing_item.lock().unwrap().clone();
+            if let Some(item) = current_item {
+                crate::playback::start_item_playback_with_resume_ctx(&ui, &ctx_retry, item, None);
+            } else if let Some(player) = &ctx_retry.player {
+                let position = player.position().unwrap_or(0.0).max(0.0);
+                match player.retry_current_at(position) {
+                    Ok(()) => {
+                        ui.set_status("Retrying playback…".into());
+                        ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
+                    }
+                    Err(error) => show_error(&ui, error.to_string()),
                 }
-                Err(error) => show_error(&ui, error.to_string()),
             }
         });
     }
@@ -207,21 +210,9 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
 
     {
         let weak = ui.as_weak();
-        let player = player.clone();
-        let headers = headers.clone();
-        let credential_store = credential_store.clone();
-        let local_store = local_store.clone();
-        let jellyfin = jellyfin.clone();
-        let reporter = reporter.clone();
-        let session_ctrl = session_ctrl.clone();
-        let current_item = current_item.clone();
-        let phash_coord = phash_coord.clone();
+        let ctx_play = ctx.clone();
         ui.on_load_url(move |text| {
             let Some(ui) = weak.upgrade() else { return };
-            let Some(player) = &player else {
-                show_error(&ui, "libmpv is not available");
-                return;
-            };
             let text = text.to_string();
             if text.trim().is_empty() {
                 show_error(&ui, "Enter a media URL or file path first");
@@ -265,67 +256,35 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
                 width: None,
                 height: None,
             };
-            start_item_playback(
+            crate::playback::start_item_playback_with_resume_ctx(
                 &ui,
-                player,
+                &ctx_play,
                 custom_item,
-                &headers,
-                &credential_store,
-                &local_store,
-                &jellyfin,
-                &reporter,
-                &session_ctrl,
-                &current_item,
-                &phash_coord,
+                None,
             );
         });
     }
 
     {
         let weak = ui.as_weak();
-        let player = player.clone();
-        let headers = headers.clone();
-        let credential_store = credential_store.clone();
-        let local_store = local_store.clone();
-        let jellyfin = jellyfin.clone();
-        let reporter = reporter.clone();
-        let session_ctrl = session_ctrl.clone();
-        let current_item = current_item.clone();
-        let phash_coord = phash_coord.clone();
+        let ctx_sample = ctx.clone();
         ui.on_load_sample(move || {
             let Some(ui) = weak.upgrade() else { return };
-            let Some(player) = &player else { return };
             let sample_item = sample_catalog_tv_items()[0].clone();
-            start_item_playback(
+            crate::playback::start_item_playback_with_resume_ctx(
                 &ui,
-                player,
+                &ctx_sample,
                 sample_item,
-                &headers,
-                &credential_store,
-                &local_store,
-                &jellyfin,
-                &reporter,
-                &session_ctrl,
-                &current_item,
-                &phash_coord,
+                None,
             );
         });
     }
 
     {
         let weak = ui.as_weak();
-        let player = player.clone();
-        let headers = headers.clone();
-        let credential_store = credential_store.clone();
-        let local_store = local_store.clone();
-        let jellyfin = jellyfin.clone();
-        let reporter = reporter.clone();
-        let session_ctrl = session_ctrl.clone();
-        let current_item = current_item.clone();
-        let phash_coord = phash_coord.clone();
+        let ctx_file = ctx.clone();
         ui.on_open_file(move || {
             let Some(ui) = weak.upgrade() else { return };
-            let Some(player) = &player else { return };
             match pick_media_file() {
                 Some(path) => {
                     let local_item = TvItem {
@@ -357,18 +316,11 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
                         width: None,
                         height: None,
                     };
-                    start_item_playback(
+                    crate::playback::start_item_playback_with_resume_ctx(
                         &ui,
-                        player,
+                        &ctx_file,
                         local_item,
-                        &headers,
-                        &credential_store,
-                        &local_store,
-                        &jellyfin,
-                        &reporter,
-                        &session_ctrl,
-                        &current_item,
-                        &phash_coord,
+                        None,
                     );
                 }
                 None => {
@@ -405,6 +357,7 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
 
     {
         let weak = ui.as_weak();
+        let player = player.clone();
         ui.on_toggle_hud(move || {
             let Some(ui) = weak.upgrade() else { return };
             if !ui.get_player_media_loaded() {
@@ -412,7 +365,13 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
             }
             let visible = !ui.get_hud_visible();
             ui.set_hud_visible(visible);
-            if !visible {
+            if visible {
+                if let Some(player) = &player {
+                    ui.set_hud_text(crate::playback::stats_text(&player.stats()).into());
+                } else {
+                    ui.set_hud_text("Playback statistics unavailable".into());
+                }
+            } else {
                 ui.set_hud_text("".into());
             }
         });
@@ -531,57 +490,65 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
     {
         let weak = ui.as_weak();
         let player = player.clone();
-        let headers = headers.clone();
-        let credential_store = credential_store.clone();
-        let local_store = local_store.clone();
-        let jellyfin = jellyfin.clone();
         let reporter = reporter.clone();
         let session_ctrl = session_ctrl.clone();
         let current_item = current_item.clone();
-        let cached_catalog = cached_catalog.clone();
-        let credential_store = credential_store.clone();
-        let local_store = local_store.clone();
-        let jellyfin = jellyfin.clone();
-        let phash_coord = phash_coord.clone();
+        let ctx_shuffle = ctx.clone();
         ui.on_play_random(move || {
             let Some(ui) = weak.upgrade() else { return };
             let Some(player) = &player else { return };
-            let session = credential_store.get().ok().flatten();
-            let Some(session) = session else {
-                play_random_catalog_item(
-                    &ui,
-                    player,
-                    &headers,
-                    &credential_store,
-                    &local_store,
-                    &jellyfin,
-                    &reporter,
-                    &session_ctrl,
-                    &current_item,
-                    &cached_catalog,
-                    &phash_coord,
-                );
-                return;
-            };
 
-            ui.set_status("Finding a random title in your library…".into());
+            // 1. Invalidate previous in-flight requests immediately
+            let request_id = session_ctrl.next_request_id();
+
+            // 2. Immediately stop previous playback (audio AND video)
+            let _ = player.stop();
+
+            // Checkpoint outgoing item and stop reporter session
+            let outgoing = current_item.lock().unwrap().take();
+            if let Some(prev) = outgoing.as_ref() {
+                let pos = (player.position().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
+                let dur = (player.duration().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
+                if pos >= 5000 {
+                    session_ctrl.checkpoint_progress(prev, pos, dur, false);
+                }
+                reporter.stop_session(pos);
+            }
+
+            // 3. Immediately transition UI into resolving/loading state on the player screen
+            ui.set_has_active_media(true);
+            ui.set_playing(true);
+            ui.set_player_media_loaded(false);
+            ui.set_player_state("resolving".into());
+            ui.set_player_loading_message("Selecting next video…".into());
+            ui.set_player_title("".into());
+            ui.set_player_subtitle("".into());
+            ui.set_player_error_message(String::new().into());
+            ui.set_toast_visible(false);
+            ui.set_player_controls_visible(true);
+            ui.set_player_more_controls_visible(false);
+            ui.set_playback_ended_visible(false);
+            ui.set_autoplay_countdown_sec(0);
+            if ui.get_active_screen() != "player" {
+                ctx_shuffle.push_nav_destination(crate::handlers::browsing::current_nav_destination(&ui));
+            }
+            ui.set_active_screen("player".into());
+            ui.set_status("Selecting a random title…".into());
             ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
+
             let weak = weak.clone();
-            let jellyfin = jellyfin.clone();
-            let local_store = local_store.clone();
-            let current_id = current_item
-                .lock()
-                .unwrap()
-                .as_ref()
-                .map(|item| item.id.clone())
-                .unwrap_or_default();
+            let ctx_worker = ctx_shuffle.clone();
+            let current_id = outgoing.as_ref().map(|item| item.id.clone());
+
             std::thread::spawn(move || {
-                let parent_id = local_store
-                    .get_setting("selected_library_id")
-                    .ok()
-                    .flatten();
-                let result = jellyfin
-                    .get_items(
+                let session = ctx_worker.credential_store.get().ok().flatten();
+                let chosen_item: Option<TvItem> = if let Some(session) = &session {
+                    let parent_id = ctx_worker
+                        .local_store
+                        .get_setting("selected_library_id")
+                        .ok()
+                        .flatten();
+                    let page_res = ctx_worker.jellyfin.get_items(
                         &session.server_url,
                         &session.user_id,
                         &session.access_token,
@@ -591,54 +558,146 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
                             sort_by: "Random",
                             ..Default::default()
                         },
-                    )
-                    .map(|page| filter_catalog_items(page.items, &local_store));
-                slint::invoke_from_event_loop(move || {
-                    let Some(ui) = weak.upgrade() else { return };
-                    match result {
-                        Ok(items) => {
-                            let target = items.into_iter().find(|item| item.id != current_id);
-                            if let Some(target) = target {
-                                ui.set_status(format!("Playing {}", target.title).into());
-                                ui.invoke_play_item(target.id.into());
+                    );
+                    match page_res {
+                        Ok(page) => {
+                            let total = page.total_record_count;
+                            let items = if total > 50 && fastrand::bool() {
+                                let random_offset = fastrand::usize(0..total.saturating_sub(49));
+                                ctx_worker.jellyfin.get_items(
+                                    &session.server_url,
+                                    &session.user_id,
+                                    &session.access_token,
+                                    &GetItemsQuery {
+                                        parent_id: parent_id.as_deref(),
+                                        start_index: random_offset,
+                                        limit: 50,
+                                        sort_by: "Random",
+                                        ..Default::default()
+                                    },
+                                )
+                                .map(|p| p.items)
+                                .unwrap_or(page.items)
                             } else {
-                                ui.set_status(
-                                    "No random titles are available in this library".into(),
-                                );
-                                ui.set_status_color(slint::Color::from_rgb_u8(244, 177, 66));
-                            }
+                                page.items
+                            };
+                            let filtered = filter_catalog_items(items, &ctx_worker.local_store);
+                            ctx_worker.shuffle_engine.select_candidate(&filtered, current_id.as_deref())
                         }
-                        Err(error) => {
-                            ui.set_status(format!("Could not find a random title: {error}").into());
-                            ui.set_status_color(slint::Color::from_rgb_u8(244, 67, 54));
+                        Err(err) => {
+                            crate::diagnostics::GLOBAL_LOG.w("Shuffle", &format!("Jellyfin random query failed: {err}"));
+                            None
                         }
                     }
-                })
-                .ok();
+                } else {
+                    None
+                };
+
+                let final_item = chosen_item.or_else(|| {
+                    let catalog = ctx_worker.cached_catalog.lock().unwrap().clone();
+                    let filtered = filter_catalog_items(catalog, &ctx_worker.local_store);
+                    ctx_worker.shuffle_engine.select_candidate(&filtered, current_id.as_deref())
+                });
+
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = weak.upgrade() else { return };
+                    // If request_id is stale (e.g. user clicked Shuffle again or navigated back), drop it
+                    if !ctx_worker.session_ctrl.is_request_current(request_id) {
+                        return;
+                    }
+
+                    match final_item {
+                        Some(target) => {
+                            ui.set_status(format!("Playing {}", target.title).into());
+                            crate::playback::start_item_playback_with_resume_ctx(
+                                &ui,
+                                &ctx_worker,
+                                target,
+                                Some(false),
+                            );
+                        }
+                        None => {
+                            ui.set_player_state("failed".into());
+                            ui.set_player_error_message(
+                                "No random titles are available in this library".into(),
+                            );
+                            ui.set_status("No random titles available".into());
+                            ui.set_status_color(slint::Color::from_rgb_u8(244, 177, 66));
+                        }
+                    }
+                });
             });
         });
     }
 
+
     {
         let weak = ui.as_weak();
+        let current_item = current_item.clone();
         let player = player.clone();
-        ui.on_accept_resume(move || {
+        let ctx_det = ctx.clone();
+        ui.on_open_current_item_details(move || {
             let Some(ui) = weak.upgrade() else { return };
-            let Some(player) = &player else { return };
-            let pos = ui.get_resume_prompt_position();
-            ui.set_resume_prompt_visible(false);
-            let _ = player.seek_absolute(pos as f64);
+            let maybe_item = current_item.lock().unwrap().clone();
+            if let Some(item) = maybe_item {
+                let was_playing = ui.get_playing();
+                ctx_det.player_paused_for_details.store(was_playing, std::sync::atomic::Ordering::SeqCst);
+                if was_playing {
+                    if let Some(p) = &player {
+                        let _ = p.set_pause(true);
+                    }
+                    ui.set_playing(false);
+                }
+                ui.invoke_open_item_detail(item.id.into());
+            }
         });
     }
 
     {
         let weak = ui.as_weak();
         let player = player.clone();
-        ui.on_reject_resume(move || {
+        let current_item = current_item.clone();
+        ui.on_replay_current(move || {
             let Some(ui) = weak.upgrade() else { return };
-            let Some(player) = &player else { return };
-            ui.set_resume_prompt_visible(false);
-            let _ = player.seek_absolute(0.0);
+            ui.set_playback_ended_visible(false);
+            ui.set_autoplay_countdown_sec(0);
+            if let Some(player) = &player {
+                if ui.get_player_media_loaded() {
+                    let _ = player.seek_absolute(0.0);
+                    let _ = player.set_pause(false);
+                    ui.set_playing(true);
+                    return;
+                }
+            }
+            let maybe_item = current_item.lock().unwrap().clone();
+            if let Some(item) = maybe_item {
+                ui.invoke_play_item(item.id.into());
+            }
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let player = player.clone();
+        let current_item = current_item.clone();
+        let ctx_start = ctx.clone();
+        ui.on_play_current_from_start(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            ui.set_playback_ended_visible(false);
+            ui.set_autoplay_countdown_sec(0);
+            if let Some(player) = &player {
+                if ui.get_player_media_loaded() {
+                    let _ = player.seek_absolute(0.0);
+                    let _ = player.set_pause(false);
+                    ui.set_player_state("playing".into());
+                    ui.set_playing(true);
+                    return;
+                }
+            }
+            let maybe_item = current_item.lock().unwrap().clone();
+            if let Some(item) = maybe_item {
+                crate::playback::start_item_playback_with_resume_ctx(&ui, &ctx_start, item, Some(false));
+            }
         });
     }
 }
@@ -663,12 +722,16 @@ pub fn install_fullscreen(ui: &MainWindow) {
         let fullscreen = fullscreen.clone();
         ui.on_escape_pressed(move || {
             let Some(ui) = ui_weak.upgrade() else { return };
+            if ui.get_player_volume_flyout_open() {
+                ui.set_player_volume_flyout_open(false);
+                return;
+            }
             if fullscreen.get() {
                 ui.window().set_fullscreen(false);
                 fullscreen.set(false);
                 ui.set_is_fullscreen(false);
-            } else if ui.get_active_screen() != "browse" {
-                ui.invoke_switch_screen("browse".into());
+            } else {
+                ui.invoke_navigate_back();
             }
         });
     }

@@ -3,57 +3,49 @@ use crate::catalog::{
     tv_item_to_card_for_server,
 };
 use crate::context::AppContext;
-use crate::playback::{
-    format_time, show_error, start_item_playback, start_item_playback_with_resume,
-};
+use crate::playback::{format_time, show_error};
 use crate::session::PlaybackSessionController;
 use crate::{MainWindow, VideoCardData};
-use adult_hub_client::{GetItemsQuery, JellyfinClient, TvItem};
+use adult_hub_client::{JellyfinClient, TvItem};
 use slint::{ComponentHandle, Model};
 use std::rc::Rc;
 
 pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
-    let player = ctx.player.clone();
-    let headers = ctx.headers.clone();
     let local_store = ctx.local_store.clone();
     let credential_store = ctx.credential_store.clone();
     let jellyfin = ctx.jellyfin.clone();
-    let reporter = ctx.reporter.clone();
     let session_ctrl = ctx.session_ctrl.clone();
     let current_item = ctx.current_playing_item.clone();
     let cached_catalog = ctx.cached_catalog.clone();
     let home_catalog = ctx.home_catalog.clone();
-    let phash_coord = ctx.phash_coord.clone();
 
     // 1. Open Item Detail Modal
     {
         let weak = ui.as_weak();
         let cached_catalog = cached_catalog.clone();
-        let home_catalog = home_catalog.clone();
         let local_store = local_store.clone();
         let session_ctrl = session_ctrl.clone();
         let credential_store = credential_store.clone();
         let jellyfin = jellyfin.clone();
+        let ctx_detail = ctx.clone();
         ui.on_open_item_detail(move |id| {
             let Some(ui) = weak.upgrade() else { return };
             let id = id.to_string();
-            let target_item = cached_catalog
-                .lock()
-                .unwrap()
-                .iter()
-                .find(|i| i.id == id)
-                .cloned()
+            ctx_detail.push_nav_destination(crate::handlers::browsing::current_nav_destination(&ui));
+            let target_item = ctx_detail
+                .find_catalog_item(&id)
                 .or_else(|| {
-                    home_catalog
-                        .lock()
-                        .unwrap()
-                        .iter()
-                        .find(|item| item.id == id)
-                        .cloned()
+                    if id == "sample" {
+                        Some(sample_catalog_tv_items()[0].clone())
+                    } else {
+                        None
+                    }
                 });
             let target_item = match target_item {
-                Some(item) => item,
-                None if id == "sample" => sample_catalog_tv_items()[0].clone(),
+                Some(item) => {
+                    *ctx_detail.detail_active_item.lock().unwrap() = Some(item.clone());
+                    item
+                }
                 None => {
                     show_error(
                         &ui,
@@ -104,7 +96,55 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
             };
             let studio_str = target_item.studios.first().cloned().unwrap_or_default();
             let genres_str = target_item.genres.join(", ");
-            let overview_str = target_item.overview.clone().unwrap_or_default();
+            let mut overview_str = target_item.overview.clone().unwrap_or_default();
+            let mut extracted_channel = String::new();
+            let mut extracted_source_url = String::new();
+
+            // Clean up overview by extracting raw source/channel metadata and removing title repetitions
+            let clean_title = target_item.title.trim();
+            let disp_title_str = crate::catalog::display_title(&target_item);
+            let disp_title = disp_title_str.trim();
+
+            let mut clean_overview_lines = Vec::new();
+            for raw_line in overview_str.lines() {
+                let line = raw_line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let lower = line.to_lowercase();
+                if lower.starts_with("kanał:") || lower.starts_with("kanal:") || lower.starts_with("channel:") {
+                    if let Some((_, val)) = line.split_once(':') {
+                        let trimmed = val.trim();
+                        if !trimmed.is_empty() && extracted_channel.is_empty() {
+                            extracted_channel = trimmed.to_string();
+                        }
+                    }
+                    continue;
+                }
+                if lower.starts_with("video page:") || lower.starts_with("video url:") || lower.starts_with("strona wideo:") || lower.starts_with("url:") || lower.starts_with("source:") {
+                    if let Some((_, val)) = line.split_once(':') {
+                        let trimmed = val.trim();
+                        if !trimmed.is_empty() && extracted_source_url.is_empty() {
+                            extracted_source_url = trimmed.to_string();
+                        }
+                    }
+                    continue;
+                }
+                if lower.starts_with("tytuł:") || lower.starts_with("title:") {
+                    continue;
+                }
+                if line.eq_ignore_ascii_case(clean_title) || line.eq_ignore_ascii_case(disp_title) {
+                    continue;
+                }
+                clean_overview_lines.push(raw_line.trim_end());
+            }
+            overview_str = clean_overview_lines.join("\n").trim().to_string();
+
+            let original_title_str = if clean_title.eq_ignore_ascii_case(disp_title) {
+                String::new()
+            } else {
+                target_item.title.clone()
+            };
 
             // Use any already-cached artwork immediately, then fetch it off the UI thread.
             let artwork_session = credential_store.get().ok().flatten();
@@ -169,19 +209,38 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                 String::new()
             };
 
+            let genre_lower: std::collections::HashSet<String> = target_item
+                .genres
+                .iter()
+                .chain(target_item.tags.iter())
+                .map(|g| g.trim().to_lowercase())
+                .collect();
+
+            let is_category_word = |name: &str| -> bool {
+                let lower = name.trim().to_lowercase();
+                if lower.is_empty() || genre_lower.contains(&lower) {
+                    return true;
+                }
+                const KNOWN_CATEGORIES: &[&str] = &[
+                    "locker room", "body worship", "behind the scenes", "compilation",
+                    "casting", "threesome", "foursome", "solo", "interracial", "outdoor",
+                    "public", "pov", "point of view", "parody", "fetish", "foot fetish",
+                    "massage", "oil massage", "deepthroat", "blowjob", "creampie", "facial",
+                    "masturbation", "striptease", "bdsm", "bondage", "roleplay", "cosplay",
+                    "hardcore", "softcore", "amateur", "vintage", "retro", "uniform",
+                    "lingerie", "stockings", "anal", "oral", "glamour", "erotic",
+                ];
+                KNOWN_CATEGORIES.iter().any(|cat| lower == *cat)
+            };
+
             let performers = target_item
                 .people
                 .iter()
+                .filter(|p| !is_category_word(&p.name))
                 .map(|p| p.name.clone().into())
                 .collect::<Vec<slint::SharedString>>();
             let genre_items = target_item
                 .genres
-                .iter()
-                .cloned()
-                .map(Into::into)
-                .collect::<Vec<slint::SharedString>>();
-            let tag_items = target_item
-                .tags
                 .iter()
                 .cloned()
                 .map(Into::into)
@@ -192,6 +251,9 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                 .people
                 .iter()
                 .filter(|person| {
+                    if is_category_word(&person.name) {
+                        return false;
+                    }
                     person
                         .person_type
                         .as_deref()
@@ -227,8 +289,48 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                 })
                 .collect::<Vec<_>>();
 
+            let (_, extracted_tags) =
+                crate::catalog::extract_title_tags_and_clean_title(&target_item.title);
+            let mut combined_tags = target_item.tags.clone();
+            for t in extracted_tags {
+                if !combined_tags
+                    .iter()
+                    .any(|existing| existing.eq_ignore_ascii_case(&t))
+                {
+                    combined_tags.push(t);
+                }
+            }
+            let tag_items = combined_tags
+                .into_iter()
+                .map(Into::into)
+                .collect::<Vec<slint::SharedString>>();
+
+            let size_str = target_item
+                .file_size_bytes
+                .map(|b| {
+                    if b >= 1_073_741_824 {
+                        format!("{:.1} GB", b as f64 / 1_073_741_824.0)
+                    } else if b >= 1_048_576 {
+                        format!("{:.1} MB", b as f64 / 1_048_576.0)
+                    } else {
+                        format!("{b} B")
+                    }
+                })
+                .unwrap_or_default();
+
+            let provider_str = target_item.source_provider.clone().unwrap_or_else(|| {
+                if is_telegram_item {
+                    "Telegram".to_string()
+                } else {
+                    "Jellyfin".to_string()
+                }
+            });
+
             ui.set_detail_id(target_item.id.clone().into());
-            ui.set_detail_title(target_item.title.into());
+            ui.set_detail_title(crate::catalog::display_title(&target_item).into());
+            ui.set_detail_original_title(original_title_str.into());
+            ui.set_detail_channel(extracted_channel.into());
+            ui.set_detail_source_url(extracted_source_url.into());
             ui.set_detail_overview(overview_str.into());
             ui.set_detail_year(year_str.into());
             ui.set_detail_duration(duration_str.into());
@@ -237,6 +339,10 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
             ui.set_detail_genre_items(Rc::new(slint::VecModel::from(genre_items)).into());
             ui.set_detail_tag_items(Rc::new(slint::VecModel::from(tag_items)).into());
             ui.set_detail_resolution(resolution_str.into());
+            ui.set_detail_container(target_item.container.clone().unwrap_or_default().into());
+            ui.set_detail_file_size(size_str.into());
+            ui.set_detail_provider(provider_str.into());
+            ui.set_detail_tech_expanded(false);
             ui.set_detail_thumbnail(detail_card.thumbnail.clone());
             ui.set_detail_has_thumbnail(detail_card.has_thumbnail);
             ui.set_detail_backdrop(cached_backdrop.clone().unwrap_or_default());
@@ -289,7 +395,8 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
             ui.set_detail_similar_items(sim_model.into());
             ui.set_detail_similar_loading(!is_telegram_item && artwork_session.is_some());
 
-            ui.set_detail_visible(true);
+            ui.set_detail_visible(false);
+            ui.set_active_screen("video-details".into());
 
             if cached_backdrop.is_none()
                 && let Some(backdrop_url) = backdrop_url
@@ -493,9 +600,24 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
     // 2. Close Item Detail Modal
     {
         let weak = ui.as_weak();
+        let player = ctx.player.clone();
+        let ctx_close = ctx.clone();
         ui.on_close_item_detail(move || {
             if let Some(ui) = weak.upgrade() {
                 ui.set_detail_visible(false);
+                if ui.get_active_screen() == "video-details" {
+                    ui.invoke_navigate_back();
+                    return;
+                }
+                if ui.get_active_screen() == "player" {
+                    let was_playing = ctx_close.player_paused_for_details.swap(false, std::sync::atomic::Ordering::SeqCst);
+                    if was_playing {
+                        if let Some(p) = &player {
+                            let _ = p.set_pause(false);
+                        }
+                        ui.set_playing(true);
+                    }
+                }
             }
         });
     }
@@ -725,35 +847,53 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
     // 5. Play Detail Item (Play from start or resume)
     {
         let weak = ui.as_weak();
-        let player = player.clone();
-        let headers = headers.clone();
-        let credential_store = credential_store.clone();
-        let local_store = local_store.clone();
-        let jellyfin = jellyfin.clone();
-        let reporter = reporter.clone();
-        let session_ctrl = session_ctrl.clone();
-        let current_item = current_item.clone();
-        let cached_catalog = cached_catalog.clone();
-        let phash_coord = phash_coord.clone();
-
+        let ctx_play = ctx.clone();
+        let player = ctx.player.clone();
         ui.on_play_detail_item(move |id, resume| {
             let Some(ui) = weak.upgrade() else { return };
             ui.set_detail_visible(false);
-            let Some(player) = &player else {
-                show_error(&ui, "libmpv is not available");
-                return;
-            };
             let id = id.to_string();
 
-            let target_item = cached_catalog
-                .lock()
-                .unwrap()
-                .iter()
-                .find(|i| i.id == id)
-                .cloned();
+            if ui.get_active_screen() == "player" {
+                let current_id = ctx_play
+                    .current_playing_item
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|i| i.id.clone());
+                if current_id.as_deref() == Some(&id) {
+                    ctx_play.player_paused_for_details.store(false, std::sync::atomic::Ordering::SeqCst);
+                    if resume {
+                        // Keep current media and position without re-resolving or resetting player
+                        if let Some(player) = &player {
+                            let _ = player.set_pause(false);
+                        }
+                        ui.set_playing(true);
+                        return;
+                    } else {
+                        // Play from start: seek to 0 without re-resolving
+                        if let Some(player) = &player {
+                            let _ = player.seek_absolute(0.0);
+                            let _ = player.set_pause(false);
+                        }
+                        ui.set_playing(true);
+                        return;
+                    }
+                }
+            }
+
+            let target_item = ctx_play
+                .find_catalog_item(&id)
+                .or_else(|| ctx_play.detail_active_item.lock().unwrap().clone())
+                .or_else(|| {
+                    if id == "sample" {
+                        Some(sample_catalog_tv_items()[0].clone())
+                    } else {
+                        None
+                    }
+                });
             let target_item = match target_item {
                 Some(item) => item,
-                None if id == "sample" => sample_catalog_tv_items()[0].clone(),
                 None => {
                     show_error(
                         &ui,
@@ -763,18 +903,10 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                 }
             };
 
-            start_item_playback_with_resume(
+            crate::playback::start_item_playback_with_resume_ctx(
                 &ui,
-                player,
+                &ctx_play,
                 target_item,
-                &headers,
-                &credential_store,
-                &local_store,
-                &jellyfin,
-                &reporter,
-                &session_ctrl,
-                &current_item,
-                &phash_coord,
                 Some(resume),
             );
         });
@@ -782,16 +914,8 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
 
     {
         let weak = ui.as_weak();
-        let player = player.clone();
-        let headers = headers.clone();
-        let credential_store = credential_store.clone();
-        let local_store = local_store.clone();
-        let jellyfin = jellyfin.clone();
-        let reporter = reporter.clone();
-        let session_ctrl = session_ctrl.clone();
-        let current_item = current_item.clone();
         let cached_catalog = cached_catalog.clone();
-        let phash_coord = phash_coord.clone();
+        let ctx_random = ctx.clone();
         ui.on_play_random_contextual(move |mode| {
             let Some(ui) = weak.upgrade() else { return };
             let catalog = cached_catalog.lock().unwrap().clone();
@@ -859,133 +983,25 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
             let index = (nonce % candidates.len() as u128) as usize;
             let target = candidates.swap_remove(index);
             ui.set_detail_visible(false);
-            let Some(player) = &player else {
-                show_error(&ui, "libmpv is not available");
-                return;
-            };
-            start_item_playback(
-                &ui,
-                player,
-                target,
-                &headers,
-                &credential_store,
-                &local_store,
-                &jellyfin,
-                &reporter,
-                &session_ctrl,
-                &current_item,
-                &phash_coord,
-            );
+            crate::playback::start_item_playback_ctx(&ui, &ctx_random, target);
         });
     }
 
-    // 6. Select Performer (Drilldown discovery)
+    // 6. Select Performer (Direct to Performer Profile Screen)
     {
         let weak = ui.as_weak();
-        let cached_catalog = cached_catalog.clone();
-        let credential_store = credential_store.clone();
-        let jellyfin = jellyfin.clone();
-        let local_store = local_store.clone();
         ui.on_select_performer(move |performer| {
             let Some(ui) = weak.upgrade() else { return };
-            ui.set_detail_visible(false);
-            ui.set_search_query(performer.clone());
-            ui.set_active_screen("browse".into());
-            let perf = performer.to_string();
-            let weak = weak.clone();
-            let cached_catalog = cached_catalog.clone();
-            let credential_store = credential_store.clone();
-            let jellyfin = jellyfin.clone();
-            let local_store = local_store.clone();
-
-            std::thread::spawn(move || {
-                let session = credential_store.get().ok().flatten();
-                let raw_items = if let Some(session) = session {
-                    let q = GetItemsQuery {
-                        person: Some(&perf),
-                        sort_by: "SortName",
-                        limit: 50,
-                        ..Default::default()
-                    };
-                    jellyfin
-                        .get_items(
-                            &session.server_url,
-                            &session.user_id,
-                            &session.access_token,
-                            &q,
-                        )
-                        .map(|page| page.items)
-                        .unwrap_or_default()
-                } else {
-                    Vec::new()
-                };
-
-                let raw_items = filter_catalog_items(raw_items, &local_store);
-
-                slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = weak.upgrade() {
-                        *cached_catalog.lock().unwrap() = raw_items.clone();
-                        let cards = raw_items.iter().map(tv_item_to_card).collect::<Vec<_>>();
-                        set_catalog(&ui, cards);
-                    }
-                })
-                .ok();
-            });
+            ui.invoke_open_performer_profile(performer);
         });
     }
 
-    // 7. Select Studio (Drilldown discovery)
+    // 7. Select Studio (Direct to Studio Details Screen)
     {
         let weak = ui.as_weak();
-        let cached_catalog = cached_catalog.clone();
-        let credential_store = credential_store.clone();
-        let jellyfin = jellyfin.clone();
-        let local_store = local_store.clone();
         ui.on_select_studio(move |studio| {
             let Some(ui) = weak.upgrade() else { return };
-            ui.set_detail_visible(false);
-            ui.set_search_query(studio.clone());
-            ui.set_active_screen("browse".into());
-            let stud = studio.to_string();
-            let weak = weak.clone();
-            let cached_catalog = cached_catalog.clone();
-            let credential_store = credential_store.clone();
-            let jellyfin = jellyfin.clone();
-            let local_store = local_store.clone();
-
-            std::thread::spawn(move || {
-                let session = credential_store.get().ok().flatten();
-                let raw_items = if let Some(session) = session {
-                    let q = GetItemsQuery {
-                        studio: Some(&stud),
-                        sort_by: "SortName",
-                        limit: 50,
-                        ..Default::default()
-                    };
-                    jellyfin
-                        .get_items(
-                            &session.server_url,
-                            &session.user_id,
-                            &session.access_token,
-                            &q,
-                        )
-                        .map(|page| page.items)
-                        .unwrap_or_default()
-                } else {
-                    Vec::new()
-                };
-
-                let raw_items = filter_catalog_items(raw_items, &local_store);
-                *cached_catalog.lock().unwrap() = raw_items.clone();
-
-                slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = weak.upgrade() {
-                        let cards = raw_items.iter().map(tv_item_to_card).collect::<Vec<_>>();
-                        set_catalog(&ui, cards);
-                    }
-                })
-                .ok();
-            });
+            ui.invoke_open_studio_profile(studio);
         });
     }
 }

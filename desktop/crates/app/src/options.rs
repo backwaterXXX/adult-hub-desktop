@@ -6,6 +6,7 @@ pub struct Options {
     pub url: Option<String>,
     pub headers: Vec<String>,
     pub demo_capture: bool,
+    pub demo_shuffle: bool,
 }
 
 impl Options {
@@ -16,6 +17,9 @@ impl Options {
             match argument.as_str() {
                 "--demo-capture" => {
                     options.demo_capture = true;
+                }
+                "--demo-shuffle" => {
+                    options.demo_shuffle = true;
                 }
                 "--header" => {
                     let value = args
@@ -65,16 +69,20 @@ pub const PUBLIC_SAMPLE_MP4_URL: &str =
     "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
 
 pub fn resolve_sample_media() -> String {
+    resolve_named_sample_media("sample.mp4")
+}
+
+pub fn resolve_named_sample_media(filename: &str) -> String {
     // 1. Executable directory
-    if let Some(path) = media_beside_executable("sample.mp4") {
+    if let Some(path) = media_beside_executable(filename) {
         return path;
     }
     // 2. Current working directory
-    let local = PathBuf::from("sample.mp4");
+    let local = PathBuf::from(filename);
     if local.is_file() {
         return local.to_string_lossy().into_owned();
     }
-    let repo_sample = PathBuf::from("desktop/sample.mp4");
+    let repo_sample = PathBuf::from("desktop").join(filename);
     if repo_sample.is_file() {
         return repo_sample.to_string_lossy().into_owned();
     }

@@ -44,6 +44,15 @@ pub struct TvPersonRole {
     pub primary_image_tag: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct TvPersonDetails {
+    pub id: String,
+    pub name: String,
+    pub overview: Option<String>,
+    pub primary_image_tag: Option<String>,
+    pub child_count: Option<u32>,
+}
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct TvItem {
     pub id: String,
@@ -191,9 +200,33 @@ impl From<VideoDto> for TvItem {
         } else {
             v.id.clone()
         };
+        let categories_lower: std::collections::HashSet<String> = v
+            .categories
+            .iter()
+            .map(|c| c.trim().to_lowercase())
+            .collect();
+
+        let is_category_term = |name: &str| -> bool {
+            let lower = name.trim().to_lowercase();
+            if lower.is_empty() || categories_lower.contains(&lower) {
+                return true;
+            }
+            const KNOWN_CATEGORIES: &[&str] = &[
+                "locker room", "body worship", "behind the scenes", "compilation",
+                "casting", "threesome", "foursome", "solo", "interracial", "outdoor",
+                "public", "pov", "point of view", "parody", "fetish", "foot fetish",
+                "massage", "oil massage", "deepthroat", "blowjob", "creampie", "facial",
+                "masturbation", "striptease", "bdsm", "bondage", "roleplay", "cosplay",
+                "hardcore", "softcore", "amateur", "vintage", "retro", "uniform",
+                "lingerie", "stockings", "anal", "oral", "glamour", "erotic",
+            ];
+            KNOWN_CATEGORIES.iter().any(|cat| lower == *cat)
+        };
+
         let people = v
             .performers
             .into_iter()
+            .filter(|name| !is_category_term(name))
             .map(|name| TvPersonRole {
                 id: name.to_lowercase().replace(' ', "_"),
                 name,

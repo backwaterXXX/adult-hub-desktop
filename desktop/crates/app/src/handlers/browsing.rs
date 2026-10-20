@@ -5,7 +5,7 @@ use crate::catalog::{
     tv_item_to_card_for_server,
 };
 use crate::context::AppContext;
-use crate::playback::{show_error, start_item_playback};
+use crate::playback::show_error;
 use crate::{
     DiscoveredServerItem, HomeCategoryOption, HomeCategoryShelfData, MainWindow, VideoCardData,
 };
@@ -291,7 +291,7 @@ struct CatalogPageState {
     supplemental_total: usize,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 struct CatalogFilters {
     sort: u8,
     descending: bool,
@@ -300,8 +300,11 @@ struct CatalogFilters {
     hd_only: bool,
     duration: u8,
     genre: String,
+    genre_id: String,
     studio: String,
+    studio_id: String,
     performer: String,
+    performer_id: String,
     performer_letter: String,
 }
 
@@ -322,8 +325,11 @@ impl Default for CatalogFilters {
             hd_only: false,
             duration: 0,
             genre: String::new(),
+            genre_id: String::new(),
             studio: String::new(),
+            studio_id: String::new(),
             performer: String::new(),
+            performer_id: String::new(),
             performer_letter: String::new(),
         }
     }
@@ -336,6 +342,32 @@ impl CatalogFilters {
             2 => "Runtime",
             _ => "DateCreated",
         }
+    }
+
+    fn active_filter_count(&self, category: &str) -> i32 {
+        let mut count = 0;
+        if self.unwatched {
+            count += 1;
+        }
+        if self.favorites_only && category != "Favorites" {
+            count += 1;
+        }
+        if self.hd_only {
+            count += 1;
+        }
+        if self.duration > 0 {
+            count += 1;
+        }
+        if !self.genre.is_empty() || !self.genre_id.is_empty() {
+            count += 1;
+        }
+        if !self.studio.is_empty() || !self.studio_id.is_empty() {
+            count += 1;
+        }
+        if !self.performer.is_empty() || !self.performer_id.is_empty() {
+            count += 1;
+        }
+        count
     }
 
     fn accepts(&self, item: &TvItem) -> bool {
@@ -380,16 +412,53 @@ impl CatalogFilters {
         {
             return false;
         }
-        if !self.performer.is_empty()
-            && !item
-                .people
-                .iter()
-                .any(|person| person.name.eq_ignore_ascii_case(&self.performer))
+        if (!self.performer.is_empty() || !self.performer_id.is_empty())
+            && !item.people.iter().any(|person| {
+                (!self.performer.is_empty() && person.name.eq_ignore_ascii_case(&self.performer))
+                    || (!self.performer_id.is_empty() && person.id == self.performer_id)
+            })
         {
             return false;
         }
         true
     }
+}
+
+fn get_category_filters(
+    filters_map: &Arc<Mutex<std::collections::HashMap<String, CatalogFilters>>>,
+    category: &str,
+) -> CatalogFilters {
+    filters_map
+        .lock()
+        .unwrap()
+        .get(category)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn set_category_filters(
+    filters_map: &Arc<Mutex<std::collections::HashMap<String, CatalogFilters>>>,
+    category: &str,
+    filters: CatalogFilters,
+) {
+    filters_map
+        .lock()
+        .unwrap()
+        .insert(category.to_string(), filters);
+}
+
+fn sync_catalog_filters_to_ui(ui: &MainWindow, category: &str, filters: &CatalogFilters) {
+    let (sort, duration) = catalog_filter_labels(filters);
+    ui.set_catalog_sort_label(sort.into());
+    ui.set_catalog_sort_descending(filters.descending);
+    ui.set_catalog_unwatched_only(filters.unwatched);
+    ui.set_catalog_favorites_only(filters.favorites_only);
+    ui.set_catalog_hd_only(filters.hd_only);
+    ui.set_catalog_duration_label(duration.into());
+    ui.set_catalog_genre_query(filters.genre.clone().into());
+    ui.set_catalog_studio_query(filters.studio.clone().into());
+    ui.set_catalog_performer_query(filters.performer.clone().into());
+    ui.set_catalog_active_filter_count(filters.active_filter_count(category));
 }
 
 fn catalog_filter_labels(filters: &CatalogFilters) -> (String, String) {
@@ -518,7 +587,7 @@ fn get_catalog_page(
             &session.user_id,
             &session.access_token,
             &GetItemsQuery {
-                parent_id: selected_library_id.as_deref(),
+                parent_id: None,
                 start_index,
                 limit: CATALOG_PAGE_SIZE,
                 sort_by: "SortName",
@@ -549,7 +618,7 @@ fn get_catalog_page(
             ..Default::default()
         };
         let people_query = GetItemsQuery {
-            parent_id: selected_library_id.as_deref(),
+            parent_id: None,
             start_index: 0,
             limit: 30,
             sort_by: "SortName",
@@ -692,7 +761,7 @@ fn get_catalog_page(
         movie_page
     } else {
         match category {
-            "Resume" => jellyfin.get_resume_items_page(
+            "Resume" | "Continue Watching" => jellyfin.get_resume_items_page(
                 &session.server_url,
                 &session.user_id,
                 &session.access_token,
@@ -718,25 +787,33 @@ fn get_catalog_page(
                     ..Default::default()
                 },
             )?,
-            "Performers" | "Studios" | "Categories" => jellyfin.get_items(
-                &session.server_url,
-                &session.user_id,
-                &session.access_token,
-                &GetItemsQuery {
-                    parent_id: selected_library_id.as_deref(),
-                    start_index,
-                    limit: CATALOG_PAGE_SIZE,
-                    sort_by: "SortName",
-                    sort_descending: false,
-                    include_item_types: Some(match category {
-                        "Performers" => "Person",
-                        "Studios" => "Studio",
-                        _ => "Genre",
-                    }),
-                    person_types: (category == "Performers").then_some("Actor"),
-                    ..Default::default()
-                },
-            )?,
+            "Performers" | "Studios" | "Categories" => {
+                let mut page = jellyfin.get_items(
+                    &session.server_url,
+                    &session.user_id,
+                    &session.access_token,
+                    &GetItemsQuery {
+                        parent_id: None,
+                        start_index,
+                        limit: CATALOG_PAGE_SIZE,
+                        sort_by: "SortName",
+                        sort_descending: false,
+                        include_item_types: Some(match category {
+                            "Performers" => "Person",
+                            "Studios" => "Studio",
+                            _ => "Genre",
+                        }),
+                        person_types: (category == "Performers").then_some("Actor"),
+                        ..Default::default()
+                    },
+                )?;
+                if category == "Performers" {
+                    for performer in &mut page.items {
+                        performer.genres.push("__adult_hub_performer".into());
+                    }
+                }
+                page
+            }
             _ => TvItemsPage {
                 items: Vec::new(),
                 total_record_count: 0,
@@ -748,7 +825,7 @@ fn get_catalog_page(
     let server_count = page.items.len().saturating_sub(supplemental_count);
     let server_total_count = page.total_record_count.saturating_sub(supplemental_total);
     let mut total_count = server_total_count + supplemental_total;
-    if category == "Resume" && query.is_empty() {
+    if (category == "Resume" || category == "Continue Watching") && query.is_empty() {
         if let Ok(records) = local_store.get_all_telegram_progress(50) {
             let pending_records = records
                 .into_iter()
@@ -795,6 +872,9 @@ fn get_catalog_page(
         };
         for item in &mut page.items {
             item.genres.push(kind_marker.into());
+        }
+        if category == "Studios" {
+            page.items = crate::catalog::aggregate_studio_items(page.items);
         }
     } else {
         page.items.retain(|item| {
@@ -889,9 +969,106 @@ fn get_catalog_page_with_empty_page_fetch(
     Ok(page)
 }
 
+pub fn current_nav_destination(ui: &MainWindow) -> crate::context::NavDestination {
+    use crate::context::NavDestination;
+    let active = ui.get_active_screen();
+    match active.as_str() {
+        "home" => NavDestination::Home,
+        "browse" => NavDestination::Browse {
+            category: ui.get_active_category().to_string(),
+            search_query: ui.get_search_query().to_string(),
+            genre_query: ui.get_catalog_genre_query().to_string(),
+            studio_query: ui.get_catalog_studio_query().to_string(),
+            performer_query: ui.get_catalog_performer_query().to_string(),
+            performer_search_query: ui.get_performer_search_query().to_string(),
+            performer_letter: ui.get_performer_letter().to_string(),
+            performers_photo_only: ui.get_performers_photo_only(),
+            drilldown: ui.get_catalog_category_drilldown(),
+        },
+        "channels" => NavDestination::Channels,
+        "settings" => NavDestination::Settings,
+        "video-details" => NavDestination::VideoDetails {
+            id: ui.get_detail_id().to_string(),
+        },
+        "performer-details" => NavDestination::PerformerDetails {
+            name: ui.get_performer_name().to_string(),
+        },
+        "studio-details" => NavDestination::StudioDetails {
+            name: ui.get_studio_name().to_string(),
+        },
+        "player" => NavDestination::Player {
+            id: ui.get_detail_id().to_string(),
+        },
+        _ => NavDestination::Home,
+    }
+}
+
+pub fn restore_nav_destination(
+    ui: &MainWindow,
+    ctx: &AppContext,
+    dest: crate::context::NavDestination,
+) {
+    use crate::context::NavDestination;
+    ctx.is_navigating_back.store(true, Ordering::SeqCst);
+    match dest {
+        NavDestination::Home => {
+            ui.invoke_switch_screen("home".into());
+        }
+        NavDestination::Browse {
+            category,
+            search_query,
+            genre_query,
+            studio_query,
+            performer_query,
+            performer_search_query,
+            performer_letter,
+            performers_photo_only,
+            drilldown,
+        } => {
+            ui.set_active_screen("browse".into());
+            ui.set_active_category(category.clone().into());
+            ui.set_search_query(search_query.clone().into());
+            ui.set_catalog_genre_query(genre_query.into());
+            ui.set_catalog_studio_query(studio_query.into());
+            ui.set_catalog_performer_query(performer_query.into());
+            ui.set_performer_search_query(performer_search_query.into());
+            ui.set_performer_letter(performer_letter.into());
+            ui.set_performers_photo_only(performers_photo_only);
+            ui.set_catalog_category_drilldown(drilldown);
+            if !search_query.is_empty() {
+                ui.invoke_search_catalog(search_query.into());
+            } else {
+                ui.invoke_filter_category(category.into());
+            }
+        }
+        NavDestination::Channels => {
+            ui.invoke_switch_screen("channels".into());
+        }
+        NavDestination::Settings => {
+            ui.invoke_switch_screen("settings".into());
+        }
+        NavDestination::VideoDetails { id } => {
+            ui.invoke_open_item_detail(id.into());
+        }
+        NavDestination::PerformerDetails { name } => {
+            ui.invoke_open_performer_profile(name.into());
+        }
+        NavDestination::StudioDetails { name } => {
+            ui.invoke_open_studio_profile(name.into());
+        }
+        NavDestination::Player { id } => {
+            if let Some(item) = ctx.find_catalog_item(&id) {
+                crate::playback::start_item_playback_ctx(ui, ctx, item);
+            } else {
+                ui.invoke_switch_screen("home".into());
+            }
+        }
+    }
+    ctx.is_navigating_back.store(false, Ordering::SeqCst);
+}
+
 pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
     let player = ctx.player.clone();
-    let headers = ctx.headers.clone();
     let local_store = ctx.local_store.clone();
     let credential_store = ctx.credential_store.clone();
     let jellyfin = ctx.jellyfin.clone();
@@ -912,9 +1089,13 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
         let session_ctrl = session_ctrl.clone();
         let current_item = current_item.clone();
         let qc_generation = qc_generation.clone();
+        let ctx_switch = ctx.clone();
         ui.on_switch_screen(move |screen| {
             let Some(ui) = weak.upgrade() else { return };
             let current_screen = ui.get_active_screen();
+            if current_screen != screen {
+                ctx_switch.push_nav_destination(current_nav_destination(&ui));
+            }
             if matches!(current_screen.as_str(), "home" | "browse" | "channels") {
                 ui.set_last_content_screen(current_screen);
             }
@@ -937,13 +1118,24 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     &current_item,
                 );
             }
-            let is_channels = screen == "channels";
-            let is_home = screen == "home";
-            let is_settings = screen == "settings";
-            if screen == "player" {
+            let target_screen = if screen == "player" && !ui.get_has_active_media() {
+                let last = ui.get_last_content_screen();
+                if last.is_empty() || last == "player" {
+                    "home".into()
+                } else {
+                    last
+                }
+            } else {
+                screen
+            };
+
+            let is_channels = target_screen == "channels";
+            let is_home = target_screen == "home";
+            let is_settings = target_screen == "settings";
+            if target_screen == "player" {
                 ui.set_player_controls_visible(true);
             }
-            ui.set_active_screen(screen);
+            ui.set_active_screen(target_screen);
             if is_channels {
                 ui.invoke_select_channel_category(ui.get_active_channel_category());
             } else if is_home {
@@ -951,6 +1143,39 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             } else if is_settings {
                 ui.invoke_refresh_home_categories();
                 ui.invoke_refresh_library_list();
+            }
+        });
+    }
+
+    // 1b. Navigation Back (History Stack)
+    {
+        let weak = ui.as_weak();
+        let player = player.clone();
+        let reporter = reporter.clone();
+        let session_ctrl = session_ctrl.clone();
+        let current_item = current_item.clone();
+        let ctx_nav = ctx.clone();
+        ui.on_navigate_back(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            if ui.get_active_screen() == "player" {
+                crate::playback::stop_active_playback_for_navigation(
+                    &ui,
+                    player.as_deref(),
+                    &reporter,
+                    &session_ctrl,
+                    &current_item,
+                );
+            }
+            if let Some(dest) = ctx_nav.pop_nav_destination() {
+                restore_nav_destination(&ui, &ctx_nav, dest);
+            } else {
+                let last = ui.get_last_content_screen();
+                let target = if last.is_empty() || last == "player" {
+                    "home".into()
+                } else {
+                    last
+                };
+                ui.invoke_switch_screen(target);
             }
         });
     }
@@ -1434,7 +1659,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
     let performer_search_generation = Arc::new(AtomicU64::new(0));
     let home_generation = Arc::new(AtomicU64::new(0));
     let catalog_paging = Arc::new(Mutex::new(CatalogPageState::default()));
-    let catalog_filters = Arc::new(Mutex::new(CatalogFilters::default()));
+    let catalog_filters = Arc::new(Mutex::new(std::collections::HashMap::<String, CatalogFilters>::new()));
     let catalog_filter_options = Arc::new(Mutex::new(Vec::<CatalogFilterChoice>::new()));
     {
         let weak = ui.as_weak();
@@ -1467,16 +1692,12 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             let jellyfin = jellyfin_for_categories.clone();
             let local_store = local_store_for_categories.clone();
             std::thread::spawn(move || {
-                let parent_id = local_store
-                    .get_setting("selected_library_id")
-                    .ok()
-                    .flatten();
                 let categories_result = jellyfin.get_items(
                     &session.server_url,
                     &session.user_id,
                     &session.access_token,
                     &GetItemsQuery {
-                        parent_id: parent_id.as_deref(),
+                        parent_id: None,
                         limit: 200,
                         sort_by: "SortName",
                         sort_descending: false,
@@ -1574,7 +1795,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     &session.user_id,
                     &token,
                     &GetItemsQuery {
-                        parent_id: parent_id.as_deref(),
+                        parent_id: None,
                         limit: 200,
                         sort_by: "SortName",
                         sort_descending: false,
@@ -1796,10 +2017,13 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                         all_items.push(item);
                     }
                 }
-                let shelves = [resume, history, latest, random, performers]
-                    .into_iter()
-                    .map(|items| items.into_iter().take(4).collect::<Vec<_>>())
-                    .collect::<Vec<_>>();
+                let shelves = vec![
+                    resume.into_iter().take(4).collect::<Vec<_>>(),
+                    history.into_iter().take(4).collect::<Vec<_>>(),
+                    latest.into_iter().take(4).collect::<Vec<_>>(),
+                    random.into_iter().take(4).collect::<Vec<_>>(),
+                    performers.into_iter().take(12).collect::<Vec<_>>(),
+                ];
                 *home_catalog.lock().unwrap() = all_items;
                 let categories_for_ui = categories.clone();
                 let selected_categories_for_ui = selected_categories.clone();
@@ -1870,7 +2094,8 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
         let filters = catalog_filters.clone();
         ui.on_update_catalog_filter(move |action| {
             let Some(ui) = weak.upgrade() else { return };
-            let mut value = filters.lock().unwrap();
+            let cat = ui.get_active_category().to_string();
+            let mut value = get_category_filters(&filters, &cat);
             match action.as_str() {
                 "sort" => value.sort = (value.sort + 1) % 3,
                 "direction" => value.descending = !value.descending,
@@ -1880,15 +2105,8 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 "duration" => value.duration = (value.duration + 1) % 4,
                 _ => return,
             }
-            let current = value.clone();
-            drop(value);
-            let (sort, duration) = catalog_filter_labels(&current);
-            ui.set_catalog_sort_label(sort.into());
-            ui.set_catalog_sort_descending(current.descending);
-            ui.set_catalog_unwatched_only(current.unwatched);
-            ui.set_catalog_favorites_only(current.favorites_only);
-            ui.set_catalog_hd_only(current.hd_only);
-            ui.set_catalog_duration_label(duration.into());
+            set_category_filters(&filters, &cat, value.clone());
+            sync_catalog_filters_to_ui(&ui, &cat, &value);
             if ui.get_search_query().trim().is_empty() {
                 ui.invoke_filter_category(ui.get_active_category());
             } else {
@@ -1919,13 +2137,12 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 return;
             }
 
-            let selected = {
-                let filters = catalog_filters.lock().unwrap();
-                match kind.as_str() {
-                    "genre" => filters.genre.clone(),
-                    "studio" => filters.studio.clone(),
-                    _ => filters.performer.clone(),
-                }
+            let cat = ui.get_active_category().to_string();
+            let filters = get_category_filters(&catalog_filters, &cat);
+            let selected = match kind.as_str() {
+                "genre" => filters.genre.clone(),
+                "studio" => filters.studio.clone(),
+                _ => filters.performer.clone(),
             };
             ui.set_catalog_filter_options_loading(true);
             ui.set_catalog_filter_options_message("".into());
@@ -2074,7 +2291,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 return;
             };
 
-            let filters = catalog_filters.lock().unwrap().clone();
+            let filters = get_category_filters(&catalog_filters, &category);
             let request_id = catalog_generation.load(Ordering::SeqCst);
             let parent_id = local_store
                 .get_setting("selected_library_id")
@@ -2172,14 +2389,16 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
         let filters = catalog_filters.clone();
         ui.on_reset_catalog_text_filters(move || {
             if let Some(ui) = weak.upgrade() {
-                let mut current = filters.lock().unwrap();
+                let cat = ui.get_active_category().to_string();
+                let mut current = get_category_filters(&filters, &cat);
                 current.genre.clear();
+                current.genre_id.clear();
                 current.studio.clear();
+                current.studio_id.clear();
                 current.performer.clear();
-                drop(current);
-                ui.set_catalog_genre_query("".into());
-                ui.set_catalog_studio_query("".into());
-                ui.set_catalog_performer_query("".into());
+                current.performer_id.clear();
+                set_category_filters(&filters, &cat, current.clone());
+                sync_catalog_filters_to_ui(&ui, &cat, &current);
             }
         });
     }
@@ -2188,15 +2407,48 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
         let filters = catalog_filters.clone();
         ui.on_set_catalog_text_filter(move |key, value| {
             let Some(ui) = weak.upgrade() else { return };
-            let mut current = filters.lock().unwrap();
+            let cat = ui.get_active_category().to_string();
+            let mut current = get_category_filters(&filters, &cat);
             let text = value.trim().to_string();
             match key.as_str() {
-                "genre" => current.genre = text,
-                "studio" => current.studio = text,
-                "performer" => current.performer = text,
+                "genre" => {
+                    current.genre = text.clone();
+                    if text.is_empty() {
+                        current.genre_id.clear();
+                    }
+                }
+                "studio" => {
+                    current.studio = text.clone();
+                    if text.is_empty() {
+                        current.studio_id.clear();
+                    }
+                }
+                "performer" => {
+                    current.performer = text.clone();
+                    if text.is_empty() {
+                        current.performer_id.clear();
+                    }
+                }
                 _ => return,
             }
-            drop(current);
+            set_category_filters(&filters, &cat, current.clone());
+            sync_catalog_filters_to_ui(&ui, &cat, &current);
+            if ui.get_search_query().trim().is_empty() {
+                ui.invoke_filter_category(ui.get_active_category());
+            } else {
+                ui.invoke_search_catalog(ui.get_search_query());
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let filters = catalog_filters.clone();
+        ui.on_clear_catalog_filters(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let cat = ui.get_active_category().to_string();
+            let default_filters = CatalogFilters::default();
+            set_category_filters(&filters, &cat, default_filters.clone());
+            sync_catalog_filters_to_ui(&ui, &cat, &default_filters);
             if ui.get_search_query().trim().is_empty() {
                 ui.invoke_filter_category(ui.get_active_category());
             } else {
@@ -2217,6 +2469,9 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
         let catalog_filters = catalog_filters.clone();
         ui.on_search_catalog(move |query| {
             let Some(ui) = weak.upgrade() else { return };
+            ui.set_status("Searching library…".into());
+            ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
+            ui.set_catalog_total_count(0);
             ui.set_is_loading_catalog(true);
             let query = query.trim().to_string();
             ui.set_is_catalog_search_results(!query.is_empty());
@@ -2240,9 +2495,11 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             let catalog_generation = catalog_generation.clone();
             let search_debounce_generation = search_debounce_generation.clone();
             let catalog_paging = catalog_paging.clone();
-            let filters = catalog_filters.lock().unwrap().clone();
+            let filters = get_category_filters(&catalog_filters, "Search");
             ui.set_is_loading_more(false);
             ui.set_catalog_has_more(false);
+            ui.set_catalog_total_count(0);
+            set_catalog(&ui, Vec::new());
 
             std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(300));
@@ -2337,6 +2594,8 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                         ui.set_catalog_total_count(total_count as i32);
                         ui.set_is_loading_more(false);
                         ui.set_is_loading_catalog(false);
+                        ui.set_status("Ready".into());
+                        ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
                         if let Some(token) = token_for_refresh {
                             let model = ui.get_catalog_items();
                             let cards = (0..model.row_count())
@@ -2479,6 +2738,19 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             ui.set_is_loading_catalog(true);
             ui.set_is_loading_more(false);
             ui.set_catalog_has_more(false);
+            ui.set_catalog_total_count(0);
+            set_catalog(&ui, Vec::new());
+            let loading_msg = match cat.as_str() {
+                "Performers" => "Loading performers…",
+                "Studios" => "Loading studios…",
+                "Categories" => "Loading categories…",
+                "Continue Watching" | "Resume" => "Loading continue watching…",
+                "Favorites" => "Loading favorites…",
+                "Watch History" => "Loading watch history…",
+                _ => "Loading library…",
+            };
+            ui.set_status(loading_msg.into());
+            ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
             let performer_letter = ui.get_performer_letter().to_string();
             let performers_photo_only = ui.get_performers_photo_only();
             let performer_search_query = if cat == "Performers" {
@@ -2495,7 +2767,8 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             let cached_catalog = cached_catalog.clone();
             let catalog_generation = catalog_generation.clone();
             let catalog_paging = catalog_paging.clone();
-            let mut filters = catalog_filters.lock().unwrap().clone();
+            let mut filters = get_category_filters(&catalog_filters, &cat);
+            sync_catalog_filters_to_ui(&ui, &cat, &filters);
             if cat == "Performers" {
                 filters.performer_letter = performer_letter.clone();
             }
@@ -2533,6 +2806,11 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     } else {
                         (Vec::new(), 0, 0, false, 0)
                     };
+                let raw_items = if cat == "Studios" {
+                    crate::catalog::aggregate_studio_items(raw_items)
+                } else {
+                    raw_items
+                };
                 let raw_items = filter_catalog_items(raw_items, &local_store);
                 let display_items = if cat == "Performers" {
                     filter_performer_results(
@@ -2572,9 +2850,12 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                             .collect::<Vec<_>>();
                         set_catalog(&ui, cards.clone());
                         ui.set_catalog_has_more(has_more);
-                        ui.set_catalog_total_count(total_count as i32);
+                        let reported_total = if !has_more { cards.len() } else { total_count };
+                        ui.set_catalog_total_count(reported_total as i32);
                         ui.set_is_loading_more(false);
                         ui.set_is_loading_catalog(false);
+                        ui.set_status("Ready".into());
+                        ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
                         if let Some(token) = token_for_refresh {
                             refresh_catalog_thumbnails_async(
                                 ui.as_weak(),
@@ -2750,13 +3031,26 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                             let is_search = !requested_page.query.is_empty();
                             let items = {
                                 let mut cached = cached_catalog.lock().unwrap();
-                                let mut seen = cached
-                                    .iter()
-                                    .map(|item| item.id.clone())
-                                    .collect::<std::collections::HashSet<_>>();
-                                for item in page.items {
-                                    if seen.insert(item.id.clone()) {
-                                        cached.push(item);
+                                if requested_page.category == "Studios" {
+                                    let mut seen = cached
+                                        .iter()
+                                        .map(|item| item.id.clone())
+                                        .collect::<std::collections::HashSet<_>>();
+                                    for item in page.items {
+                                        if seen.insert(item.id.clone()) {
+                                            cached.push(item);
+                                        }
+                                    }
+                                    *cached = crate::catalog::aggregate_studio_items(std::mem::take(&mut *cached));
+                                } else {
+                                    let mut seen = cached
+                                        .iter()
+                                        .map(|item| item.id.clone())
+                                        .collect::<std::collections::HashSet<_>>();
+                                    for item in page.items {
+                                        if seen.insert(item.id.clone()) {
+                                            cached.push(item);
+                                        }
                                     }
                                 }
                                 filter_catalog_items(cached.clone(), &local_store)
@@ -2777,6 +3071,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                                 .map(|item| tv_item_to_card_for_server(item, &server_url))
                                 .collect::<Vec<_>>();
 
+                            let is_studios = requested_page.category == "Studios";
                             *catalog_paging.lock().unwrap() = CatalogPageState {
                                 next_start: page.next_start,
                                 has_more: page.has_more,
@@ -2796,9 +3091,14 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                                 );
                             }
                             ui.set_catalog_has_more(page.has_more);
-                            ui.set_catalog_total_count(
-                                (page.total_count + supplemental_total) as i32,
-                            );
+                            let reported_total = if !page.has_more {
+                                cards.len()
+                            } else if is_studios {
+                                cards.len().max(page.total_count + supplemental_total)
+                            } else {
+                                page.total_count + supplemental_total
+                            };
+                            ui.set_catalog_total_count(reported_total as i32);
                             ui.set_is_loading_more(false);
                             refresh_catalog_thumbnails_async(
                                 ui.as_weak(),
@@ -2824,40 +3124,14 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
     // 7. Play Item
     {
         let weak = ui.as_weak();
-        let player = player.clone();
-        let headers = headers.clone();
-        let credential_store = credential_store.clone();
-        let local_store = local_store.clone();
-        let jellyfin = jellyfin.clone();
-        let reporter = reporter.clone();
-        let session_ctrl = session_ctrl.clone();
-        let current_item = current_item.clone();
-        let cached_catalog = cached_catalog.clone();
-        let home_catalog = ctx.home_catalog.clone();
-        let phash_coord = phash_coord.clone();
+        let ctx_play = ctx.clone();
         ui.on_play_item(move |id| {
             let Some(ui) = weak.upgrade() else { return };
-            let Some(player) = &player else {
-                show_error(&ui, "libmpv is not available");
-                return;
-            };
             let id = id.to_string();
 
-            // Locate in cached catalog or synthesize TvItem
-            let target_item = cached_catalog
-                .lock()
-                .unwrap()
-                .iter()
-                .find(|i| i.id == id)
-                .cloned()
-                .or_else(|| {
-                    home_catalog
-                        .lock()
-                        .unwrap()
-                        .iter()
-                        .find(|item| item.id == id)
-                        .cloned()
-                })
+            // Locate via find_catalog_item or synthesize TvItem
+            let target_item = ctx_play
+                .find_catalog_item(&id)
                 .unwrap_or_else(|| {
                     if id == "sample" {
                         sample_catalog_tv_items()[0].clone()
@@ -2948,18 +3222,11 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 return;
             }
 
-            start_item_playback(
+            crate::playback::start_item_playback_with_resume_ctx(
                 &ui,
-                player,
+                &ctx_play,
                 target_item,
-                &headers,
-                &credential_store,
-                &local_store,
-                &jellyfin,
-                &reporter,
-                &session_ctrl,
-                &current_item,
-                &phash_coord,
+                None,
             );
         });
     }

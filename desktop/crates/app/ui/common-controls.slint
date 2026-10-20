@@ -1,3 +1,4 @@
+import { Spinner } from "std-widgets.slint";
 import { HubTheme, KeyboardState } from "theme.slint";
 
 // Shared controls for view components. A view owns domain behavior and binds
@@ -90,6 +91,98 @@ export component IconButton inherits Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         image-fit: contain;
+    }
+
+    touch := TouchArea {
+        enabled: !root.disabled;
+        clicked => { root.clicked(); }
+    }
+
+    focus-target := FocusScope {
+        width: 0px;
+        height: 0px;
+        key-pressed(event) => {
+            if (!root.disabled && (event.text == Key.Space || event.text == Key.Return)) {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+}
+
+export component FilterIconButton inherits Rectangle {
+    in property <bool> open: false;
+    in property <bool> has-active-filters: false;
+    in property <int> active-filter-count: 0;
+    in property <bool> disabled: false;
+    in property <string> tooltip-text: "Filters";
+    in property <string> accessible-name: root.tooltip-text;
+    out property <bool> has-focus: focus-target.has-focus;
+    callback clicked();
+
+    forward-focus: focus-target;
+    accessible-role: button;
+    accessible-label: root.accessible-name;
+    accessible-checked: root.open;
+    accessible-action-default => {
+        if (!root.disabled) { root.clicked(); }
+    }
+
+    width: 44px;
+    height: HubTheme.control-height;
+    border-radius: HubTheme.control-radius;
+    border-width: root.has-focus || root.open ? 1px : 0px;
+    border-color: root.has-focus ? HubTheme.focus-ring : (root.open ? #BE185D88 : transparent);
+    background: root.disabled ? HubTheme.navigation-background
+        : (touch.pressed ? HubTheme.accent-pressed
+        : (root.open ? #BE185D33
+        : (touch.has-hover ? HubTheme.surface-hover : HubTheme.surface)));
+    opacity: root.disabled ? 0.58 : 1.0;
+
+    animate background { duration: 150ms; }
+
+    Image {
+        source: @image-url("../../../assets/icons/filter.svg");
+        width: 20px;
+        height: 20px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        image-fit: contain;
+    }
+
+    // Subtle active filter indicator dot positioned at top-right without changing button geometry
+    if (root.has-active-filters || root.active-filter-count > 0) : Rectangle {
+        x: parent.width - 11px;
+        y: 5px;
+        width: 7px;
+        height: 7px;
+        border-radius: 3.5px;
+        background: HubTheme.accent;
+        border-width: 1px;
+        border-color: #14141cf5;
+    }
+
+    if touch.has-hover && !root.disabled : Rectangle {
+        y: -30px;
+        x: (parent.width - self.width) / 2;
+        height: 24px;
+        width: tip-text.preferred-width + 16px;
+        border-radius: 4px;
+        background: #14141cf5;
+        border-width: 1px;
+        border-color: #BE185D88;
+        z: 100;
+
+        tip-text := Text {
+            x: 8px;
+            y: 4px;
+            text: root.tooltip-text;
+            color: #FFFFFF;
+            font-size: 11px;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
     }
 
     touch := TouchArea {
@@ -520,6 +613,42 @@ export component EmptyState inherits VerticalLayout {
         text: root.action-text;
         primary: true;
         clicked => { root.action(); }
+    }
+}
+
+export component LoadingState inherits VerticalLayout {
+    in property <string> text: "Loading…";
+    in property <string> description: "";
+    in property <length> spinner-size: 36px;
+    in property <bool> compact: false;
+
+    alignment: center;
+    spacing: root.compact ? 8px : HubTheme.space-3;
+
+    HorizontalLayout {
+        alignment: center;
+        Spinner {
+            width: root.compact ? 22px : root.spinner-size;
+            height: root.compact ? 22px : root.spinner-size;
+            indeterminate: true;
+        }
+    }
+
+    if root.text != "" : Text {
+        text: root.text;
+        color: HubTheme.text-primary;
+        font-size: root.compact ? HubTheme.metadata-size : HubTheme.body-size;
+        font-weight: 600;
+        horizontal-alignment: center;
+        wrap: word-wrap;
+    }
+
+    if root.description != "" : Text {
+        text: root.description;
+        color: HubTheme.text-muted;
+        font-size: HubTheme.metadata-size;
+        horizontal-alignment: center;
+        wrap: word-wrap;
     }
 }
 

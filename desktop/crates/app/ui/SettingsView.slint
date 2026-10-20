@@ -71,6 +71,70 @@ component DiagnosticCodecBadge inherits Rectangle {
     }
 }
 
+component CategoryMultiSelectChip inherits Rectangle {
+    in property <string> text;
+    in property <bool> selected: false;
+    out property <bool> has-focus: focus-target.has-focus;
+    callback clicked();
+
+    forward-focus: focus-target;
+    accessible-role: checkbox;
+    accessible-label: root.text;
+    accessible-checked: root.selected;
+    accessible-action-default => { root.clicked(); }
+
+    height: 36px;
+    width: chip-layout.preferred-width + 24px;
+    border-radius: 18px;
+    background: root.selected
+        ? (touch.pressed ? #991345 : (touch.has-hover ? #D81B67 : #BE185D))
+        : (touch.pressed ? #222530 : (touch.has-hover ? HubTheme.surface-hover : HubTheme.surface-raised));
+    border-width: (root.has-focus || root.selected) ? 1.5px : 1px;
+    border-color: root.has-focus ? HubTheme.focus-ring : (root.selected ? #FF69B488 : HubTheme.separator);
+
+    animate background { duration: 120ms; }
+    animate border-color { duration: 120ms; }
+
+    chip-layout := HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 6px;
+        alignment: center;
+
+        if root.selected : Text {
+            text: "✓";
+            color: #FFFFFF;
+            font-size: 13px;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+
+        Text {
+            text: root.text;
+            color: root.selected ? #FFFFFF : HubTheme.text-primary;
+            font-size: 13px;
+            font-weight: root.selected ? 600 : 500;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+
+    focus-target := FocusScope {
+        width: 0px;
+        height: 0px;
+        key-pressed(event) => {
+            if (event.text == Key.Space || event.text == Key.Return) {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+}
+
 component SettingsButton inherits Rectangle {
     in property <string> text;
     in property <string> accessible-name: root.text;
@@ -816,6 +880,7 @@ export component SettingsView inherits Rectangle {
                         background: transparent;
 
                         VerticalLayout {
+                            alignment: start;
                             spacing: 20px;
 
                             // =====================================================
@@ -1545,8 +1610,9 @@ export component SettingsView inherits Rectangle {
                             border-color: #F3F4F614;
 
                             VerticalLayout {
-                                padding: HubTheme.form-card-padding;
-                                spacing: 16px;
+                                padding: 22px;
+                                spacing: 0px;
+                                alignment: start;
 
                                 Text {
                                     text: "Home Screen Categories & Shelves";
@@ -1555,6 +1621,8 @@ export component SettingsView inherits Rectangle {
                                     font-weight: 700;
                                 }
 
+                                Rectangle { height: 8px; }
+
                                 Text {
                                     text: "Choose genres to display as separate featured shelves on the home screen.";
                                     color: HubTheme.text-secondary;
@@ -1562,24 +1630,27 @@ export component SettingsView inherits Rectangle {
                                     wrap: word-wrap;
                                 }
 
+                                Rectangle { height: 18px; }
+
                                 if root.home-category-options.length == 0 : Text {
                                     text: root.is-logged-in ? "No genres found in this library." : "Connect to Jellyfin to load genres.";
                                     color: HubTheme.text-muted;
                                     font-size: HubTheme.metadata-size;
                                 }
 
-                                if root.home-category-options.length > 0 : VerticalLayout {
-                                    spacing: 8px;
-                                    for category in root.home-category-options : HorizontalLayout {
-                                        height: 38px;
-                                        SettingsButton {
-                                            text: category.name;
-                                            active: category.selected;
-                                            custom-height: 38px;
-                                            clicked => { root.toggle-home-category(category.id); }
-                                        }
+                                if root.home-category-options.length > 0 : FlexboxLayout {
+                                    flex-direction: row;
+                                    flex-wrap: wrap;
+                                    spacing-horizontal: 10px;
+                                    spacing-vertical: 10px;
+                                    for category in root.home-category-options : CategoryMultiSelectChip {
+                                        text: category.name;
+                                        selected: category.selected;
+                                        clicked => { root.toggle-home-category(category.id); }
                                     }
                                 }
+
+                                Rectangle { height: 16px; }
 
                                 SettingsButton {
                                     text: "Reload Categories";
@@ -2099,6 +2170,8 @@ export component SettingsView inherits Rectangle {
                                 }
                             }
                         }
+
+                        Rectangle { vertical-stretch: 1; }
                     }
                 }
             }

@@ -123,6 +123,12 @@ impl PlaybackSessionController {
                 PlayMethod::DirectPlay,
             ));
         }
+        if item.id == "sample2" {
+            return Ok((
+                crate::options::resolve_named_sample_media("sample2.mp4"),
+                PlayMethod::DirectPlay,
+            ));
+        }
 
         if item.is_direct_media() {
             return Ok((

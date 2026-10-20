@@ -39,7 +39,9 @@ pub fn install_polling(ui: &MainWindow, ctx: &AppContext, frame_pending: Arc<Ato
     let ls = ctx.local_store.clone();
     let jf = ctx.jellyfin.clone();
     let phash_ref = ctx.phash_coord.clone();
+    let pending_resume = ctx.pending_resume_position.clone();
     let mut recovery = PlaybackRecovery::default();
+    let mut toast_ticks: u32 = 0;
 
     timer.start(TimerMode::Repeated, Duration::from_millis(100), move || {
         let Some(ui) = ui_weak.upgrade() else { return };
@@ -63,8 +65,32 @@ pub fn install_polling(ui: &MainWindow, ctx: &AppContext, frame_pending: Arc<Ato
                 &ls,
                 &jf,
                 &phash_ref,
+                &pending_resume,
                 &mut recovery,
             );
+        }
+
+        // Toast auto-dismissal after 4 seconds (40 ticks @ 100ms) for notifications without action button
+        if ui.get_toast_visible() && ui.get_toast_action_text().is_empty() {
+            toast_ticks += 1;
+            if toast_ticks >= 40 {
+                ui.set_toast_visible(false);
+                toast_ticks = 0;
+            }
+        } else {
+            toast_ticks = 0;
+        }
+
+        // Buffering / cache starvation detection
+        if ui.get_player_media_loaded() {
+            let paused_for_cache = player.get_string("paused-for-cache").as_deref() == Some("yes");
+            if paused_for_cache && !player.is_paused() {
+                if ui.get_player_state() != "buffering" {
+                    ui.set_player_state("buffering".into());
+                }
+            } else if ui.get_player_state() == "buffering" {
+                ui.set_player_state(if player.is_paused() { "paused".into() } else { "playing".into() });
+            }
         }
 
         if let Some(retry_at) = recovery.retry_at
@@ -179,6 +205,7 @@ fn handle_event(
     local_store: &Arc<adult_hub_storage::LocalStore>,
     jellyfin: &Arc<adult_hub_client::JellyfinClient>,
     phash_coord: &Arc<phash::PhashCoordinator>,
+    pending_resume: &Arc<std::sync::Mutex<Option<f64>>>,
     recovery: &mut PlaybackRecovery,
 ) {
     match event {
@@ -191,9 +218,24 @@ fn handle_event(
             }
             recovery.loaded_at = Some(Instant::now());
             ui.set_player_media_loaded(true);
+            let user_paused_during_loading = ui.get_player_state() == "paused";
+            if user_paused_during_loading {
+                let _ = player.set_pause(true);
+                ui.set_player_state("paused".into());
+                ui.set_playing(false);
+            } else {
+                let _ = player.set_pause(false);
+                ui.set_player_state("playing".into());
+                ui.set_playing(true);
+            }
             ui.set_playback_ended_visible(false);
             ui.set_autoplay_countdown_sec(0);
             update_texture_size(ui, width, height);
+
+            // Position was already passed at mpv loadfile initialization (start=seconds).
+            // Avoid redundant seek jumps.
+            let _ = pending_resume.lock().unwrap().take();
+
             let name = player
                 .get_string("filename")
                 .and_then(|path| {
@@ -258,6 +300,10 @@ fn handle_event(
                     hwdec_active.store(false, Ordering::SeqCst);
                     let _ = player.set_hwdec("no");
                     ui.set_hwdec_active(false);
+                    ui.set_player_state("loading".into());
+                    ui.set_player_loading_message(
+                        "Hardware decode failed; retrying with software decode…".into(),
+                    );
                     ui.set_status(
                         "Hardware decode failed; retrying with software decode...".into(),
                     );
@@ -315,6 +361,14 @@ fn handle_event(
                     recovery.retry_at = Some(Instant::now() + Duration::from_secs(delay_seconds));
                     recovery.source_generation = player.load_generation();
                     recovery.loaded_at = None;
+                    ui.set_player_state("loading".into());
+                    ui.set_player_loading_message(
+                        format!(
+                            "Connection interrupted · retrying in {}s…",
+                            delay_seconds
+                        )
+                        .into(),
+                    );
                     ui.set_status(
                         format!(
                             "Connection interrupted · retry {}/{} in {}s",
@@ -328,6 +382,8 @@ fn handle_event(
 
                 recovery.retry_at = None;
                 recovery.retry_in_flight = false;
+                ui.set_player_state("failed".into());
+                ui.set_player_error_message(format!("Playback error: {error}").into());
                 show_error(ui, format!("Playback error: {error}"));
             } else if eof {
                 *recovery = PlaybackRecovery::default();
@@ -338,6 +394,8 @@ fn handle_event(
                     session_ctrl.checkpoint_progress(item, pos_ms, dur_ms, true);
                 }
                 reporter.stop_session(pos_ms);
+
+                ui.set_player_state("paused".into());
 
                 ui.set_status("Playback ended.".into());
                 ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));

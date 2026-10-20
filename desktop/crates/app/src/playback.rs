@@ -6,6 +6,7 @@ use crate::session::PlaybackSessionController;
 use adult_hub_client::{JellyfinClient, TvItem};
 use adult_hub_player::{PlaybackStats, Player};
 use adult_hub_storage::{CredentialStore, LocalStore};
+use slint::ComponentHandle;
 use std::path::Path;
 #[cfg(not(windows))]
 use std::path::PathBuf;
@@ -126,6 +127,40 @@ pub fn load_media(ui: &MainWindow, player: &Player, input: &str, headers: &[Stri
 }
 
 /// Save the current item's final position and release playback when leaving the player screen.
+pub fn format_player_subtitle(item: &TvItem) -> String {
+    let mut parts = Vec::new();
+    if let Some(ticks) = item.runtime_ticks {
+        let secs = (ticks / 10_000_000) as f64;
+        if secs > 0.0 {
+            parts.push(format_time(secs));
+        }
+    }
+    if let Some(year) = item.year {
+        parts.push(year.to_string());
+    }
+    if let Some(studio) = item.studios.first() {
+        if !studio.trim().is_empty() {
+            parts.push(studio.clone());
+        }
+    } else if let Some(provider) = &item.source_provider {
+        if !provider.trim().is_empty() {
+            parts.push(provider.clone());
+        }
+    }
+    if let (Some(w), Some(h)) = (item.width, item.height) {
+        if h >= 2160 {
+            parts.push("4K".to_string());
+        } else if h >= 1080 {
+            parts.push("1080p".to_string());
+        } else if h >= 720 {
+            parts.push("720p".to_string());
+        } else if h > 0 {
+            parts.push(format!("{w}x{h}"));
+        }
+    }
+    parts.join(" • ")
+}
+
 pub fn stop_active_playback_for_navigation(
     ui: &MainWindow,
     player: Option<&Player>,
@@ -133,6 +168,7 @@ pub fn stop_active_playback_for_navigation(
     session_ctrl: &PlaybackSessionController,
     current_item: &Arc<Mutex<Option<TvItem>>>,
 ) {
+    session_ctrl.next_request_id();
     let position = player
         .and_then(Player::position)
         .unwrap_or_else(|| ui.get_position() as f64)
@@ -153,10 +189,13 @@ pub fn stop_active_playback_for_navigation(
         );
     }
     reporter.stop_session(position_ms);
+    session_ctrl.next_request_id();
     if let Some(player) = player {
         let _ = player.stop();
     }
 
+    ui.set_has_active_media(false);
+    ui.set_player_subtitle("".into());
     ui.set_playing(false);
     ui.set_player_controls_visible(true);
     ui.set_player_more_controls_visible(false);
@@ -166,9 +205,10 @@ pub fn stop_active_playback_for_navigation(
     ui.set_duration(0.0);
     ui.set_position_text("0:00".into());
     ui.set_duration_text("0:00".into());
-    ui.set_resume_prompt_visible(false);
     ui.set_playback_ended_visible(false);
     ui.set_autoplay_countdown_sec(0);
+    ui.set_player_state("idle".into());
+    ui.set_player_loading_message("".into());
     ui.set_player_error_message("".into());
     ui.set_hud_visible(false);
     ui.set_hud_text("".into());
@@ -263,6 +303,11 @@ pub fn start_item_playback_with_resume(
                         ui.set_toast_action_text("Configure".into());
                         ui.set_toast_visible(true);
                     } else {
+                        *current_item.lock().unwrap() = Some(item.clone());
+                        ui.set_has_active_media(true);
+                        ui.set_player_title(crate::catalog::display_title(&item).into());
+                        ui.set_player_subtitle(format_player_subtitle(&item).into());
+                        ui.set_active_screen("player".into());
                         show_error(ui, err.clone());
                         ui.set_toast_message(err.into());
                         ui.set_toast_type("error".into());
@@ -293,6 +338,11 @@ pub fn start_item_playback_with_resume(
                     )
                 }
                 Err(err) => {
+                    *current_item.lock().unwrap() = Some(item.clone());
+                    ui.set_has_active_media(true);
+                    ui.set_player_title(crate::catalog::display_title(&item).into());
+                    ui.set_player_subtitle(format_player_subtitle(&item).into());
+                    ui.set_active_screen("player".into());
                     show_error(ui, format!("Could not resolve Jellyfin playback: {err}"));
                     return;
                 }
@@ -312,7 +362,6 @@ pub fn start_item_playback_with_resume(
     // 3. Determine resume position
     let duration_ms = item.runtime_ticks.map(|t| (t / 10_000) as u64).unwrap_or(0);
     let mut start_pos_secs = 0.0;
-    ui.set_resume_prompt_visible(false);
 
     let calculated_resume_ms = if item.is_telegram() {
         let prov_id = item
@@ -341,15 +390,7 @@ pub fn start_item_playback_with_resume(
             start_pos_secs = 0.0;
         }
         None => {
-            if item.is_telegram() {
-                if let Some(resume_ms) = calculated_resume_ms {
-                    if PlaybackSessionController::should_prompt_resume(resume_ms, duration_ms) {
-                        ui.set_resume_prompt_position((resume_ms as f32) / 1000.0);
-                        ui.set_resume_prompt_time(format_time(resume_ms as f64 / 1000.0).into());
-                        ui.set_resume_prompt_visible(true);
-                    }
-                }
-            } else if let Some(resume_ms) = calculated_resume_ms {
+            if let Some(resume_ms) = calculated_resume_ms {
                 if PlaybackSessionController::should_prompt_resume(resume_ms, duration_ms) {
                     start_pos_secs = resume_ms as f64 / 1000.0;
                 }
@@ -359,6 +400,9 @@ pub fn start_item_playback_with_resume(
 
     // 4. Update UI & current item
     *current_item.lock().unwrap() = Some(item.clone());
+    ui.set_has_active_media(true);
+    ui.set_playing(true);
+    ui.set_player_state("loading".into());
     ui.set_player_is_favorite(item.is_favorite);
     ui.set_player_favorite_enabled(!item.is_telegram() && uuid::Uuid::parse_str(&item.id).is_ok());
     ui.set_player_error_message(String::new().into());
@@ -366,6 +410,7 @@ pub fn start_item_playback_with_resume(
     ui.set_player_more_controls_visible(false);
     ui.set_player_media_loaded(false);
     ui.set_player_title(crate::catalog::display_title(&item).into());
+    ui.set_player_subtitle(format_player_subtitle(&item).into());
     ui.set_url_text(stream_url.clone().into());
     ui.set_status(format!("Loading: {}", item.title).into());
     ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
@@ -424,108 +469,287 @@ pub fn start_item_playback_with_resume(
     }
 }
 
-#[allow(dead_code)]
 pub fn start_item_playback_ctx(ui: &MainWindow, ctx: &AppContext, item: TvItem) {
     start_item_playback_with_resume_ctx(ui, ctx, item, None);
 }
 
-#[allow(dead_code)]
 pub fn start_item_playback_with_resume_ctx(
     ui: &MainWindow,
     ctx: &AppContext,
     item: TvItem,
     resume_choice: Option<bool>,
 ) {
-    let Some(player) = &ctx.player else {
+    let Some(player) = ctx.player.clone() else {
         show_error(ui, "libmpv is not available");
         return;
     };
-    start_item_playback_with_resume(
-        ui,
-        player,
-        item,
-        &ctx.headers,
-        &ctx.credential_store,
-        &ctx.local_store,
-        &ctx.jellyfin,
-        &ctx.reporter,
-        &ctx.session_ctrl,
-        &ctx.current_playing_item,
-        &ctx.phash_coord,
-        resume_choice,
-    );
-}
 
-pub fn play_random_catalog_item(
-    ui: &MainWindow,
-    player: &Player,
-    headers: &[String],
-    credential_store: &Arc<CredentialStore>,
-    local_store: &Arc<LocalStore>,
-    jellyfin: &Arc<JellyfinClient>,
-    reporter: &Arc<PlaybackReporter>,
-    session_ctrl: &Arc<PlaybackSessionController>,
-    current_item: &Arc<Mutex<Option<TvItem>>>,
-    cached_catalog: &Arc<Mutex<Vec<TvItem>>>,
-    phash_coord: &Arc<PhashCoordinator>,
-) {
-    let items = cached_catalog.lock().unwrap().clone();
-    if items.is_empty() {
-        show_error(ui, "No catalog items available for random playback");
+    // Ignore duplicate dispatch if this exact item is already resolving or loading
+    if (ui.get_player_state() == "resolving" || ui.get_player_state() == "loading")
+        && ctx
+            .current_playing_item
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|cur| cur.id == item.id)
+    {
         return;
     }
-    let current_id = current_item
-        .lock()
-        .unwrap()
-        .as_ref()
-        .map(|i| i.id.clone())
-        .unwrap_or_default();
-    let candidates: Vec<&TvItem> = items.iter().filter(|i| i.id != current_id).collect();
-    let target = if !candidates.is_empty() {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let idx = ((nanos ^ (std::process::id() as u128)) % (candidates.len() as u128)) as usize;
-        candidates[idx].clone()
-    } else {
-        items[0].clone()
-    };
 
-    start_item_playback(
-        ui,
-        player,
-        target,
-        headers,
-        credential_store,
-        local_store,
-        jellyfin,
-        reporter,
-        session_ctrl,
-        current_item,
-        phash_coord,
-    );
+    let request_id = ctx.session_ctrl.next_request_id();
+
+    // 1. Immediately stop previous playback (audio AND video)
+    let _ = player.stop();
+
+    // Persist outgoing video's progress and stop session
+    if let Some(prev) = ctx.current_playing_item.lock().unwrap().take() {
+        let pos = (player.position().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
+        let dur = (player.duration().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
+        if pos >= 5000 && prev.id != item.id {
+            ctx.session_ctrl.checkpoint_progress(&prev, pos, dur, false);
+        }
+        ctx.reporter.stop_session(pos);
+    }
+
+    // 2. Immediately update UI to show player screen and loading/resolving overlay
+    *ctx.current_playing_item.lock().unwrap() = Some(item.clone());
+    ui.set_has_active_media(true);
+    ui.set_playing(true);
+    ui.set_player_is_favorite(item.is_favorite);
+    ui.set_player_favorite_enabled(!item.is_telegram() && uuid::Uuid::parse_str(&item.id).is_ok());
+    ui.set_player_error_message(String::new().into());
+    ui.set_toast_visible(false); // Clear any stale error toast
+    ui.set_player_controls_visible(true);
+    ui.set_player_more_controls_visible(false);
+    ui.set_player_media_loaded(false);
+    ui.set_player_state("resolving".into());
+    ui.set_player_loading_message("Resolving stream address…".into());
+    ui.set_player_title(crate::catalog::display_title(&item).into());
+    ui.set_player_subtitle(format_player_subtitle(&item).into());
+    ui.set_status(format!("Preparing: {}", item.title).into());
+    ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
+    if ui.get_active_screen() != "player" {
+        ctx.push_nav_destination(crate::handlers::browsing::current_nav_destination(ui));
+    }
+    ui.set_active_screen("player".into());
+
+    // 3. Resolve stream URL in background thread
+    let weak_ui = ui.as_weak();
+    let ctx_clone = ctx.clone();
+    let headers = ctx.headers.clone();
+
+    std::thread::spawn(move || {
+        let session = ctx_clone.credential_store.get().ok().flatten();
+        let resolver_url = ctx_clone
+            .local_store
+            .get_setting("resolver_base_url")
+            .ok()
+            .flatten()
+            .or_else(|| ctx_clone.local_store.get_setting("resolver_url").ok().flatten())
+            .or_else(|| session.as_ref().map(|s| s.server_url.clone()));
+
+        let mut resolved_media_source_id = item.media_source_id.clone();
+        let mut play_session_id = None;
+        let resolution_result = if item.is_telegram() || item.id == "sample" || uuid::Uuid::parse_str(&item.id).is_err() {
+            PlaybackSessionController::resolve_stream_url(
+                &item,
+                session.as_ref().map(|s| s.server_url.as_str()),
+                resolver_url.as_deref(),
+                session.as_ref().map(|s| s.access_token.as_str()),
+            )
+            .map(|(url, method)| (url, method, Vec::new()))
+        } else {
+            let Some(session) = session.as_ref() else {
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak_ui.upgrade() {
+                        ui.set_player_state("failed".into());
+                        show_error(&ui, "Sign in to Jellyfin before playing this item.");
+                    }
+                });
+                return;
+            };
+            match ctx_clone.jellyfin.resolve_playback(
+                &session.server_url,
+                &session.user_id,
+                &session.access_token,
+                &item.id,
+            ) {
+                Ok(resolution) => {
+                    resolved_media_source_id = resolution.media_source_id;
+                    play_session_id = resolution.play_session_id;
+                    Ok((
+                        resolution.stream_url,
+                        resolution.play_method,
+                        resolution.required_headers,
+                    ))
+                }
+                Err(err) => Err(format!("Could not resolve Jellyfin playback: {err}")),
+            }
+        };
+
+        let (stream_url, play_method, required_headers) = match resolution_result {
+            Ok(res) => res,
+            Err(err) => {
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak_ui.upgrade() {
+                        if !ctx_clone.session_ctrl.is_request_current(request_id) {
+                            return;
+                        }
+                        if item.is_telegram()
+                            && (resolver_url.is_none()
+                                || resolver_url.as_deref().unwrap_or("").trim().is_empty())
+                        {
+                            ui.set_player_state("failed".into());
+                            ui.set_resolver_prompt_dialog_visible(true);
+                            ui.set_toast_message(
+                                "Resolver URL required to stream Telegram videos. Click here to configure.".into(),
+                            );
+                            ui.set_toast_type("warning".into());
+                            ui.set_toast_action_text("Configure".into());
+                            ui.set_toast_visible(true);
+                        } else {
+                            ui.set_player_state("failed".into());
+                            show_error(&ui, err.clone());
+                            ui.set_toast_message(err.into());
+                            ui.set_toast_type("error".into());
+                            ui.set_toast_action_text("".into());
+                            ui.set_toast_visible(true);
+                        }
+                    }
+                });
+                return;
+            }
+        };
+
+        let mut stream_headers = headers;
+        stream_headers.extend(required_headers);
+        if uuid::Uuid::parse_str(&item.id).is_ok() {
+            if let Some(sess) = &session {
+                if !sess.access_token.is_empty() {
+                    stream_headers.push(format!("X-Emby-Token: {}", sess.access_token));
+                }
+            }
+        }
+
+        // Determine resume position
+        let duration_ms = item.runtime_ticks.map(|t| (t / 10_000) as u64).unwrap_or(0);
+        let mut start_pos_secs = 0.0;
+
+        let calculated_resume_ms = if item.is_telegram() {
+            let prov_id = item
+                .provider_video_id
+                .as_deref()
+                .or_else(|| item.id.strip_prefix("telegram:"))
+                .unwrap_or(&item.id);
+            ctx_clone.session_ctrl.get_telegram_resume_position(prov_id)
+        } else if item.playback_position_ticks > 0 {
+            Some((item.playback_position_ticks / 10_000) as u64)
+        } else {
+            ctx_clone
+                .local_store
+                .get_progress("local", &item.id)
+                .ok()
+                .flatten()
+                .and_then(|(pos, _)| if pos > 0 { Some(pos) } else { None })
+        };
+
+        match resume_choice {
+            Some(true) => {
+                if let Some(resume_ms) = calculated_resume_ms {
+                    start_pos_secs = resume_ms as f64 / 1000.0;
+                }
+            }
+            Some(false) => {
+                start_pos_secs = 0.0;
+            }
+            None => {
+                if let Some(resume_ms) = calculated_resume_ms {
+                    if PlaybackSessionController::should_prompt_resume(resume_ms, duration_ms) {
+                        start_pos_secs = resume_ms as f64 / 1000.0;
+                    }
+                }
+            }
+        }
+
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak_ui.upgrade() {
+                if !ctx_clone.session_ctrl.is_request_current(request_id) {
+                    return;
+                }
+                ui.set_player_state("loading".into());
+                ui.set_player_loading_message("Opening media stream…".into());
+                ui.set_url_text(stream_url.clone().into());
+                ui.set_status(format!("Loading: {}", item.title).into());
+
+                let start_pos_opt = if start_pos_secs > 0.0 {
+                    Some(start_pos_secs)
+                } else {
+                    None
+                };
+                *ctx_clone.pending_resume_position.lock().unwrap() = start_pos_opt;
+
+                let path = resolve_media_input(&stream_url);
+                reset_playback_speed(&ui, &player);
+                if let Err(e) = player.load_with_start(&path, &stream_headers, start_pos_opt) {
+                    ui.set_player_state("failed".into());
+                    show_error(&ui, e.to_string());
+                    return;
+                }
+                let _ = player.set_pause(false);
+                ui.set_playing(true);
+
+                if !item.is_direct_media() {
+                    if let Ok(item_json) = serde_json::to_string(&item) {
+                        let _ = ctx_clone.local_store.record_watch_history(&item.id, &item_json);
+                    }
+                }
+
+                let is_jellyfin_item = uuid::Uuid::parse_str(&item.id).is_ok();
+                if is_jellyfin_item {
+                    ctx_clone.reporter.start_session(
+                        &item.id,
+                        resolved_media_source_id,
+                        play_session_id,
+                        play_method,
+                        (start_pos_secs * 1000.0) as u64,
+                    );
+                }
+
+                let phash_enabled = ctx_clone
+                    .local_store
+                    .get_setting("phash_on_playback")
+                    .ok()
+                    .flatten()
+                    .map(|v| v == "true" || v == "1")
+                    .unwrap_or(false);
+                if phash_enabled && (is_jellyfin_item || item.is_telegram()) {
+                    ctx_clone.phash_coord.enqueue_generation(&item, None);
+                }
+            }
+        });
+    });
 }
 
 #[allow(dead_code)]
-pub fn play_random_catalog_item_ctx(ui: &MainWindow, ctx: &AppContext) {
-    let Some(player) = &ctx.player else {
-        show_error(ui, "libmpv is not available");
-        return;
-    };
-    play_random_catalog_item(
-        ui,
-        player,
-        &ctx.headers,
-        &ctx.credential_store,
-        &ctx.local_store,
-        &ctx.jellyfin,
-        &ctx.reporter,
-        &ctx.session_ctrl,
-        &ctx.current_playing_item,
-        &ctx.cached_catalog,
-        &ctx.phash_coord,
-    );
+pub fn play_random_catalog_item(
+    ui: &MainWindow,
+    _player: &Player,
+    _headers: &[String],
+    _credential_store: &Arc<CredentialStore>,
+    _local_store: &Arc<LocalStore>,
+    _jellyfin: &Arc<JellyfinClient>,
+    _reporter: &Arc<PlaybackReporter>,
+    _session_ctrl: &Arc<PlaybackSessionController>,
+    _current_item: &Arc<Mutex<Option<TvItem>>>,
+    _cached_catalog: &Arc<Mutex<Vec<TvItem>>>,
+    _phash_coord: &Arc<PhashCoordinator>,
+) {
+    ui.invoke_play_random();
+}
+
+#[allow(dead_code)]
+pub fn play_random_catalog_item_ctx(ui: &MainWindow, _ctx: &AppContext) {
+    ui.invoke_play_random();
 }
 
 #[cfg(windows)]

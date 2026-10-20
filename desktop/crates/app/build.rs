@@ -60,8 +60,47 @@ fn main() {
         let resource_script = out_dir.join("adult-hub-icon.rc");
         let resource_object = out_dir.join("adult-hub-icon.o");
         let icon_path = icon.to_string_lossy().replace('\\', "/");
-        fs::write(&resource_script, format!("1 ICON \"{icon_path}\"\n"))
-            .expect("failed to write Windows icon resource script");
+        let pkg_version = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.1.0".into());
+        let version_parts: Vec<&str> = pkg_version.split('.').collect();
+        let major: u16 = version_parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let minor: u16 = version_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
+        let patch: u16 = version_parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+
+        let rc_content = format!(
+            r#"1 ICON "{icon_path}"
+
+1 VERSIONINFO
+FILEVERSION {major},{minor},{patch},0
+PRODUCTVERSION {major},{minor},{patch},0
+FILEFLAGSMASK 0x3fL
+FILEFLAGS 0x0L
+FILEOS 0x40004L
+FILETYPE 0x1L
+FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "Adult Hub\0"
+            VALUE "FileDescription", "Adult Hub Desktop\0"
+            VALUE "FileVersion", "{pkg_version}.0\0"
+            VALUE "InternalName", "adult-hub-desktop\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 Adult Hub\0"
+            VALUE "OriginalFilename", "adult-hub-desktop.exe\0"
+            VALUE "ProductName", "Adult Hub Desktop\0"
+            VALUE "ProductVersion", "{pkg_version}\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END
+"#
+        );
+        fs::write(&resource_script, rc_content)
+            .expect("failed to write Windows resource script");
 
         let compiler = if target.ends_with("windows-gnu") {
             std::env::var("WINDRES").unwrap_or_else(|_| "x86_64-w64-mingw32-windres".into())

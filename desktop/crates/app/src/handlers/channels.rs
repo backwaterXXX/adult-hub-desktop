@@ -384,7 +384,65 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
 
                 if !res_url.is_empty() {
                     let mut effective_channel_id = chan_id.clone();
-                    if !cat_str.eq_ignore_ascii_case("all channels") {
+                    if cat_str.eq_ignore_ascii_case("all channels") {
+                        match resolver.get_categories(&res_url) {
+                            Ok(categories) => {
+                                let hidden = local_store.get_hidden_channels().unwrap_or_default();
+                                let mut ids = category_ids.lock().unwrap();
+                                for category in &categories {
+                                    ids.insert(category.title.clone(), category.id.clone());
+                                }
+                                let mut names = vec!["All Channels".to_string()];
+                                names.extend(
+                                    categories
+                                        .iter()
+                                        .filter(|category| !hidden.iter().any(|id| id == &category.id))
+                                        .map(|category| category.title.clone()),
+                                );
+                                let weak_categories = weak.clone();
+                                slint::invoke_from_event_loop(move || {
+                                    if let Some(ui) = weak_categories.upgrade() {
+                                        let model = Rc::new(slint::VecModel::from(
+                                            names
+                                                .into_iter()
+                                                .map(slint::SharedString::from)
+                                                .collect::<Vec<_>>(),
+                                        ));
+                                        ui.set_channels_categories(model.into());
+                                    }
+                                })
+                                .ok();
+
+                                let visible_categories: Vec<_> = categories
+                                    .into_iter()
+                                    .filter(|c| !hidden.iter().any(|id| id == &c.id))
+                                    .collect();
+
+                                for cat in visible_categories.iter().take(6) {
+                                    if let Ok(history) = resolver.get_channel_history(&res_url, &cat.id, 8, None) {
+                                        items.extend(history.videos.into_iter().map(TvItem::from));
+                                    } else if let Ok(videos) = resolver.get_category_videos(&res_url, &cat.id, 1, "recent", None) {
+                                        items.extend(videos.into_iter().map(TvItem::from));
+                                    }
+                                }
+
+                                let mut seen = std::collections::HashSet::new();
+                                items.retain(|item| seen.insert(item.id.clone()));
+                                has_more = false;
+                                if items.is_empty() && !visible_categories.is_empty() {
+                                    error_kind = "empty";
+                                    error_message = Some("No videos available across channel categories.".to_string());
+                                }
+                            }
+                            Err(error) => {
+                                error_kind = resolver_error_kind(&error);
+                                error_message = Some(format!(
+                                    "Could not load channel categories: {}.",
+                                    resolver_error_summary(&error)
+                                ));
+                            }
+                        }
+                    } else {
                         match resolver.get_categories(&res_url) {
                             Ok(categories) => {
                                 let hidden = local_store.get_hidden_channels().unwrap_or_default();
@@ -427,34 +485,34 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
                                 ));
                             }
                         }
-                    }
-                    *current_channel_id.lock().unwrap() = effective_channel_id.clone();
-                    match resolver.get_channel_history(&res_url, &effective_channel_id, 20, None) {
-                        Ok(history) => {
-                            next_offset = history.next_offset_id;
-                            has_more = history.has_more;
-                            items.extend(history.videos.into_iter().map(TvItem::from));
-                        }
-                        Err(history_error) => {
-                            match resolver.get_category_videos(&res_url, &effective_channel_id, 1, "recent", None) {
-                                Ok(videos) => items.extend(videos.into_iter().map(TvItem::from)),
-                                Err(fallback_error) => {
-                                    error_kind = if resolver_error_kind(&history_error) == "access-denied"
-                                        || resolver_error_kind(&fallback_error) == "access-denied"
-                                    {
-                                        "access-denied"
-                                    } else if resolver_error_kind(&history_error) == "offline"
-                                        || resolver_error_kind(&fallback_error) == "offline"
-                                    {
-                                        "offline"
-                                    } else {
-                                        "error"
-                                    };
-                                    error_message = Some(format!(
-                                        "Could not load channel history ({}); fallback request failed ({}).",
-                                        resolver_error_summary(&history_error),
-                                        resolver_error_summary(&fallback_error)
-                                    ));
+                        *current_channel_id.lock().unwrap() = effective_channel_id.clone();
+                        match resolver.get_channel_history(&res_url, &effective_channel_id, 20, None) {
+                            Ok(history) => {
+                                next_offset = history.next_offset_id;
+                                has_more = history.has_more;
+                                items.extend(history.videos.into_iter().map(TvItem::from));
+                            }
+                            Err(history_error) => {
+                                match resolver.get_category_videos(&res_url, &effective_channel_id, 1, "recent", None) {
+                                    Ok(videos) => items.extend(videos.into_iter().map(TvItem::from)),
+                                    Err(fallback_error) => {
+                                        error_kind = if resolver_error_kind(&history_error) == "access-denied"
+                                            || resolver_error_kind(&fallback_error) == "access-denied"
+                                        {
+                                            "access-denied"
+                                        } else if resolver_error_kind(&history_error) == "offline"
+                                            || resolver_error_kind(&fallback_error) == "offline"
+                                        {
+                                            "offline"
+                                        } else {
+                                            "error"
+                                        };
+                                        error_message = Some(format!(
+                                            "Could not load channel history ({}); fallback request failed ({}).",
+                                            resolver_error_summary(&history_error),
+                                            resolver_error_summary(&fallback_error)
+                                        ));
+                                    }
                                 }
                             }
                         }
@@ -581,6 +639,12 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
 
         ui.on_load_more_channel_videos(move || {
             let Some(ui) = weak.upgrade() else { return };
+            let chan_id = current_channel_id.lock().unwrap().clone();
+            if chan_id == "main" {
+                ui.set_channel_loading(false);
+                ui.set_channel_has_more(false);
+                return;
+            }
             ui.set_channel_loading(true);
 
             let weak = weak.clone();

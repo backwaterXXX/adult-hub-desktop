@@ -23,6 +23,7 @@ url.workspace = true
 sysinfo.workspace = true
 libloading = "0.9"
 image = { version = "0.25.10", default-features = false, features = ["ico", "jpeg", "png", "webp"] }
+fastrand = "2.3"
 
 
 [target.'cfg(windows)'.dependencies]

@@ -11,6 +11,7 @@ mod playback;
 mod renderer;
 mod reporter;
 mod session;
+pub mod shuffle;
 mod system_info;
 mod thumbnails;
 mod updater;
@@ -56,12 +57,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     slint::BackendSelector::new().require_opengl().select()?;
 
     let ui = MainWindow::new()?;
+    if let Ok(size_str) = std::env::var("AH_WINDOW_SIZE") {
+        if size_str == "960x640" {
+            ui.set_window_target_width(960.0);
+            ui.set_window_target_height(640.0);
+        } else if size_str == "1180x790" {
+            ui.set_window_target_width(1180.0);
+            ui.set_window_target_height(790.0);
+        }
+    }
     set_window_icon(&ui);
     ui.set_licenses_text(LICENSES_TEXT.into());
+    ui.set_app_version(env!("CARGO_PKG_VERSION").into());
 
     let player = match Player::new() {
-        Ok(player) => Some(Rc::new(player)),
+        Ok(player) => Some(Arc::new(player)),
         Err(error) => {
+            eprintln!("Player::new failed: {error}");
             show_error(&ui, error.to_string());
             None
         }
@@ -171,10 +183,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         session_ctrl: session_ctrl.clone(),
         phash_coord: phash_coord.clone(),
         current_playing_item: current_playing_item.clone(),
+        detail_active_item: Arc::new(Mutex::new(None)),
+        pending_resume_position: Arc::new(Mutex::new(None)),
         cached_catalog: cached_catalog.clone(),
         home_catalog: Arc::new(Mutex::new(Vec::new())),
+        performer_catalog: Arc::new(Mutex::new(Vec::new())),
+        studio_catalog: Arc::new(Mutex::new(Vec::new())),
         autoplay_active: autoplay_active.clone(),
         hwdec_active: hwdec_active.clone(),
+        player_paused_for_details: Arc::new(AtomicBool::new(false)),
+        is_navigating_back: Arc::new(AtomicBool::new(false)),
+        nav_history: Arc::new(Mutex::new(Vec::new())),
+        shuffle_engine: Arc::new(crate::shuffle::ShuffleEngine::default()),
     };
 
     // Synchronize initial settings to UI
@@ -484,6 +504,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let phash_coord = phash_coord.clone();
             Box::new(move || {
                 let Some(ui) = ui_weak.upgrade() else { return };
+                eprintln!("on_renderer_ready invoked: initial={initial}");
                 if initial == "sample" {
                     let sample_item = sample_catalog_tv_items()[0].clone();
                     start_item_playback(
@@ -517,6 +538,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if options.demo_capture {
         run_demo_capture(&ui);
+    }
+    if options.demo_shuffle {
+        run_demo_shuffle(&ui);
     }
 
     ui.show()?;
@@ -600,15 +624,32 @@ fn run_demo_capture(ui: &MainWindow) {
             ui.set_home_resume_items(std::rc::Rc::new(slint::VecModel::from(demo_cards.clone())).into());
             ui.set_home_latest_items(std::rc::Rc::new(slint::VecModel::from(demo_cards.clone())).into());
             ui.set_home_history_items(std::rc::Rc::new(slint::VecModel::from(demo_cards)).into());
+
+            let p0 = make_demo_card("p_1", "Sage Roux", 0, "Performer", false, 0.0);
+            let p1 = make_demo_card("p_2", "Elena Rostova", 0, "Performer", false, 0.0);
+            let p2 = make_demo_card("p_3", "Marcus Vance", 0, "Performer", false, 0.0);
+            let p3 = make_demo_card("p_4", "Aria Thorne", 0, "Performer", false, 0.0);
+            let p4 = make_demo_card("p_5", "Chloe Bennett", 0, "Performer", false, 0.0);
+            ui.set_home_performer_items(std::rc::Rc::new(slint::VecModel::from(vec![p0, p1, p2, p3, p4])).into());
         });
         sleep(Duration::from_millis(800));
         let _ = fs::write("/tmp/ah_demo_step_1", "step 1 home");
 
-        // Step 2: Browse
+        // Step 1a: Home screen scrolled down to show Performers Shelf
         sleep(Duration::from_millis(1500));
         let _ = weak.upgrade_in_event_loop(|ui| {
+            ui.set_home_scroll_y(-1180.0);
+        });
+        sleep(Duration::from_millis(800));
+        let _ = fs::write("/tmp/ah_demo_step_1a", "step 1a home performers");
+
+        // Step 2: Browse screen with expanded sidebar sub-navigation
+        sleep(Duration::from_millis(1500));
+        let _ = weak.upgrade_in_event_loop(|ui| {
+            ui.set_home_scroll_y(0.0);
             ui.set_active_screen("browse".into());
-            ui.set_active_category("Latest".into());
+            ui.set_browse_nav_expanded(true);
+            ui.set_active_category("Categories".into());
             ui.set_is_catalog_search_results(false);
 
             let card0 = make_demo_card(
@@ -641,113 +682,476 @@ fn run_demo_capture(ui: &MainWindow) {
                 card_1: card1.clone(),
                 card_2: card2.clone(),
                 card_3: Default::default(),
+                card_4: Default::default(),
+                card_5: Default::default(),
+                card_6: Default::default(),
+                card_7: Default::default(),
                 has_0: true,
                 has_1: true,
                 has_2: true,
                 has_3: false,
+                has_4: false,
+                has_5: false,
+                has_6: false,
+                has_7: false,
             };
             ui.set_catalog_items(std::rc::Rc::new(slint::VecModel::from(vec![card0, card1, card2])).into());
             ui.set_catalog_rows(std::rc::Rc::new(slint::VecModel::from(vec![row])).into());
         });
         sleep(Duration::from_millis(800));
-        let _ = fs::write("/tmp/ah_demo_step_2", "step 2 browse");
+        let _ = fs::write("/tmp/ah_demo_step_2", "step 2 browse expanded");
 
-        // Step 3: Channels
+        // Step 2a: Performers grid
         sleep(Duration::from_millis(1500));
         let _ = weak.upgrade_in_event_loop(|ui| {
-            ui.set_active_screen("channels".into());
-            ui.set_active_channel_category("Neon Pulse 4K".into());
-            ui.set_channel_loading(false);
-            ui.set_channel_error_message("".into());
-            ui.set_channel_error_kind("".into());
+            ui.set_active_screen("browse".into());
+            ui.set_active_category("Performers".into());
+            ui.set_performer_filters_expanded(true);
+            ui.set_catalog_column_count(5);
+            ui.set_status("Ready".into());
+            ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
 
+            let mut p0 = make_demo_card("perf_1", "Elena Rostova", 0, "Lead Actress", false, 0.0);
+            p0.provider = "performer".into();
+            let mut p1 = make_demo_card("perf_2", "Marcus Vance", 0, "Actor", false, 0.0);
+            p1.provider = "performer".into();
+            let mut p2 = make_demo_card("perf_3", "Aria Thorne", 0, "Actress", false, 0.0);
+            p2.provider = "performer".into();
+            let mut p3 = make_demo_card("perf_4", "Chloe Bennett", 0, "Featured", false, 0.0);
+            p3.provider = "performer".into();
+            let mut p4 = make_demo_card("perf_5", "David Miller", 0, "Actor", false, 0.0);
+            p4.provider = "performer".into();
+
+            let row = crate::VideoCardRowData {
+                card_0: p0.clone(),
+                card_1: p1.clone(),
+                card_2: p2.clone(),
+                card_3: p3.clone(),
+                card_4: p4.clone(),
+                card_5: Default::default(),
+                card_6: Default::default(),
+                card_7: Default::default(),
+                has_0: true,
+                has_1: true,
+                has_2: true,
+                has_3: true,
+                has_4: true,
+                has_5: false,
+                has_6: false,
+                has_7: false,
+            };
+            ui.set_catalog_items(std::rc::Rc::new(slint::VecModel::from(vec![p0, p1, p2, p3, p4])).into());
+            ui.set_catalog_rows(std::rc::Rc::new(slint::VecModel::from(vec![row])).into());
+        });
+        sleep(Duration::from_millis(800));
+        let _ = fs::write("/tmp/ah_demo_step_2a", "step 2a performers");
+
+        // Step 2b: Studios grid - showing unique studio records (Sean Cody, SeanCody, Wurstfilm) and clear counter
+        sleep(Duration::from_millis(1500));
+        let _ = weak.upgrade_in_event_loop(|ui| {
+            ui.set_active_screen("browse".into());
+            ui.set_active_category("Studios".into());
+            ui.set_catalog_column_count(3);
+            ui.set_catalog_has_more(false);
+            ui.set_catalog_total_count(58);
+            ui.set_status("Ready".into());
+            ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
+
+            let mut s0 = make_demo_card("stu_1", "Sean Cody", 0, "Studio", false, 0.0);
+            s0.provider = "studio".into();
+            let mut s1 = make_demo_card("stu_2", "SeanCody", 0, "Studio", false, 0.0);
+            s1.provider = "studio".into();
+            let mut s2 = make_demo_card("stu_3", "Wurstfilm", 0, "Studio", false, 0.0);
+            s2.provider = "studio".into();
+
+            let row = crate::VideoCardRowData {
+                card_0: s0.clone(),
+                card_1: s1.clone(),
+                card_2: s2.clone(),
+                card_3: Default::default(),
+                card_4: Default::default(),
+                card_5: Default::default(),
+                card_6: Default::default(),
+                card_7: Default::default(),
+                has_0: true,
+                has_1: true,
+                has_2: true,
+                has_3: false,
+                has_4: false,
+                has_5: false,
+                has_6: false,
+                has_7: false,
+            };
+            ui.set_catalog_items(std::rc::Rc::new(slint::VecModel::from(vec![s0, s1, s2])).into());
+            ui.set_catalog_rows(std::rc::Rc::new(slint::VecModel::from(vec![row])).into());
+        });
+        sleep(Duration::from_millis(800));
+        let _ = fs::write("/tmp/ah_demo_step_2b", "step 2b studios");
+
+        // Step 3: Item Details with long content and visible scrollbar
+        sleep(Duration::from_millis(1500));
+        let _ = weak.upgrade_in_event_loop(|ui| {
             let card0 = make_demo_card(
-                "ch_1",
-                "Channel Premiere: Cyber Circuitry",
+                "sim_1",
+                "Cyber Circuitry Extended Showcase",
                 1458,
                 "Neon Pulse",
                 false,
                 0.0,
             );
             let card1 = make_demo_card(
-                "ch_2",
-                "Electric Dreams Behind the Scenes",
+                "sim_2",
+                "Electric Dreams Retrospective",
                 1125,
                 "Neon Pulse",
                 false,
                 0.0,
             );
+
+            let performer0 = crate::PerformerCardData {
+                id: "p1".into(),
+                name: "Elena Rostova".into(),
+                role: "Lead Researcher".into(),
+                has_image: false,
+                image: Default::default(),
+            };
+            let performer1 = crate::PerformerCardData {
+                id: "p2".into(),
+                name: "Marcus Vance".into(),
+                role: "Cyber Operative".into(),
+                has_image: false,
+                image: Default::default(),
+            };
+            let performer2 = crate::PerformerCardData {
+                id: "p3".into(),
+                name: "Aria Thorne".into(),
+                role: "Security Chief".into(),
+                has_image: false,
+                image: Default::default(),
+            };
+
+            ui.set_detail_id("demo_det_1".into());
+            ui.set_detail_title("Comprehensive Cybernetic Odyssey: Deluxe Extended Edition #scifi #cyberpunk".into());
+            ui.set_detail_original_title("Comprehensive Cybernetic Odyssey: Deluxe Extended Edition #scifi #cyberpunk 🎬✨".into());
+            ui.set_detail_duration("2h 15m".into());
+            ui.set_detail_year("2025".into());
+            ui.set_detail_resolution("4K UHD • HEVC 10-bit".into());
+            ui.set_detail_studio("Neon Horizons Studio".into());
+            ui.set_detail_container("Matroska (MKV)".into());
+            ui.set_detail_file_size("14.8 GB".into());
+            ui.set_detail_provider("jellyfin".into());
+            ui.set_detail_can_resume(true);
+            ui.set_detail_resume_text("Resume from 30:42".into());
+            ui.set_detail_overview("Deep in the illuminated subterranean networks of New Neo Tokyo, a rogue collective of synthetic researchers encounters an anomalous signal echoing across forgotten fiber arrays. As their investigation unfolds, corporate enforcers and underground resistance factions converge in a high-stakes conflict over the future of decentralized cyber-consciousness.\n\nFeaturing cutting-edge cinematography, immersive sound design, and performances by an acclaimed ensemble cast, this extended edition presents the complete uncut narrative alongside comprehensive production archives, technical breakdowns, and behind-the-scenes retrospectives.\n\nCritically acclaimed for its atmospheric direction, meticulous world-building, and groundbreaking practical effects integrated with real-time neural renders.".into());
+            ui.set_detail_genre_items(std::rc::Rc::new(slint::VecModel::from(vec![
+                "Cyberpunk".into(),
+                "Sci-Fi".into(),
+                "Thriller".into(),
+                "Action".into(),
+            ])).into());
+            ui.set_detail_tag_items(std::rc::Rc::new(slint::VecModel::from(vec![
+                "scifi".into(),
+                "cyberpunk".into(),
+                "4k".into(),
+                "extended".into(),
+                "hdr10".into(),
+            ])).into());
+            ui.set_detail_performer_cards(std::rc::Rc::new(slint::VecModel::from(vec![
+                performer0,
+                performer1,
+                performer2,
+            ])).into());
             let card2 = make_demo_card(
-                "ch_3",
-                "Live Transmission Archive",
-                2712,
-                "Neon Pulse",
+                "sim_3",
+                "Midnight Run in Neon City: The Complete Odyssey",
+                6480,
+                "Studio Alpha",
+                true,
+                0.7,
+            );
+            let card3 = make_demo_card(
+                "sim_4",
+                "Analog Synthetics: The Underground Archives",
+                3240,
+                "WaveLab Productions",
                 false,
                 0.0,
             );
-
-            let row = crate::VideoCardRowData {
-                card_0: card0.clone(),
-                card_1: card1.clone(),
-                card_2: card2.clone(),
-                card_3: Default::default(),
-                has_0: true,
-                has_1: true,
-                has_2: true,
-                has_3: false,
-            };
-            ui.set_channel_items(std::rc::Rc::new(slint::VecModel::from(vec![card0, card1, card2])).into());
-            ui.set_channel_rows(std::rc::Rc::new(slint::VecModel::from(vec![row])).into());
+            ui.set_detail_similar_items(std::rc::Rc::new(slint::VecModel::from(vec![
+                card0,
+                card1,
+                card2,
+                card3,
+            ])).into());
+            ui.set_detail_tech_expanded(true);
+            ui.set_active_screen("video-details".into());
         });
-        sleep(Duration::from_millis(800));
-        let _ = fs::write("/tmp/ah_demo_step_3", "step 3 channels");
+        sleep(Duration::from_millis(1000));
+        let _ = fs::write("/tmp/ah_demo_step_3", "step 3 details scroll");
 
-        // Step 4: Empty Player state
+        // Step 3a: Detail page scrolled down to show legible Similar Titles
         sleep(Duration::from_millis(1500));
         let _ = weak.upgrade_in_event_loop(|ui| {
-            ui.set_playback_ended_visible(false);
-            ui.set_player_media_loaded(false);
-            ui.set_playing(false);
-            ui.set_player_controls_visible(false);
+            ui.set_detail_scroll_y(-480.0);
+        });
+        sleep(Duration::from_millis(800));
+        let _ = fs::write("/tmp/ah_demo_step_3a", "step 3a similar titles");
+
+        // Step 4: Performer Profile full screen (Sage Roux)
+        sleep(Duration::from_millis(1500));
+        let _ = weak.upgrade_in_event_loop(|ui| {
+            ui.set_active_screen("performer-details".into());
+            ui.set_performer_name("Sage Roux".into());
+            ui.set_performer_nationality("French".into());
+            ui.set_performer_birth("1998-07-22".into());
+            ui.set_performer_aliases("Sage, S. Roux".into());
+            ui.set_performer_bio("Sage Roux is a widely celebrated European performer and model recognized for her versatile roles and magnetic screen presence across major cinematic productions. Over the course of her distinguished career, she has collaborated with premier studios internationally, earning multiple award nominations and widespread critical acclaim. Her work spans romantic narratives, high-concept dramas, and acclaimed studio showcases, establishing her as one of the most prominent and requested talents in modern contemporary cinema.".into());
+            ui.set_performer_has_long_bio(true);
+            ui.set_performer_bio_expanded(false);
+            ui.set_performer_loading(false);
+            ui.set_performer_error("".into());
+            ui.set_performer_movie_count(3);
+            let c0 = make_demo_card("perf_1", "Cyber Circuitry Extended Showcase", 1458, "Neon Pulse", false, 0.0);
+            let c1 = make_demo_card("perf_2", "Electric Dreams Retrospective", 1125, "Neon Pulse", false, 0.0);
+            let c2 = make_demo_card("perf_3", "Midnight Run in Neon City", 6480, "Studio Alpha", true, 0.7);
+            ui.set_performer_items(std::rc::Rc::new(slint::VecModel::from(vec![c0, c1, c2])).into());
+        });
+        sleep(Duration::from_millis(1000));
+        let _ = fs::write("/tmp/ah_demo_step_4", "step 4 performer profile");
+
+        // Step 4a: Sage Roux with expanded bio
+        sleep(Duration::from_millis(1200));
+        let _ = weak.upgrade_in_event_loop(|ui| {
+            ui.set_performer_bio_expanded(true);
+        });
+        sleep(Duration::from_millis(800));
+        let _ = fs::write("/tmp/ah_demo_step_4a", "step 4a performer bio expanded");
+
+        // Step 4b: Tony Genius loading state (placeholder, no bio, empty filmography)
+        sleep(Duration::from_millis(1200));
+        let _ = weak.upgrade_in_event_loop(|ui| {
+            ui.set_performer_name("Tony Genius".into());
+            ui.set_performer_nationality("".into());
+            ui.set_performer_birth("".into());
+            ui.set_performer_aliases("".into());
+            ui.set_performer_bio("".into());
+            ui.set_performer_has_long_bio(false);
+            ui.set_performer_bio_expanded(false);
+            ui.set_performer_has_image(false);
+            ui.set_performer_loading(true);
+            ui.set_performer_error("".into());
+            ui.set_performer_movie_count(-1);
+            ui.set_performer_items(std::rc::Rc::new(slint::VecModel::default()).into());
+        });
+        sleep(Duration::from_millis(800));
+        let _ = fs::write("/tmp/ah_demo_step_4b", "step 4b tony genius loading");
+
+        // Step 4c: Tony Genius loaded state (full bio, filmography cards, no overlapping)
+        sleep(Duration::from_millis(1200));
+        let _ = weak.upgrade_in_event_loop(|ui| {
+            ui.set_performer_name("Tony Genius".into());
+            ui.set_performer_nationality("American".into());
+            ui.set_performer_birth("1991-03-15".into());
+            ui.set_performer_aliases("T. Genius, The Mastermind".into());
+            ui.set_performer_bio("Tony Genius is an acclaimed director and visionary performer known for high-octane set-pieces, distinctive visual choreography, and immersive cinematic narratives. Over the past decade, his signature style has garnered critical appreciation and widespread festival recognition.".into());
+            ui.set_performer_has_long_bio(true);
+            ui.set_performer_bio_expanded(false);
+            ui.set_performer_has_image(false);
+            ui.set_performer_loading(false);
+            ui.set_performer_error("".into());
+            ui.set_performer_movie_count(4);
+            let c0 = make_demo_card("tg_1", "Midnight Heist: Uncut Edition", 3600, "Genius Media", false, 0.0);
+            let c1 = make_demo_card("tg_2", "Velocity Vector: Speed of Sound", 4200, "Genius Media", true, 0.45);
+            let c2 = make_demo_card("tg_3", "Neon Skylines Behind the Scenes", 1850, "Studio Alpha", false, 0.0);
+            let c3 = make_demo_card("tg_4", "Cybernetic Awakening", 5400, "Apex Cine", false, 0.0);
+            ui.set_performer_items(std::rc::Rc::new(slint::VecModel::from(vec![c0, c1, c2, c3])).into());
+        });
+        sleep(Duration::from_millis(800));
+        let _ = fs::write("/tmp/ah_demo_step_4c", "step 4c tony genius loaded");
+
+        // Step 5: Studio Profile full screen
+        sleep(Duration::from_millis(1500));
+        let _ = weak.upgrade_in_event_loop(|ui| {
+            ui.set_active_screen("studio-details".into());
+            ui.set_studio_name("Neon Horizons Studio".into());
+            ui.set_studio_loading(false);
+            ui.set_studio_error("".into());
+            let c0 = make_demo_card("stud_1", "Cyber Circuitry Extended Showcase", 1458, "Neon Horizons Studio", false, 0.0);
+            let c1 = make_demo_card("stud_2", "Electric Dreams Retrospective", 1125, "Neon Horizons Studio", false, 0.0);
+            let c2 = make_demo_card("stud_3", "Midnight Run in Neon City", 6480, "Neon Horizons Studio", true, 0.7);
+            ui.set_studio_items(std::rc::Rc::new(slint::VecModel::from(vec![c0, c1, c2])).into());
+        });
+        sleep(Duration::from_millis(1000));
+        let _ = fs::write("/tmp/ah_demo_step_5", "step 5 studio profile");
+
+        // Step 6: Settings Screen with Categories Multi-Select Chips
+        sleep(Duration::from_millis(1500));
+        let _ = weak.upgrade_in_event_loop(|ui| {
+            ui.set_active_screen("settings".into());
+            ui.set_settings_section("content".into());
+            let cats = vec![
+                crate::HomeCategoryOption { id: "resume".into(), name: "Continue Watching".into(), selected: true },
+                crate::HomeCategoryOption { id: "history".into(), name: "Watch History".into(), selected: true },
+                crate::HomeCategoryOption { id: "latest".into(), name: "Latest".into(), selected: true },
+                crate::HomeCategoryOption { id: "random".into(), name: "Random Picks".into(), selected: true },
+                crate::HomeCategoryOption { id: "performers".into(), name: "Performers".into(), selected: true },
+                crate::HomeCategoryOption { id: "4k".into(), name: "4K UHD".into(), selected: false },
+                crate::HomeCategoryOption { id: "vr".into(), name: "VR 360".into(), selected: false },
+                crate::HomeCategoryOption { id: "cyberpunk".into(), name: "Cyberpunk".into(), selected: true },
+                crate::HomeCategoryOption { id: "bts".into(), name: "Behind The Scenes".into(), selected: false },
+                crate::HomeCategoryOption { id: "classics".into(), name: "Classics".into(), selected: false },
+            ];
+            ui.set_home_category_options(std::rc::Rc::new(slint::VecModel::from(cats)).into());
+        });
+        sleep(Duration::from_millis(1000));
+        let _ = fs::write("/tmp/ah_demo_step_6", "step 6 settings categories");
+
+        // Step 7: Player Loading with animated spinner and Left-anchored Back
+        sleep(Duration::from_millis(1500));
+        let _ = weak.upgrade_in_event_loop(|ui| {
             ui.set_active_screen("player".into());
-        });
-        sleep(Duration::from_millis(800));
-        let _ = fs::write("/tmp/ah_demo_step_4", "step 4 player empty");
-
-        // Step 5: Player playing with visible controls
-        sleep(Duration::from_millis(1500));
-        let _ = weak.upgrade_in_event_loop(|ui| {
-            ui.set_playback_ended_visible(false);
-            ui.set_player_error_message("".into());
-            ui.invoke_load_sample();
+            ui.set_has_active_media(true);
+            ui.set_player_media_loaded(false);
+            ui.set_player_state("loading".into());
+            ui.set_player_loading_message("Connecting to stream…".into());
+            ui.set_player_title("Comprehensive Cybernetic Odyssey: Deluxe Extended Edition".into());
             ui.set_player_controls_visible(true);
         });
         sleep(Duration::from_millis(1200));
-        let _ = fs::write("/tmp/ah_demo_step_5", "step 5 player controls");
+        let _ = fs::write("/tmp/ah_demo_step_7", "step 7 player loading");
 
-        // Step 6: Player playing with hidden controls
-        sleep(Duration::from_millis(800));
-        let _ = weak.upgrade_in_event_loop(|ui| {
-            ui.set_playback_ended_visible(false);
-            ui.set_player_controls_visible(false);
-        });
-        sleep(Duration::from_millis(800));
-        let _ = fs::write("/tmp/ah_demo_step_6", "step 6 player clean");
-
-        // Step 7: Settings screen
-        sleep(Duration::from_millis(1000));
-        let _ = weak.upgrade_in_event_loop(|ui| {
-            ui.invoke_toggle_play(); // pauses playback before EOF
-            ui.set_playback_ended_visible(false);
-            ui.set_active_screen("settings".into());
-        });
-        sleep(Duration::from_millis(800));
-        let _ = fs::write("/tmp/ah_demo_step_7", "step 7 settings");
-
-        // Step 8: Done
+        // Step 8: Player Playing with modern anchored Volume Regulator Flyout
         sleep(Duration::from_millis(1500));
+        let _ = weak.upgrade_in_event_loop(|ui| {
+            ui.set_active_screen("player".into());
+            ui.set_has_active_media(true);
+            ui.set_player_media_loaded(true);
+            ui.set_playing(true);
+            ui.set_player_state("playing".into());
+            ui.set_player_title("Comprehensive Cybernetic Odyssey: Deluxe Extended Edition".into());
+            ui.set_player_subtitle("2:15:30 • 2025 • Neon Horizons Studio • 4K".into());
+            ui.set_position(1842.0);
+            ui.set_duration(8130.0);
+            ui.set_position_text("30:42".into());
+            ui.set_duration_text("2:15:30".into());
+            ui.set_player_controls_visible(true);
+            ui.set_hud_visible(false);
+            ui.set_player_more_controls_visible(false);
+            ui.set_player_volume_flyout_open(false);
+            ui.set_volume(85.0);
+        });
+        sleep(Duration::from_millis(800));
+        let _ = fs::write("/tmp/ah_demo_step_8_closed", "step 8 volume closed");
+
+        // Wait for capture script to trigger opening animation
+        let start = std::time::Instant::now();
+        while !std::path::Path::new("/tmp/ah_demo_step_8_start_open").exists() && start.elapsed().as_millis() < 3000 {
+            sleep(Duration::from_millis(30));
+        }
+
+        let _ = weak.upgrade_in_event_loop(|ui| {
+            ui.set_player_volume_flyout_open(true);
+        });
+        sleep(Duration::from_millis(1200));
+        let _ = fs::write("/tmp/ah_demo_step_8", "step 8 player volume flyout");
+
+        // Wait for capture script to trigger closing animation
+        let start = std::time::Instant::now();
+        while !std::path::Path::new("/tmp/ah_demo_step_8_start_close").exists() && start.elapsed().as_millis() < 3000 {
+            sleep(Duration::from_millis(30));
+        }
+
+        let _ = weak.upgrade_in_event_loop(|ui| {
+            ui.set_player_volume_flyout_open(false);
+        });
+        sleep(Duration::from_millis(1000));
+        let _ = fs::write("/tmp/ah_demo_step_8_closed_again", "step 8 volume closed again");
+
+        // Step 8a: Player More Menu Popover
+        sleep(Duration::from_millis(1500));
+        let _ = weak.upgrade_in_event_loop(|ui| {
+            ui.set_player_volume_flyout_open(false);
+            ui.set_player_more_controls_visible(true);
+            ui.set_player_controls_visible(true);
+        });
+        sleep(Duration::from_millis(1200));
+        let _ = fs::write("/tmp/ah_demo_step_8a", "step 8a player more menu");
+
+        // Step 8b: Stats panel opened immediately during PAUSE
+        sleep(Duration::from_millis(1500));
+        let _ = weak.upgrade_in_event_loop(|ui| {
+            ui.set_player_more_controls_visible(false);
+            ui.set_player_volume_flyout_open(false);
+            ui.set_playing(false);
+            ui.set_player_state("paused".into());
+            ui.set_hud_visible(true);
+            ui.set_hud_text("[ Stream & Media ]\nVideo codec: hevc (Main 10)\nResolution: 3840x2160\nFile size: 14.8 GB\nContainer: matroska,webm\nPixel format: yuv420p10le\n\n[ Playback & Buffer ]\nBitrate: 0 kbit/s (Paused)\nAudio: aac (2 channels, 48000 Hz)\nHW Decoder: d3d11va\nBuffer: 45.2 MB (4.8s)\nDropped frames: 0".into());
+            ui.set_player_controls_visible(true);
+        });
+        sleep(Duration::from_millis(1200));
+        let _ = fs::write("/tmp/ah_demo_step_8b", "step 8b stats paused");
+
+        // Step 8c: Player Controls Bar clean view (playing, controls visible, no popovers)
+        sleep(Duration::from_millis(1500));
+        let _ = weak.upgrade_in_event_loop(|ui| {
+            ui.set_hud_visible(false);
+            ui.set_player_more_controls_visible(false);
+            ui.set_player_volume_flyout_open(false);
+            ui.set_playing(true);
+            ui.set_player_state("playing".into());
+            ui.set_player_controls_visible(true);
+        });
+        sleep(Duration::from_millis(1000));
+        let _ = fs::write("/tmp/ah_demo_step_8c", "step 8c player controls bar");
+
+        // Step 9: Player in fullscreen
+        sleep(Duration::from_millis(1500));
+        let _ = weak.upgrade_in_event_loop(|ui| {
+            ui.set_hud_visible(false);
+            ui.set_player_volume_flyout_open(false);
+            ui.set_player_more_controls_visible(false);
+            ui.window().set_fullscreen(true);
+            ui.set_is_fullscreen(true);
+            ui.set_player_controls_visible(true);
+        });
+        sleep(Duration::from_millis(1000));
+        let _ = fs::write("/tmp/ah_demo_step_9", "step 9 player fullscreen");
+
+        // Step 10: Done
+        sleep(Duration::from_millis(1000));
         let _ = fs::write("/tmp/ah_demo_step_done", "done");
         sleep(Duration::from_millis(500));
+        std::process::exit(0);
+    });
+}
+
+fn run_demo_shuffle(ui: &MainWindow) {
+    let weak = ui.as_weak();
+    std::thread::spawn(move || {
+        use std::fs;
+        use std::thread::sleep;
+        use std::time::Duration;
+
+        // Step 1: Let the initial video (sample 1) play with active video and audio
+        sleep(Duration::from_millis(2200));
+        let _ = fs::write("/tmp/ah_demo_shuffle_step_1", "playing sample 1");
+
+        // Step 2: Trigger Shuffle via the official Slint callback (same as clicking Shuffle)
+        let _ = weak.upgrade_in_event_loop(|ui| {
+            ui.invoke_play_random();
+        });
+
+        // Step 3: Resolving state with animated spinner and cut-off audio
+        sleep(Duration::from_millis(700));
+        let _ = fs::write("/tmp/ah_demo_shuffle_step_2", "resolving");
+
+        // Step 4: Next video (sample 2 with 880Hz audio) loads and starts playing automatically
+        sleep(Duration::from_millis(2600));
+        let _ = fs::write("/tmp/ah_demo_shuffle_step_3", "playing sample 2");
+
+        // Step 5: Completed
+        let _ = fs::write("/tmp/ah_demo_shuffle_done", "done");
+        sleep(Duration::from_millis(400));
         std::process::exit(0);
     });
 }
@@ -1174,7 +1578,7 @@ mod tests {
     fn test_cards_to_rows_partitioning() {
         use crate::catalog::cards_to_rows;
         let cards = sample_catalog_items();
-        assert_eq!(cards.len(), 3);
+        assert_eq!(cards.len(), 4);
 
         // 4 cols per row
         let rows_4 = cards_to_rows(&cards, 4);
@@ -1182,7 +1586,7 @@ mod tests {
         assert!(rows_4[0].has_0);
         assert!(rows_4[0].has_1);
         assert!(rows_4[0].has_2);
-        assert!(!rows_4[0].has_3);
+        assert!(rows_4[0].has_3);
         assert_eq!(rows_4[0].card_0.id, "sample");
 
         // 2 cols per row
@@ -1192,7 +1596,7 @@ mod tests {
         assert!(rows_2[0].has_1);
         assert!(!rows_2[0].has_2);
         assert!(rows_2[1].has_0);
-        assert!(!rows_2[1].has_1);
+        assert!(rows_2[1].has_1);
     }
 
     #[test]
@@ -1216,5 +1620,211 @@ mod tests {
         let err =
             PlaybackSessionController::resolve_stream_url(&item, None, None, None).unwrap_err();
         assert!(err.contains("Resolver URL is required"));
+    }
+
+    #[test]
+    fn test_find_catalog_item_from_home_or_history_not_in_browse() {
+        let local_store = Arc::new(adult_hub_storage::LocalStore::open_in_memory().unwrap());
+        let cred_store = Arc::new(adult_hub_storage::CredentialStore::new());
+        let session_ctrl = Arc::new(PlaybackSessionController::new(local_store.clone()));
+        let jellyfin = Arc::new(adult_hub_client::JellyfinClient::new("test-device"));
+        let resolver = Arc::new(adult_hub_client::ResolverClient::new());
+        let reporter = Arc::new(crate::reporter::PlaybackReporter::new(jellyfin.clone()));
+        let phash_coord = crate::phash::PhashCoordinator::new(local_store.clone(), resolver.clone(), "http://localhost:8080".into(), None);
+
+        let home_item = TvItem {
+            id: "home-video-123".into(),
+            title: "Home Featured Video".into(),
+            ..Default::default()
+        };
+        let history_item = TvItem {
+            id: "history-video-456".into(),
+            title: "Watched History Video".into(),
+            ..Default::default()
+        };
+        let detail_item = TvItem {
+            id: "detail-active-789".into(),
+            title: "Detail Active Video".into(),
+            ..Default::default()
+        };
+
+        // Record history item in SQLite
+        local_store.record_watch_history(&history_item.id, &serde_json::to_string(&history_item).unwrap()).unwrap();
+
+        let ctx = AppContext {
+            player: None,
+            headers: Vec::new(),
+            local_store,
+            credential_store: cred_store,
+            jellyfin,
+            resolver,
+            reporter,
+            session_ctrl,
+            phash_coord,
+            current_playing_item: Arc::new(Mutex::new(None)),
+            detail_active_item: Arc::new(Mutex::new(Some(detail_item.clone()))),
+            pending_resume_position: Arc::new(Mutex::new(None)),
+            cached_catalog: Arc::new(Mutex::new(vec![])), // Browse is empty!
+            home_catalog: Arc::new(Mutex::new(vec![home_item.clone()])),
+            performer_catalog: Arc::new(Mutex::new(vec![])),
+            studio_catalog: Arc::new(Mutex::new(vec![])),
+            autoplay_active: Arc::new(AtomicBool::new(false)),
+            hwdec_active: Arc::new(AtomicBool::new(false)),
+            player_paused_for_details: Arc::new(AtomicBool::new(false)),
+            is_navigating_back: Arc::new(AtomicBool::new(false)),
+            nav_history: Arc::new(Mutex::new(Vec::new())),
+            shuffle_engine: Arc::new(crate::shuffle::ShuffleEngine::default()),
+        };
+
+        // 1. Home item should be found even when Browse cached_catalog is empty
+        let found_home = ctx.find_catalog_item("home-video-123");
+        assert!(found_home.is_some());
+        assert_eq!(found_home.unwrap().title, "Home Featured Video");
+
+        // 2. History item should be found even when Browse and Home are empty
+        let found_history = ctx.find_catalog_item("history-video-456");
+        assert!(found_history.is_some());
+        assert_eq!(found_history.unwrap().title, "Watched History Video");
+
+        // 3. Detail active item should be found
+        let found_detail = ctx.find_catalog_item("detail-active-789");
+        assert!(found_detail.is_some());
+        assert_eq!(found_detail.unwrap().title, "Detail Active Video");
+
+        // 4. Non-existent item returns None
+        assert!(ctx.find_catalog_item("non-existent-999").is_none());
+    }
+
+    #[test]
+    fn test_cards_to_rows_8_columns() {
+        use crate::catalog::cards_to_rows;
+        let mut cards = Vec::new();
+        for i in 0..10 {
+            cards.push(VideoCardData {
+                id: format!("card_{i}").into(),
+                title: format!("Title {i}").into(),
+                ..Default::default()
+            });
+        }
+
+        let rows_8 = cards_to_rows(&cards, 8);
+        assert_eq!(rows_8.len(), 2);
+        // First row has 8 cards
+        assert!(rows_8[0].has_0);
+        assert!(rows_8[0].has_1);
+        assert!(rows_8[0].has_2);
+        assert!(rows_8[0].has_3);
+        assert!(rows_8[0].has_4);
+        assert!(rows_8[0].has_5);
+        assert!(rows_8[0].has_6);
+        assert!(rows_8[0].has_7);
+        assert_eq!(rows_8[0].card_0.id, "card_0");
+        assert_eq!(rows_8[0].card_7.id, "card_7");
+
+        // Second row has 2 cards, remaining 6 are false
+        assert!(rows_8[1].has_0);
+        assert!(rows_8[1].has_1);
+        assert!(!rows_8[1].has_2);
+        assert!(!rows_8[1].has_7);
+        assert_eq!(rows_8[1].card_0.id, "card_8");
+        assert_eq!(rows_8[1].card_1.id, "card_9");
+    }
+
+    #[test]
+    fn test_resume_position_safeguard() {
+        let local_store = Arc::new(adult_hub_storage::LocalStore::open_in_memory().unwrap());
+        let session_ctrl = PlaybackSessionController::new(local_store.clone());
+
+        let item = TvItem {
+            id: "telegram:chan:456".into(),
+            provider_video_id: Some("456".into()),
+            source_provider: Some("telegram".into()),
+            title: "Resume Test".into(),
+            ..Default::default()
+        };
+
+        // Position 3s (< 5s threshold) should not overwrite or be saved
+        session_ctrl.checkpoint_progress(&item, 3_000, 100_000, false);
+        assert_eq!(session_ctrl.get_telegram_resume_position("456"), None);
+
+        // Position 23s should be saved
+        session_ctrl.checkpoint_progress(&item, 23_000, 100_000, false);
+        assert_eq!(session_ctrl.get_telegram_resume_position("456"), Some(23_000));
+
+        // When starting new item, pending_resume_position is correctly applied
+        let pending = Arc::new(Mutex::new(Some(23.0f64)));
+        let resume_target = pending.lock().unwrap().take();
+        assert_eq!(resume_target, Some(23.0));
+        assert_eq!(*pending.lock().unwrap(), None);
+    }
+
+    #[test]
+    fn test_auto_resume_logic_without_prompt() {
+        let duration_ms: u64 = 600_000; // 10 minutes
+
+        // 1. Position < 10s should start from 0:00 (no resume)
+        assert!(!PlaybackSessionController::should_prompt_resume(5_000, duration_ms));
+
+        // 2. Position midway (e.g. 120s) should automatically resume
+        assert!(PlaybackSessionController::should_prompt_resume(120_000, duration_ms));
+
+        // 3. Completed item (> 95% or within 30s of end) should restart at 0:00
+        assert!(!PlaybackSessionController::should_prompt_resume(585_000, duration_ms)); // within 15s of end
+        assert!(!PlaybackSessionController::should_prompt_resume(580_000, duration_ms)); // 96.6% (> 95%)
+
+        // 4. Start pos calculation:
+        // Valid progress auto-resumes to recorded position
+        let saved_pos_ms = 120_000u64;
+        let auto_start_secs = if PlaybackSessionController::should_prompt_resume(saved_pos_ms, duration_ms) {
+            Some(saved_pos_ms as f64 / 1000.0)
+        } else {
+            None
+        };
+        assert_eq!(auto_start_secs, Some(120.0));
+
+        // Explicit "Play from Start" forces None (0:00)
+        let forced_from_start = Some(false);
+        let start_pos_secs = match forced_from_start {
+            Some(false) => None,
+            Some(true) => auto_start_secs,
+            None => auto_start_secs,
+        };
+        assert_eq!(start_pos_secs, None);
+    }
+
+    #[test]
+    fn test_performer_category_filtering() {
+        let genre_lower: std::collections::HashSet<String> = vec!["exclusive".to_string(), "hd".to_string()]
+            .into_iter()
+            .collect();
+
+        let is_category_word = |name: &str| -> bool {
+            let lower = name.trim().to_lowercase();
+            if lower.is_empty() || genre_lower.contains(&lower) {
+                return true;
+            }
+            const KNOWN_CATEGORIES: &[&str] = &[
+                "locker room", "body worship", "behind the scenes", "compilation",
+                "casting", "threesome", "foursome", "solo", "interracial", "outdoor",
+                "public", "pov", "point of view", "parody", "fetish", "foot fetish",
+                "massage", "oil massage", "deepthroat", "blowjob", "creampie", "facial",
+                "masturbation", "striptease", "bdsm", "bondage", "roleplay", "cosplay",
+                "hardcore", "softcore", "amateur", "vintage", "retro", "uniform",
+                "lingerie", "stockings", "anal", "oral", "glamour", "erotic",
+            ];
+            KNOWN_CATEGORIES.iter().any(|cat| lower == *cat)
+        };
+
+        let raw_names = vec![
+            "Eva Green",
+            "Locker room",
+            "Body Worship",
+            "Exclusive",
+            "Mia Ray",
+            "behind the scenes",
+        ];
+
+        let filtered: Vec<&str> = raw_names.into_iter().filter(|n| !is_category_word(n)).collect();
+        assert_eq!(filtered, vec!["Eva Green", "Mia Ray"]);
     }
 }

@@ -29,6 +29,14 @@ export struct VideoCardRowData {
     card_2: VideoCardData,
     has_3: bool,
     card_3: VideoCardData,
+    has_4: bool,
+    card_4: VideoCardData,
+    has_5: bool,
+    card_5: VideoCardData,
+    has_6: bool,
+    card_6: VideoCardData,
+    has_7: bool,
+    card_7: VideoCardData,
 }
 
 export component VideoCard inherits Rectangle {
@@ -46,18 +54,19 @@ export component VideoCard inherits Rectangle {
     forward-focus: focus-scope;
     accessible-role: none;
 
-    property <length> artwork-height: min(220px, root.width * 0.5625);
-    property <bool> active: root.is-focused || root.has-focus || touch.has-hover;
-    property <string> source-label: root.item.studio != "" ? root.item.studio : (root.item.provider == "telegram" ? "Telegram" : (root.item.provider == "local" ? "Local" : (root.item.provider == "performer" ? "Performer" : (root.item.provider == "studio" ? "Studio" : (root.item.provider == "genre" ? "Category" : "Jellyfin")))));
+    property <length> artwork-height: root.card-width * 0.5625;
+    property <bool> show-play: touch.has-hover || play-touch.has-hover;
+    property <string> source-label: root.item.studio != "" ? root.item.studio : "";
 
     horizontal-stretch: root.fixed-width ? 0 : 1;
     preferred-width: root.card-width;
-    min-width: root.fixed-width ? root.card-width : 160px;
+    min-width: 160px;
+    max-width: root.fixed-width ? root.card-width : 10000px;
     height: root.artwork-height + 82px;
     border-radius: HubTheme.card-radius;
-    background: root.active ? HubTheme.surface-raised : transparent;
-    border-width: root.has-focus ? 1px : (touch.has-hover ? 1px : 0px);
-    border-color: root.has-focus ? HubTheme.focus-ring : HubTheme.separator;
+    background: (touch.has-hover || play-touch.has-hover) ? HubTheme.surface-raised : ((root.is-focused || root.has-focus) ? #FFFFFF08 : transparent);
+    border-width: (root.is-focused || root.has-focus) ? 2px : (touch.has-hover ? 1px : 0px);
+    border-color: (root.is-focused || root.has-focus) ? HubTheme.focus-ring : HubTheme.separator;
 
     animate background { duration: 150ms; }
     animate border-color { duration: 150ms; }
@@ -136,60 +145,6 @@ export component VideoCard inherits Rectangle {
                         background: HubTheme.accent;
                     }
                 }
-
-                // Discrete retry button on failure
-                if root.item.thumbnail_state == "failed" && root.retry-enabled : Rectangle {
-                    x: parent.width - self.width - 8px;
-                    y: 8px;
-                    height: 24px;
-                    width: 68px;
-                    border-radius: 12px;
-                    background: retry-touch.has-hover ? HubTheme.surface-hover : #00000099;
-                    border-width: retry-focus.has-focus ? 1px : 0px;
-                    border-color: HubTheme.focus-ring;
-                    forward-focus: retry-focus;
-                    accessible-role: button;
-                    accessible-label: "Retry artwork for " + root.item.title;
-                    accessible-action-default => { root.thumbnail-retry(root.item); }
-
-                    HorizontalLayout {
-                        padding-left: 8px;
-                        padding-right: 8px;
-                        spacing: 4px;
-                        alignment: center;
-
-                        Image {
-                            source: @image-url("../../../assets/icons/refresh.svg");
-                            width: 12px;
-                            height: 12px;
-                            image-fit: contain;
-                        }
-
-                        Text {
-                            text: "Retry";
-                            color: HubTheme.text-primary;
-                            font-size: 11px;
-                            font-weight: 600;
-                            vertical-alignment: center;
-                        }
-                    }
-
-                    retry-touch := TouchArea {
-                        clicked => { root.thumbnail-retry(root.item); }
-                    }
-
-                    retry-focus := FocusScope {
-                        width: 0px;
-                        height: 0px;
-                        key-pressed(event) => {
-                            if (event.text == Key.Return || event.text == Key.Space) {
-                                root.thumbnail-retry(root.item);
-                                return accept;
-                            }
-                            reject
-                        }
-                    }
-                }
             }
 
             // Top badges (Watched & Favorite)
@@ -263,8 +218,9 @@ export component VideoCard inherits Rectangle {
                 }
             }
 
-            // Prominent Play action on hover/focus
-            if root.active : Rectangle {
+            // Prominent Play action on mouse hover
+            Rectangle {
+                visible: root.show-play;
                 width: 44px;
                 height: 44px;
                 x: (parent.width - self.width) / 2;
@@ -276,6 +232,7 @@ export component VideoCard inherits Rectangle {
                 accessible-role: button;
                 accessible-label: "Play " + root.item.title;
                 accessible-action-default => { root.play(); }
+                z: 10;
 
                 Image {
                     source: @image-url("../../../assets/icons/play.svg");
@@ -287,6 +244,7 @@ export component VideoCard inherits Rectangle {
                 }
 
                 play-touch := TouchArea {
+                    enabled: root.show-play;
                     clicked => { root.play(); }
                 }
             }
@@ -331,7 +289,7 @@ export component VideoCard inherits Rectangle {
                 height: 38px;
             }
 
-            HorizontalLayout {
+            if root.item.year != "" || root.source-label != "" : HorizontalLayout {
                 height: 16px;
                 spacing: 6px;
                 alignment: start;
@@ -351,7 +309,7 @@ export component VideoCard inherits Rectangle {
                     y: 6px;
                 }
 
-                Text {
+                if root.source-label != "" : Text {
                     text: root.source-label;
                     color: HubTheme.text-muted;
                     font-size: 12px;

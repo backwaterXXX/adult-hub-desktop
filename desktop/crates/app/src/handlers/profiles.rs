@@ -17,9 +17,10 @@ fn profile_cards(items: &[TvItem], server_url: Option<&str>) -> Vec<crate::Video
         .collect()
 }
 
-fn fetch_profile_thumbnails(
+fn fetch_cards_thumbnails(
     weak: slint::Weak<MainWindow>,
-    performer_name: String,
+    target_kind: &'static str,
+    expected_name: String,
     cards: Vec<crate::VideoCardData>,
     token: String,
 ) {
@@ -42,13 +43,23 @@ fn fetch_profile_thumbnails(
                 continue;
             };
             let weak = weak.clone();
-            let performer_name = performer_name.clone();
+            let expected_name = expected_name.clone();
             let _ = slint::invoke_from_event_loop(move || {
-                if let Some(ui) = weak.upgrade()
-                    && ui.get_performer_name() == performer_name.as_str()
-                    && let Some(image) = crate::thumbnails::image_from_bytes(&thumbnail.bytes)
-                {
-                    let model = ui.get_performer_items();
+                let Some(ui) = weak.upgrade() else { return };
+                let matches_name = if target_kind == "performer" {
+                    ui.get_performer_name() == expected_name.as_str()
+                } else {
+                    ui.get_studio_name() == expected_name.as_str()
+                };
+                if !matches_name {
+                    return;
+                }
+                if let Some(image) = crate::thumbnails::image_from_bytes(&thumbnail.bytes) {
+                    let model = if target_kind == "performer" {
+                        ui.get_performer_items()
+                    } else {
+                        ui.get_studio_items()
+                    };
                     let mut items = (0..model.row_count())
                         .filter_map(|row| model.row_data(row))
                         .collect::<Vec<_>>();
@@ -56,7 +67,12 @@ fn fetch_profile_thumbnails(
                         item.thumbnail = image;
                         item.thumbnail_url = thumbnail.url.into();
                         item.has_thumbnail = true;
-                        ui.set_performer_items(Rc::new(slint::VecModel::from(items)).into());
+                        let new_model = Rc::new(slint::VecModel::from(items));
+                        if target_kind == "performer" {
+                            ui.set_performer_items(new_model.into());
+                        } else {
+                            ui.set_studio_items(new_model.into());
+                        }
                     }
                 }
             });
@@ -64,333 +80,389 @@ fn fetch_profile_thumbnails(
     });
 }
 
-pub fn install_stage7_handlers(ui: &MainWindow, ctx: &AppContext) {
+fn load_performer_profile_data(
+    ui: &MainWindow,
+    ctx: &AppContext,
+    p_name: String,
+) {
+    let weak = ui.as_weak();
     let local_store = ctx.local_store.clone();
     let credential_store = ctx.credential_store.clone();
     let jellyfin = ctx.jellyfin.clone();
     let resolver = ctx.resolver.clone();
     let cached_catalog = ctx.cached_catalog.clone();
+    let home_catalog = ctx.home_catalog.clone();
+    let performer_catalog = ctx.performer_catalog.clone();
 
-    // 1. Open Performer Profile Dialog
+    // 1. Find matching local items
+    let mut local_items = Vec::new();
+    {
+        let cached = cached_catalog.lock().unwrap();
+        let home = home_catalog.lock().unwrap();
+        let mut seen = std::collections::HashSet::new();
+        for item in cached.iter().chain(home.iter()) {
+            if item.people.iter().any(|p| p.name.eq_ignore_ascii_case(&p_name))
+                && seen.insert(item.id.clone())
+            {
+                local_items.push(item.clone());
+            }
+        }
+    }
+
+    let session = credential_store.get().ok().flatten();
+    let server_url = session.as_ref().map(|s| s.server_url.clone());
+    let token = session.as_ref().map(|s| s.access_token.clone());
+
+    std::thread::spawn(move || {
+        let mut person_image_bytes = None;
+        let mut person_child_count = None;
+        let mut person_overview = None;
+
+        // 2. Query dedicated Jellyfin Person endpoint: GET /Persons/{name}?userId={userId}
+        if let Some(session) = session.as_ref() {
+            if let Ok(details) = jellyfin.get_person(
+                &session.server_url,
+                &session.user_id,
+                &session.access_token,
+                &p_name,
+            ) {
+                person_overview = details.overview;
+                person_child_count = details.child_count;
+                if let Some(tag) = details.primary_image_tag.as_deref() {
+                    let image_url = JellyfinClient::image_url(
+                        &session.server_url,
+                        &details.id,
+                        "Primary",
+                        crate::thumbnails::person_thumbnail_max_width(),
+                        Some(tag),
+                    );
+                    person_image_bytes = crate::thumbnails::load_cached_image_bytes(&image_url)
+                        .or_else(|| {
+                            crate::thumbnails::fetch_and_cache_image_bytes(
+                                &image_url,
+                                Some(&session.access_token),
+                            )
+                        });
+                }
+            }
+        }
+
+        // 3. Query resolver for bio, nationality, birth, aliases
+        let res_url = local_store
+            .get_setting("resolver_base_url")
+            .ok()
+            .flatten()
+            .or_else(|| server_url.clone())
+            .unwrap_or_default();
+        let bio_info = if !res_url.is_empty() {
+            resolver.get_performer_bio(&res_url, &p_name).ok()
+        } else {
+            None
+        };
+
+        // 4. Query filmography from Jellyfin
+        let remote_result = if let Some(session) = session.as_ref() {
+            let q = GetItemsQuery {
+                person: Some(&p_name),
+                limit: 100,
+                include_item_types: Some("Movie,Video"),
+                sort_by: "SortName",
+                ..Default::default()
+            };
+            jellyfin.get_items(
+                &session.server_url,
+                &session.user_id,
+                &session.access_token,
+                &q,
+            )
+            .map(|page| page.items)
+        } else {
+            Ok(Vec::new())
+        };
+
+        let is_remote_err = remote_result.is_err();
+        let remote_err_msg = remote_result.as_ref().err().map(|e| e.to_string());
+        let remote_items = remote_result.unwrap_or_default();
+
+        // Merge remote + local items deduplicating by id
+        let mut merged = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for item in remote_items.into_iter().chain(local_items.into_iter()) {
+            if seen.insert(item.id.clone()) {
+                merged.push(item);
+            }
+        }
+        let filtered_items = filter_catalog_items(merged, &local_store);
+        *performer_catalog.lock().unwrap() = filtered_items.clone();
+
+        // 5. Update UI on event loop
+        let p_name_clone = p_name.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            if ui.get_performer_name() != p_name_clone.as_str() {
+                return;
+            }
+
+            ui.set_performer_loading(false);
+
+            // Update photo
+            if let Some(bytes) = person_image_bytes.as_deref()
+                && let Some(image) = crate::thumbnails::image_from_bytes(bytes)
+            {
+                ui.set_performer_image(image);
+                ui.set_performer_has_image(true);
+            }
+
+            // Update bio
+            let mut resolved_bio = String::new();
+            if let Some(bio) = bio_info.as_ref().and_then(|b| b.bio.as_ref()) {
+                resolved_bio = bio.clone();
+            } else if let Some(ov) = person_overview.filter(|o| !o.trim().is_empty()) {
+                resolved_bio = ov;
+            }
+            if !resolved_bio.is_empty() {
+                ui.set_performer_has_long_bio(resolved_bio.len() > 220);
+                ui.set_performer_bio(resolved_bio.into());
+            } else {
+                ui.set_performer_has_long_bio(false);
+            }
+
+            if let Some(bio) = bio_info {
+                if let Some(nat) = bio.nationality {
+                    ui.set_performer_nationality(nat.into());
+                }
+                if let Some(birth) = bio.birth {
+                    ui.set_performer_birth(birth.into());
+                }
+                if !bio.aliases.is_empty() {
+                    ui.set_performer_aliases(bio.aliases.join(", ").into());
+                }
+            }
+
+            // Filmography results
+            if filtered_items.is_empty() && is_remote_err {
+                let err_msg = remote_err_msg.unwrap_or_else(|| "Failed to load filmography".to_string());
+                ui.set_performer_error(format!("Could not load filmography: {err_msg}").into());
+                ui.set_performer_movie_count(0);
+                ui.set_performer_items(Rc::new(slint::VecModel::default()).into());
+            } else {
+                ui.set_performer_error("".into());
+                let count = if !filtered_items.is_empty() {
+                    filtered_items.len() as i32
+                } else {
+                    person_child_count.unwrap_or(0) as i32
+                };
+                ui.set_performer_movie_count(count);
+                let cards = profile_cards(&filtered_items, server_url.as_deref());
+                ui.set_performer_items(Rc::new(slint::VecModel::from(cards.clone())).into());
+
+                if let Some(token) = token {
+                    fetch_cards_thumbnails(
+                        weak.clone(),
+                        "performer",
+                        p_name_clone,
+                        cards,
+                        token,
+                    );
+                }
+            }
+        });
+    });
+}
+
+fn load_studio_profile_data(
+    ui: &MainWindow,
+    ctx: &AppContext,
+    s_name: String,
+) {
+    let weak = ui.as_weak();
+    let local_store = ctx.local_store.clone();
+    let credential_store = ctx.credential_store.clone();
+    let jellyfin = ctx.jellyfin.clone();
+    let cached_catalog = ctx.cached_catalog.clone();
+    let home_catalog = ctx.home_catalog.clone();
+    let studio_catalog = ctx.studio_catalog.clone();
+
+    // 1. Find matching local items
+    let mut local_items = Vec::new();
+    {
+        let cached = cached_catalog.lock().unwrap();
+        let home = home_catalog.lock().unwrap();
+        let mut seen = std::collections::HashSet::new();
+        for item in cached.iter().chain(home.iter()) {
+            if item.studios.iter().any(|s| s.eq_ignore_ascii_case(&s_name))
+                && seen.insert(item.id.clone())
+            {
+                local_items.push(item.clone());
+            }
+        }
+    }
+
+    let session = credential_store.get().ok().flatten();
+    let server_url = session.as_ref().map(|s| s.server_url.clone());
+    let token = session.as_ref().map(|s| s.access_token.clone());
+
+    std::thread::spawn(move || {
+        // Query studio items from Jellyfin
+        let remote_result = if let Some(session) = session.as_ref() {
+            let q = GetItemsQuery {
+                studio: Some(&s_name),
+                limit: 100,
+                include_item_types: Some("Movie,Video"),
+                sort_by: "SortName",
+                ..Default::default()
+            };
+            jellyfin.get_items(
+                &session.server_url,
+                &session.user_id,
+                &session.access_token,
+                &q,
+            )
+            .map(|page| page.items)
+        } else {
+            Ok(Vec::new())
+        };
+
+        let is_remote_err = remote_result.is_err();
+        let remote_err_msg = remote_result.as_ref().err().map(|e| e.to_string());
+        let remote_items = remote_result.unwrap_or_default();
+
+        let mut merged = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for item in remote_items.into_iter().chain(local_items.into_iter()) {
+            if seen.insert(item.id.clone()) {
+                merged.push(item);
+            }
+        }
+        let filtered_items = filter_catalog_items(merged, &local_store);
+        *studio_catalog.lock().unwrap() = filtered_items.clone();
+
+        let s_name_clone = s_name.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            if ui.get_studio_name() != s_name_clone.as_str() {
+                return;
+            }
+
+            ui.set_studio_loading(false);
+
+            if filtered_items.is_empty() && is_remote_err {
+                let err_msg = remote_err_msg.unwrap_or_else(|| "Failed to load studio catalog".to_string());
+                ui.set_studio_error(format!("Could not load studio catalog: {err_msg}").into());
+                ui.set_studio_items(Rc::new(slint::VecModel::default()).into());
+            } else {
+                ui.set_studio_error("".into());
+                let cards = profile_cards(&filtered_items, server_url.as_deref());
+                ui.set_studio_items(Rc::new(slint::VecModel::from(cards.clone())).into());
+
+                if let Some(token) = token {
+                    fetch_cards_thumbnails(
+                        weak.clone(),
+                        "studio",
+                        s_name_clone,
+                        cards,
+                        token,
+                    );
+                }
+            }
+        });
+    });
+}
+
+pub fn install_stage7_handlers(ui: &MainWindow, ctx: &AppContext) {
+    // 1. Open Performer Profile Screen
     {
         let weak = ui.as_weak();
-        let cached_catalog = cached_catalog.clone();
-        let credential_store = credential_store.clone();
-        let local_store = local_store.clone();
-        let jellyfin = jellyfin.clone();
-        let resolver = resolver.clone();
-
+        let ctx_prof = ctx.clone();
         ui.on_open_performer_profile(move |name| {
             let Some(ui) = weak.upgrade() else { return };
+            ctx_prof.push_nav_destination(crate::handlers::browsing::current_nav_destination(&ui));
             let name_str = name.to_string();
-            ui.set_performer_name(name.clone());
-            ui.set_performer_movie_count(0);
+            ui.set_performer_name(name);
+            ui.set_performer_loading(true);
+            ui.set_performer_error("".into());
+            ui.set_performer_movie_count(-1);
             ui.set_performer_has_image(false);
             ui.set_performer_image(slint::Image::default());
             ui.set_performer_bio("".into());
+            ui.set_performer_has_long_bio(false);
+            ui.set_performer_bio_expanded(false);
             ui.set_performer_nationality("".into());
             ui.set_performer_birth("".into());
             ui.set_performer_aliases("".into());
+            ui.set_performer_items(Rc::new(slint::VecModel::default()).into());
+            ui.set_active_screen("performer-details".into());
 
-            // Initial catalog match for filmography
-            let matching: Vec<TvItem> = cached_catalog
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|i| {
-                    i.people
-                        .iter()
-                        .any(|p| p.name.eq_ignore_ascii_case(&name_str))
-                })
-                .cloned()
-                .collect();
-
-            let person = cached_catalog
-                .lock()
-                .unwrap()
-                .iter()
-                .flat_map(|item| item.people.iter())
-                .find(|person| person.name.eq_ignore_ascii_case(&name_str))
-                .cloned();
-            if let (Some(person), Ok(Some(session))) = (person, credential_store.get()) {
-                let image_url = JellyfinClient::image_url(
-                    &session.server_url,
-                    &person.id,
-                    "Primary",
-                    crate::thumbnails::person_thumbnail_max_width(),
-                    person.primary_image_tag.as_deref(),
-                );
-                let cached_image = crate::thumbnails::load_cached_image(&image_url);
-                if let Some(image) = cached_image {
-                    ui.set_performer_image(image);
-                    ui.set_performer_has_image(true);
-                } else {
-                    let weak = weak.clone();
-                    let performer_name = name_str.clone();
-                    let token = session.access_token.clone();
-                    std::thread::spawn(move || {
-                        let Some(image_bytes) = crate::thumbnails::fetch_and_cache_image_bytes(
-                            &image_url,
-                            Some(&token),
-                        ) else {
-                            return;
-                        };
-                        let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(ui) = weak.upgrade()
-                                && ui.get_performer_name() == performer_name.as_str()
-                                && let Some(image) =
-                                    crate::thumbnails::image_from_bytes(&image_bytes)
-                            {
-                                ui.set_performer_image(image);
-                                ui.set_performer_has_image(true);
-                            }
-                        });
-                    });
-                }
-            }
-
-            let session = credential_store.get().ok().flatten();
-            let cards = profile_cards(
-                &matching,
-                session.as_ref().map(|session| session.server_url.as_str()),
-            );
-            let model = Rc::new(slint::VecModel::from(cards));
-            ui.set_performer_items(model.into());
-            ui.set_performer_profile_visible(true);
-
-            if let Some(session) = session {
-                let cards = (0..ui.get_performer_items().row_count())
-                    .filter_map(|row| ui.get_performer_items().row_data(row))
-                    .collect();
-                fetch_profile_thumbnails(
-                    weak.clone(),
-                    name_str.clone(),
-                    cards,
-                    session.access_token,
-                );
-            }
-
-            // Fetch performer bio & remote filmography asynchronously
-            let weak = weak.clone();
-            let local_store = local_store.clone();
-            let credential_store = credential_store.clone();
-            let jellyfin = jellyfin.clone();
-            let resolver = resolver.clone();
-            let p_name = name_str.clone();
-
-            std::thread::spawn(move || {
-                let session = credential_store.get().ok().flatten();
-                if let Some(session) = session.as_ref() {
-                    let person_query = GetItemsQuery {
-                        search_term: Some(&p_name),
-                        sort_by: "SortName",
-                        limit: 20,
-                        include_item_types: Some("Person"),
-                        person_types: Some("Actor"),
-                        ..Default::default()
-                    };
-                    if let Ok(page) = jellyfin.get_items(
-                        &session.server_url,
-                        &session.user_id,
-                        &session.access_token,
-                        &person_query,
-                    ) && let Some(person) = page
-                        .items
-                        .into_iter()
-                        .find(|person| person.title.eq_ignore_ascii_case(&p_name))
-                    {
-                        let person_name = p_name.clone();
-                        let weak_person = weak.clone();
-                        let image_url = JellyfinClient::image_url(
-                            &session.server_url,
-                            &person.id,
-                            "Primary",
-                            crate::thumbnails::person_thumbnail_max_width(),
-                            person.primary_image_tag.as_deref(),
-                        );
-                        let image_bytes = crate::thumbnails::load_cached_image_bytes(&image_url)
-                            .or_else(|| {
-                                crate::thumbnails::fetch_and_cache_image_bytes(
-                                    &image_url,
-                                    Some(&session.access_token),
-                                )
-                            });
-                        let movie_count = person.child_count.unwrap_or(0) as i32;
-                        let overview = person.overview.unwrap_or_default();
-                        let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(ui) = weak_person.upgrade()
-                                && ui.get_performer_name() == person_name.as_str()
-                            {
-                                ui.set_performer_movie_count(movie_count);
-                                if ui.get_performer_bio().is_empty() && !overview.is_empty() {
-                                    ui.set_performer_bio(overview.into());
-                                }
-                                if let Some(image) = image_bytes
-                                    .as_deref()
-                                    .and_then(crate::thumbnails::image_from_bytes)
-                                {
-                                    ui.set_performer_image(image);
-                                    ui.set_performer_has_image(true);
-                                }
-                            }
-                        });
-                    }
-                }
-
-                let res_url = local_store
-                    .get_setting("resolver_base_url")
-                    .ok()
-                    .flatten()
-                    .or_else(|| credential_store.get().ok().flatten().map(|s| s.server_url))
-                    .unwrap_or_default();
-
-                if !res_url.is_empty() {
-                    if let Ok(bio_dto) = resolver.get_performer_bio(&res_url, &p_name) {
-                        let weak2 = weak.clone();
-                        let profile_name_for_bio = p_name.clone();
-                        slint::invoke_from_event_loop(move || {
-                            let Some(ui) = weak2.upgrade() else { return };
-                            if ui.get_performer_name() != profile_name_for_bio.as_str() {
-                                return;
-                            }
-                            if let Some(bio) = bio_dto.bio {
-                                ui.set_performer_bio(bio.into());
-                            }
-                            if let Some(nat) = bio_dto.nationality {
-                                ui.set_performer_nationality(nat.into());
-                            }
-                            if let Some(birth) = bio_dto.birth {
-                                ui.set_performer_birth(birth.into());
-                            }
-                            if !bio_dto.aliases.is_empty() {
-                                ui.set_performer_aliases(bio_dto.aliases.join(", ").into());
-                            }
-                        })
-                        .ok();
-                    }
-                }
-
-                // If logged in to Jellyfin, fetch person filmography
-                if let Ok(Some(sess)) = credential_store.get() {
-                    let q = GetItemsQuery {
-                        person: Some(&p_name),
-                        sort_by: "SortName",
-                        limit: 50,
-                        ..Default::default()
-                    };
-                    if let Ok(page) =
-                        jellyfin.get_items(&sess.server_url, &sess.user_id, &sess.access_token, &q)
-                    {
-                        let filtered = filter_catalog_items(page.items, &local_store);
-                        let server_url = sess.server_url.clone();
-                        let token = sess.access_token.clone();
-                        let weak2 = weak.clone();
-                        let image_weak = weak.clone();
-                        let profile_name_for_movies = p_name.clone();
-                        slint::invoke_from_event_loop(move || {
-                            let Some(ui) = weak2.upgrade() else { return };
-                            if ui.get_performer_name() != profile_name_for_movies.as_str() {
-                                return;
-                            }
-                            let cards = profile_cards(&filtered, Some(&server_url));
-                            let model = Rc::new(slint::VecModel::from(cards));
-                            ui.set_performer_items(model.into());
-                            let model = ui.get_performer_items();
-                            let image_cards = (0..model.row_count())
-                                .filter_map(|index| model.row_data(index))
-                                .collect();
-                            fetch_profile_thumbnails(
-                                image_weak,
-                                profile_name_for_movies,
-                                image_cards,
-                                token,
-                            );
-                        })
-                        .ok();
-                    }
-                }
-            });
+            load_performer_profile_data(&ui, &ctx_prof, name_str);
         });
     }
 
-    // 2. Close Performer Profile Dialog
+    // 2. Retry Performer Profile
+    {
+        let weak = ui.as_weak();
+        let ctx_retry = ctx.clone();
+        ui.on_retry_performer_profile(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let name_str = ui.get_performer_name().to_string();
+            if name_str.is_empty() {
+                return;
+            }
+            ui.set_performer_loading(true);
+            ui.set_performer_error("".into());
+            load_performer_profile_data(&ui, &ctx_retry, name_str);
+        });
+    }
+
+    // 3. Close Performer Profile / Navigate Back
     {
         let weak = ui.as_weak();
         ui.on_close_performer_profile(move || {
             if let Some(ui) = weak.upgrade() {
-                ui.set_performer_profile_visible(false);
+                ui.invoke_navigate_back();
             }
         });
     }
 
-    // 3. Open Studio Profile Dialog
+    // 4. Open Studio Profile Screen
     {
         let weak = ui.as_weak();
-        let cached_catalog = cached_catalog.clone();
-        let credential_store = credential_store.clone();
-        let local_store = local_store.clone();
-        let jellyfin = jellyfin.clone();
-
+        let ctx_prof = ctx.clone();
         ui.on_open_studio_profile(move |name| {
             let Some(ui) = weak.upgrade() else { return };
+            ctx_prof.push_nav_destination(crate::handlers::browsing::current_nav_destination(&ui));
             let studio_str = name.to_string();
-            ui.set_studio_name(name.clone());
+            ui.set_studio_name(name);
+            ui.set_studio_loading(true);
+            ui.set_studio_error("".into());
+            ui.set_studio_items(Rc::new(slint::VecModel::default()).into());
+            ui.set_active_screen("studio-details".into());
 
-            let matching: Vec<TvItem> = cached_catalog
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|i| {
-                    i.studios
-                        .iter()
-                        .any(|s| s.eq_ignore_ascii_case(&studio_str))
-                })
-                .cloned()
-                .collect();
-            let cards = matching.iter().map(tv_item_to_card).collect::<Vec<_>>();
-            let model = Rc::new(slint::VecModel::from(cards));
-            ui.set_studio_items(model.into());
-            ui.set_studio_profile_visible(true);
-
-            // Fetch studio releases from Jellyfin if connected
-            let weak = weak.clone();
-            let local_store = local_store.clone();
-            let credential_store = credential_store.clone();
-            let jellyfin = jellyfin.clone();
-            let s_name = studio_str.clone();
-
-            std::thread::spawn(move || {
-                if let Ok(Some(sess)) = credential_store.get() {
-                    let q = GetItemsQuery {
-                        studio: Some(&s_name),
-                        sort_by: "SortName",
-                        limit: 50,
-                        ..Default::default()
-                    };
-                    if let Ok(page) =
-                        jellyfin.get_items(&sess.server_url, &sess.user_id, &sess.access_token, &q)
-                    {
-                        let filtered = filter_catalog_items(page.items, &local_store);
-                        let weak2 = weak.clone();
-                        slint::invoke_from_event_loop(move || {
-                            let Some(ui) = weak2.upgrade() else { return };
-                            let cards = filtered.iter().map(tv_item_to_card).collect::<Vec<_>>();
-                            let model = Rc::new(slint::VecModel::from(cards));
-                            ui.set_studio_items(model.into());
-                        })
-                        .ok();
-                    }
-                }
-            });
+            load_studio_profile_data(&ui, &ctx_prof, studio_str);
         });
     }
 
-    // 4. Close Studio Profile Dialog
+    // 5. Retry Studio Profile
+    {
+        let weak = ui.as_weak();
+        let ctx_retry = ctx.clone();
+        ui.on_retry_studio_profile(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let studio_str = ui.get_studio_name().to_string();
+            if studio_str.is_empty() {
+                return;
+            }
+            ui.set_studio_loading(true);
+            ui.set_studio_error("".into());
+            load_studio_profile_data(&ui, &ctx_retry, studio_str);
+        });
+    }
+
+    // 6. Close Studio Profile / Navigate Back
     {
         let weak = ui.as_weak();
         ui.on_close_studio_profile(move || {
             if let Some(ui) = weak.upgrade() {
-                ui.set_studio_profile_visible(false);
+                ui.invoke_navigate_back();
             }
         });
     }

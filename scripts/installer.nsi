@@ -40,13 +40,8 @@ Section "Adult Hub Desktop Core" SecCore
     File "${SRCDIR}/NOTICES.txt"
     File "${SRCDIR}/LICENSE"
 
-    ${If} ${FileExists} "${BINDIR}/sample.mp4"
-        File "${BINDIR}/sample.mp4"
-    ${EndIf}
-
-    ${If} ${FileExists} "${BINDIR}/README.txt"
-        File "${BINDIR}/README.txt"
-    ${EndIf}
+    File /nonfatal "${BINDIR}/sample.mp4"
+    File /nonfatal "${BINDIR}/README.txt"
 
     ; Registry install location
     WriteRegStr HKCU "Software\AdultHubDesktop" "InstallDir" "$INSTDIR"

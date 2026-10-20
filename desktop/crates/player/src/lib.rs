@@ -15,7 +15,6 @@ mod sys;
 
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::path::PathBuf;
-use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -148,11 +147,52 @@ pub struct PlaybackStats {
     pub vo: Option<String>,
     pub cache_duration_secs: Option<f64>,
     pub paused_for_cache: bool,
+    pub file_size: Option<u64>,
+}
+
+pub fn format_file_size(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let b = bytes as f64;
+    if b >= GB {
+        format!("{:.2} GB", b / GB)
+    } else if b >= MB {
+        format!("{:.1} MB", b / MB)
+    } else if b >= KB {
+        format!("{:.0} KB", b / KB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+pub fn sanitize_media_url(raw: &str) -> String {
+    let without_query = match raw.find('?') {
+        Some(idx) => &raw[..idx],
+        None => raw,
+    };
+    let without_hash = match without_query.find('#') {
+        Some(idx) => &without_query[..idx],
+        None => without_query,
+    };
+    if let Some(pos) = without_hash.find("://") {
+        let scheme = &without_hash[..pos + 3];
+        let rest = &without_hash[pos + 3..];
+        if let Some(at_idx) = rest.find('@') {
+            format!("{scheme}{}", &rest[at_idx + 1..])
+        } else {
+            without_hash.to_string()
+        }
+    } else {
+        without_hash.to_string()
+    }
 }
 
 impl PlaybackStats {
     pub fn to_hud_text(&self) -> String {
         let mut lines = Vec::new();
+        lines.push("[ Stream & Media ]".to_string());
+
         let res = match (self.width, self.height) {
             (Some(w), Some(h)) if w > 0 && h > 0 => format!("{w}x{h}"),
             _ => "Unknown".to_string(),
@@ -174,6 +214,23 @@ impl PlaybackStats {
         };
         lines.push(format!("Decoder: {hw_label}"));
 
+        if let Some(bytes) = self.file_size {
+            lines.push(format!("File size: {}", format_file_size(bytes)));
+        } else {
+            lines.push("File size: Unavailable".to_string());
+        }
+
+        if let Some(format) = &self.file_format {
+            lines.push(format!("Container: {format}"));
+        }
+
+        if let Some(pixelformat) = &self.pixelformat {
+            lines.push(format!("Pixel format: {pixelformat}"));
+        }
+
+        lines.push("".to_string());
+        lines.push("[ Playback & Buffer ]".to_string());
+
         if let Some(cache_secs) = self.cache_duration_secs {
             let state = if self.paused_for_cache {
                 " (Buffering...)"
@@ -192,17 +249,17 @@ impl PlaybackStats {
         }
 
         if let Some(bitrate) = self.video_bitrate {
-            lines.push(format!("Video Bitrate: {:.0} kbit/s", bitrate / 1000.0));
+            if bitrate > 0.0 {
+                lines.push(format!("Video Bitrate: {:.0} kbit/s", bitrate / 1000.0));
+            } else {
+                lines.push("Video Bitrate: 0 kbit/s (Paused)".to_string());
+            }
         } else {
             lines.push("Video Bitrate: N/A".to_string());
         }
 
         let dropped = self.dropped_frames.unwrap_or(0);
         lines.push(format!("Dropped Frames: {dropped}"));
-
-        if let Some(pixelformat) = &self.pixelformat {
-            lines.push(format!("Pixel format: {pixelformat}"));
-        }
 
         if let (Some(primaries), Some(gamma)) = (&self.color_primaries, &self.gamma) {
             lines.push(format!("Color: {primaries} / {gamma} (SDR mapped)"));
@@ -249,6 +306,9 @@ impl Player {
 
         // Isolated playback: never inherit the user's mpv configuration,
         // scripts or key bindings.
+        let hwdec_mode = std::env::var("ADULT_HUB_HWDEC").unwrap_or_else(|_| "auto-copy".into());
+        let ao_mode = std::env::var("ADULT_HUB_AO").ok();
+        let ao_pcm_file = std::env::var("ADULT_HUB_AO_PCM_FILE").ok();
         for (name, value) in [
             ("config", "no"),
             ("load-scripts", "no"),
@@ -258,7 +318,7 @@ impl Player {
             ("idle", "yes"),
             ("vo", "libmpv"),
             ("gpu-api", "opengl"),
-            ("hwdec", "auto-safe"),
+            ("hwdec", hwdec_mode.as_str()),
             ("audio-fallback-to-null", "yes"),
             ("keep-open", "no"),
             ("audio-client-name", "Adult Hub Desktop"),
@@ -276,6 +336,19 @@ impl Player {
             ("video-sync", "audio"),
         ] {
             if let Err(error) = unsafe { set_option_raw(&api, handle, name, value) } {
+                unsafe { (api.mpv_terminate_destroy)(handle) };
+                return Err(error);
+            }
+        }
+
+        if let Some(ao) = &ao_mode {
+            if let Err(error) = unsafe { set_option_raw(&api, handle, "ao", ao.as_str()) } {
+                unsafe { (api.mpv_terminate_destroy)(handle) };
+                return Err(error);
+            }
+        }
+        if let Some(pcm_file) = &ao_pcm_file {
+            if let Err(error) = unsafe { set_option_raw(&api, handle, "ao-pcm-file", pcm_file.as_str()) } {
                 unsafe { (api.mpv_terminate_destroy)(handle) };
                 return Err(error);
             }
@@ -366,16 +439,34 @@ impl Player {
         if request.url.trim().is_empty() {
             return Err(PlayerError::InvalidArgument("empty media URL".into()));
         }
-        self.set_property_string("http-header-fields", &request.headers.join(","))?;
-        match request.start_position {
+        if !request.headers.is_empty() {
+            if let Err(e) = self.set_property_string("http-header-fields", &request.headers.join(",")) {
+                return Err(PlayerError::Mpv(format!(
+                    "operation: set http headers, stage: mpv_set_property_string, detail: {e}"
+                )));
+            }
+        }
+        let _ = self.set_pause(false);
+        let result = match request.start_position {
             Some(seconds) if seconds > 0.0 => self.command(&[
                 "loadfile",
                 &request.url,
                 "replace",
+                "-1",
                 &format!("start={seconds:.3}"),
             ]),
             _ => self.command(&["loadfile", &request.url, "replace"]),
-        }
+        };
+        result.map_err(|e| {
+            let sanitized_url = sanitize_media_url(&request.url);
+            let has_start = request
+                .start_position
+                .map(|s| format!("start={s:.3}s"))
+                .unwrap_or_else(|| "none".into());
+            PlayerError::Mpv(format!(
+                "operation: load media stream, stage: mpv loadfile command, start_pos: {has_start}, target: {sanitized_url}, detail: {e}"
+            ))
+        })
     }
 
     pub fn stop(&self) -> Result<()> {
@@ -585,17 +676,33 @@ impl Player {
     }
 
     pub fn stats(&self) -> PlaybackStats {
-        let width = self.get_u32("width");
-        let height = self.get_u32("height");
+        let width = self
+            .get_u32("width")
+            .filter(|w| *w > 0)
+            .or_else(|| self.get_u32("dwidth").filter(|w| *w > 0))
+            .or_else(|| self.get_u32("video-params/w").filter(|w| *w > 0));
+        let height = self
+            .get_u32("height")
+            .filter(|h| *h > 0)
+            .or_else(|| self.get_u32("dheight").filter(|h| *h > 0))
+            .or_else(|| self.get_u32("video-params/h").filter(|h| *h > 0));
         let cache_duration_secs = self.get_f64("demuxer-cache-duration");
         let paused_for_cache = self.get_string("paused-for-cache").as_deref() == Some("yes");
 
+        let video_codec = self
+            .get_string("video-codec")
+            .or_else(|| self.get_string("video-format"));
+        let audio_codec = self
+            .get_string("audio-codec-name")
+            .or_else(|| self.get_string("audio-codec"))
+            .or_else(|| self.get_string("audio-format"));
+
         PlaybackStats {
-            video_codec: self.get_string("video-codec"),
-            audio_codec: self.get_string("audio-codec-name"),
+            video_codec: video_codec.clone(),
+            audio_codec,
             width,
             height,
-            decoder: self.get_string("video-codec"),
+            decoder: self.get_string("current-decoder").or(video_codec),
             hwdec: self.current_hwdec(),
             dropped_frames: self
                 .get_string("decoder-frame-drop-count")
@@ -609,6 +716,7 @@ impl Player {
             vo: self.get_string("current-vo"),
             cache_duration_secs,
             paused_for_cache,
+            file_size: self.get_u64("file-size"),
         }
     }
 
@@ -630,6 +738,10 @@ impl Player {
     }
 
     pub fn get_u32(&self, name: &str) -> Option<u32> {
+        self.get_string(name)?.parse().ok()
+    }
+
+    pub fn get_u64(&self, name: &str) -> Option<u64> {
         self.get_string(name)?.parse().ok()
     }
 
@@ -795,7 +907,7 @@ pub struct RenderContext {
     context: *mut sys::mpv_render_context,
     flip_y: bool,
     update_callback: Option<Box<UpdateCallback>>,
-    _player: Rc<Player>,
+    _player: Arc<Player>,
 }
 
 struct UpdateCallback(Box<dyn Fn() + Send>);
@@ -805,7 +917,7 @@ pub type ProcAddressFn<'a> = dyn Fn(&CStr) -> *const c_void + 'a;
 impl RenderContext {
     /// Must be called during `RenderingSetup` with the OpenGL context current.
     pub fn new(
-        player: &Rc<Player>,
+        player: &Arc<Player>,
         get_proc_address: &ProcAddressFn<'_>,
         flip_y: bool,
     ) -> Result<Self> {
@@ -854,7 +966,7 @@ impl RenderContext {
             context,
             flip_y,
             update_callback: None,
-            _player: Rc::clone(player),
+            _player: Arc::clone(player),
         })
     }
 
@@ -879,14 +991,28 @@ impl RenderContext {
         self.update_callback = Some(boxed);
     }
 
+    /// Standard OpenGL GL_RGBA8 internal format (0x8058).
+    pub const GL_RGBA8: i32 = 0x8058;
+
     /// Render the current mpv frame into `fbo`. The framebuffer and viewport
     /// must already be bound and set by the caller.
     pub fn render(&self, fbo: i32, width: u32, height: u32) -> Result<()> {
+        self.render_with_format(fbo, width, height, Self::GL_RGBA8)
+    }
+
+    /// Render the current mpv frame into `fbo` with an explicit texture internal format.
+    pub fn render_with_format(
+        &self,
+        fbo: i32,
+        width: u32,
+        height: u32,
+        internal_format: i32,
+    ) -> Result<()> {
         let mut fbo = sys::mpv_opengl_fbo {
             fbo,
             w: width as c_int,
             h: height as c_int,
-            internal_format: 0,
+            internal_format,
         };
         let mut flip_y: c_int = i32::from(self.flip_y);
         let mut params = [
@@ -1149,6 +1275,7 @@ mod tests {
         assert!(empty_hud.contains("Resolution: Unknown"));
         assert!(empty_hud.contains("Buffer Cache: N/A"));
         assert!(empty_hud.contains("Container FPS: N/A"));
+        assert!(empty_hud.contains("File size: Unavailable"));
 
         let populated = PlaybackStats {
             width: Some(1920),
@@ -1167,12 +1294,14 @@ mod tests {
             file_format: Some("mp4".into()),
             cache_duration_secs: Some(14.5),
             paused_for_cache: false,
+            file_size: Some(104_857_600),
         };
         let hud = populated.to_hud_text();
         assert!(hud.contains("Resolution: 1920x1080"));
         assert!(hud.contains("Video Codec: h264"));
         assert!(hud.contains("Audio Codec: aac"));
         assert!(hud.contains("Decoder: h264_vaapi (HW: vaapi)"));
+        assert!(hud.contains("File size: 100.0 MB"));
         assert!(hud.contains("Buffer Cache: 14.5 s"));
         assert!(hud.contains("Container FPS: 60.00"));
         assert!(hud.contains("Video Bitrate: 5000 kbit/s"));
@@ -1230,5 +1359,24 @@ mod tests {
         assert_eq!(track.id, 1);
         assert_eq!(track.kind, TrackKind::Audio);
         assert!(track.selected);
+    }
+
+    #[test]
+    fn test_pcm_audio_output() {
+        unsafe {
+            std::env::set_var("ADULT_HUB_AO", "pcm");
+            std::env::set_var("ADULT_HUB_AO_PCM_FILE", "test_ao.wav");
+        }
+        let player = Player::new();
+        match player {
+            Ok(p) => {
+                let _ = p.load_with_start("desktop/sample.mp4", &[], None);
+                std::thread::sleep(std::time::Duration::from_millis(600));
+                let _ = std::fs::remove_file("test_ao.wav");
+            }
+            Err(e) => {
+                eprintln!("Player::new failed: {e}");
+            }
+        }
     }
 }
