@@ -11,7 +11,7 @@ rust-version = "1.85"
 [workspace.dependencies]
 slint = { version = "=1.18.1", features = ["backend-winit", "renderer-femtovg", "unstable-winit-030"] }
 slint-build = "=1.18.1"
-glow = "0.16"
+glow = "0.18"
 libloading = "0.9"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
