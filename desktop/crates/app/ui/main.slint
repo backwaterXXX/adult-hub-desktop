@@ -1746,7 +1746,277 @@ export component MainWindow inherits Window {
     }
 
 
-    HorizontalLayout {
+    // Root keyboard scope: ancestor of every element, so its capture-* handlers
+    // observe modifier keys regardless of which widget holds focus.
+    keys := FocusScope {
+        x: 0; y: 0;
+        width: 100%; height: 100%;
+
+        changed has-focus => {
+            if !self.has-focus {
+                KeyboardState.ctrl-held = false;
+            }
+        }
+
+        key-released(event) => {
+            if (!event.modifiers.control) {
+                KeyboardState.ctrl-held = false;
+            }
+            EventResult.accept
+        }
+
+        key-pressed(event) => {
+            KeyboardState.ctrl-held = event.modifiers.control;
+            if (KeyboardState.text-input-focused && event.text != Key.Escape) {
+                return reject;
+            }
+            // Panic Exit: Ctrl+Shift+Q
+            if (event.modifiers.control && event.modifiers.shift && (event.text == "q" || event.text == "Q")) {
+                root.panic-exit();
+                return accept;
+            }
+
+            if (event.modifiers.control && (event.text == "f" || event.text == "F") && root.active-screen == "browse") {
+                if (root.active-category == "Performers" && !root.is-catalog-search-results) {
+                    root.search-focus-target = "performer";
+                } else {
+                    root.search-focus-target = "catalog";
+                }
+                root.search-focus-sequence += 1;
+                return accept;
+            }
+
+            if (root.active-screen == "player" && root.player-media-loaded) {
+                root.player-controls-visible = true;
+                player-controls-hide-timer.restart();
+            }
+
+            // Quick navigation (Stage 9)
+            if (event.text == "1") {
+                root.switch-screen("browse");
+                return accept;
+            }
+            if (event.text == "2") {
+                root.switch-screen("channels");
+                return accept;
+            }
+            if (event.text == "3") {
+                root.switch-screen("player");
+                return accept;
+            }
+            if (event.text == "4") {
+                root.switch-screen("settings");
+                return accept;
+            }
+
+            // Android TV Grid Navigation: Arrow keys & Return
+            if (event.text == Key.LeftArrow) {
+                if (root.active-screen == "browse") {
+                    if (root.focused-card-index > 0) {
+                        root.focused-card-index -= 1;
+                    }
+                    return accept;
+                }
+                if (root.active-screen == "channels") {
+                    if (root.focused-channel-card-index > 0) {
+                        root.focused-channel-card-index -= 1;
+                    }
+                    return accept;
+                }
+                if (root.active-screen == "player" && root.player-media-loaded) {
+                    root.seek-with-acceleration(-1);
+                    return accept;
+                }
+            }
+            if (event.text == Key.RightArrow) {
+                if (root.active-screen == "browse") {
+                    if (root.focused-card-index + 1 < root.catalog-items.length) {
+                        root.focused-card-index += 1;
+                    }
+                    return accept;
+                }
+                if (root.active-screen == "channels") {
+                    if (root.focused-channel-card-index + 1 < root.channel-items.length) {
+                        root.focused-channel-card-index += 1;
+                    }
+                    return accept;
+                }
+                if (root.active-screen == "player" && root.player-media-loaded) {
+                    root.seek-with-acceleration(1);
+                    return accept;
+                }
+            }
+            if (event.text == Key.UpArrow) {
+                if (root.active-screen == "browse") {
+                    if (root.focused-card-index >= root.catalog-column-count) {
+                        root.focused-card-index -= root.catalog-column-count;
+                    }
+                    return accept;
+                }
+                if (root.active-screen == "channels") {
+                    if (root.focused-channel-card-index >= root.channel-column-count) {
+                        root.focused-channel-card-index -= root.channel-column-count;
+                    }
+                    return accept;
+                }
+                if (root.active-screen == "player" && root.player-media-loaded) {
+                    root.adjust-volume(5.0);
+                    return accept;
+                }
+            }
+            if (event.text == Key.DownArrow) {
+                if (root.active-screen == "browse") {
+                    if (root.focused-card-index + root.catalog-column-count < root.catalog-items.length) {
+                        root.focused-card-index += root.catalog-column-count;
+                    }
+                    return accept;
+                }
+                if (root.active-screen == "channels") {
+                    if (root.focused-channel-card-index + root.channel-column-count < root.channel-items.length) {
+                        root.focused-channel-card-index += root.channel-column-count;
+                    }
+                    return accept;
+                }
+                if (root.active-screen == "player" && root.player-media-loaded) {
+                    root.adjust-volume(-5.0);
+                    return accept;
+                }
+            }
+            if (event.text == Key.Return) {
+                if (root.active-screen == "browse") {
+                    root.activate-focused-card();
+                    return accept;
+                }
+                if (root.active-screen == "channels") {
+                    root.activate-focused-channel-card();
+                    return accept;
+                }
+            }
+
+            // Player controls are active only for a loaded source.
+            if (root.active-screen == "player" && root.player-media-loaded) {
+            if (event.text == Key.Space) {
+                root.toggle-play();
+                return accept;
+            }
+            if (event.text == "[" || event.text == "{") {
+                root.seek-relative(-30.0);
+                return accept;
+            }
+            if (event.text == "]" || event.text == "}") {
+                root.seek-relative(30.0);
+                return accept;
+            }
+            if (event.text == "f" || event.text == "F") {
+                root.toggle-fullscreen();
+                return accept;
+            }
+            if (event.text == "i" || event.text == "I") {
+                root.toggle-hud();
+                return accept;
+            }
+            if (event.text == "m" || event.text == "M" || event.text == "0") {
+                root.toggle-mute();
+                return accept;
+            }
+            if (event.text == "s" || event.text == "S" || event.text == "," || event.text == "<") {
+                root.cycle-speed();
+                return accept;
+            }
+            if (event.text == "b" || event.text == "B") {
+                root.cycle-buffer-profile();
+                return accept;
+            }
+            if (event.text == "h" || event.text == "H") {
+                root.toggle-hwdec();
+                return accept;
+            }
+            if (event.text == "n" || event.text == "N") {
+                root.play-random();
+                return accept;
+            }
+            }
+            if (event.text == Key.Escape) {
+                if (root.player-volume-flyout-open) {
+                    root.player-volume-flyout-open = false;
+                    return accept;
+                }
+                if (root.download-panel-open) {
+                    root.download-panel-open = false;
+                    return accept;
+                }
+                if (root.player-more-controls-visible) {
+                    root.player-more-controls-visible = false;
+                    return accept;
+                }
+                if (root.licenses-visible) {
+                    root.licenses-visible = false;
+                    return accept;
+                }
+                if (root.confirm-dialog-visible) {
+                    root.confirm-dialog-visible = false;
+                    return accept;
+                }
+                if (root.catalog-filter-picker-visible) {
+                    root.catalog-filter-picker-visible = false;
+                    return accept;
+                }
+                if (root.playback-ended-visible) {
+                    root.autoplay-countdown-sec = 0;
+                    root.playback-ended-visible = false;
+                    root.active-screen = "browse";
+                    return accept;
+                }
+                if (root.toast-visible) {
+                    root.toast-visible = false;
+                    return accept;
+                }
+                if (root.resolver-prompt-dialog-visible) {
+                    root.resolver-prompt-dialog-visible = false;
+                    return accept;
+                }
+                if (root.login-modal-visible) {
+                    root.login-modal-visible = false;
+                    return accept;
+                }
+                if (root.performer-profile-visible) {
+                    root.close-performer-profile();
+                    return accept;
+                }
+                if (root.studio-profile-visible) {
+                    root.close-studio-profile();
+                    return accept;
+                }
+                if (root.browse-subnav-menu-open) {
+                    root.browse-subnav-menu-open = false;
+                    return accept;
+                }
+                if (root.detail-visible) {
+                    root.detail-more-actions-visible = false;
+                    root.close-item-detail();
+                    return accept;
+                }
+                root.escape-pressed();
+                return accept;
+            }
+            reject
+        }
+
+        capture-key-pressed(event) => {
+            if (event.modifiers.control) {
+                KeyboardState.ctrl-held = true;
+            }
+            EventResult.reject
+        }
+
+        capture-key-released(event) => {
+            if (!event.modifiers.control) {
+                KeyboardState.ctrl-held = false;
+            }
+            EventResult.reject
+        }
+
+        HorizontalLayout {
         spacing: 0px;
 
         // Persistent desktop navigation rail.
@@ -6562,10 +6832,10 @@ export component MainWindow inherits Window {
             }
 
         }
-    }
+        }
 
-    // Scrollable third-party license notices
-    if root.licenses-visible : Rectangle {
+        // Scrollable third-party license notices
+        if root.licenses-visible : Rectangle {
         z: 110;
         width: 100%;
         height: 100%;
@@ -6634,12 +6904,12 @@ export component MainWindow inherits Window {
                 }
             }
         }
-    }
+        }
 
-    // Modal overlays for video details, performer, and studio profiles have been replaced by full screens.
+        // Modal overlays for video details, performer, and studio profiles have been replaced by full screens.
 
 
-    end-of-playback-timer := Timer {
+        end-of-playback-timer := Timer {
         interval: 1s;
         running: root.playback-ended-visible && root.autoplay-countdown-sec > 0;
         triggered() => {
@@ -6651,9 +6921,9 @@ export component MainWindow inherits Window {
                 root.autoplay-countdown-sec -= 1;
             }
         }
-    }
+        }
 
-    player-controls-hide-timer := Timer {
+        player-controls-hide-timer := Timer {
         interval: 3s;
         running: root.active-screen == "player" && root.player-media-loaded && root.playing && root.player-controls-visible && !root.player-volume-flyout-open && !root.player-more-controls-visible;
         triggered() => {
@@ -6661,9 +6931,9 @@ export component MainWindow inherits Window {
                 root.player-controls-visible = false;
             }
         }
-    }
+        }
 
-    if root.playback-ended-visible : Rectangle {
+        if root.playback-ended-visible : Rectangle {
         width: 100%;
         height: 100%;
         background: #000000d9;
@@ -6740,9 +7010,9 @@ export component MainWindow inherits Window {
                 }
             }
         }
-    }
+        }
 
-    if root.confirm-dialog-visible : Rectangle {
+        if root.confirm-dialog-visible : Rectangle {
         width: 100%;
         height: 100%;
         background: #000000bb;
@@ -6806,12 +7076,12 @@ export component MainWindow inherits Window {
                 }
             }
         }
-    }
+        }
 
-    // ==========================================
-    // CLEAR TEXT HTTP CONSENT MODAL
-    // ==========================================
-    if root.cleartext-consent-visible : Rectangle {
+        // ==========================================
+        // CLEAR TEXT HTTP CONSENT MODAL
+        // ==========================================
+        if root.cleartext-consent-visible : Rectangle {
         width: 100%;
         height: 100%;
         background: #000000c0;
@@ -6862,12 +7132,12 @@ export component MainWindow inherits Window {
                 }
             }
         }
-    }
+        }
 
-    // ==========================================
-    // RESOLVER PROMPT DIALOG MODAL
-    // ==========================================
-    if root.resolver-prompt-dialog-visible : Rectangle {
+        // ==========================================
+        // RESOLVER PROMPT DIALOG MODAL
+        // ==========================================
+        if root.resolver-prompt-dialog-visible : Rectangle {
         width: 100%;
         height: 100%;
         background: #000000b0;
@@ -6941,12 +7211,12 @@ export component MainWindow inherits Window {
                 }
             }
         }
-    }
+        }
 
-    // ==========================================
-    // LOGIN / SESSION EXPIRED MODAL
-    // ==========================================
-    if root.login-modal-visible : Rectangle {
+        // ==========================================
+        // LOGIN / SESSION EXPIRED MODAL
+        // ==========================================
+        if root.login-modal-visible : Rectangle {
         width: 100%;
         height: 100%;
         background: #000000c0;
@@ -7086,12 +7356,12 @@ export component MainWindow inherits Window {
                 }
             }
         }
-    }
+        }
 
-    // ==========================================
-    // TOAST NOTIFICATION OVERLAY
-    // ==========================================
-    if root.toast-visible : Toast {
+        // ==========================================
+        // TOAST NOTIFICATION OVERLAY
+        // ==========================================
+        if root.toast-visible : Toast {
         x: (parent.width - self.width) / 2;
         y: root.active-screen == "player" ? (root.is-fullscreen ? 32px : 88px) : parent.height - 72px;
         width: min(parent.width - 48px, 540px);
@@ -7101,9 +7371,9 @@ export component MainWindow inherits Window {
         action-text: root.toast-action-text;
         action-clicked => { root.toast-action-clicked(); }
         dismiss => { root.toast-dismiss(); }
-    }
+        }
 
-    if root.catalog-filter-picker-visible : Rectangle {
+        if root.catalog-filter-picker-visible : Rectangle {
         z: 120;
         width: 100%;
         height: 100%;
@@ -7222,10 +7492,10 @@ export component MainWindow inherits Window {
                 }
             }
         }
-    }
+        }
 
-    // Compact mode Browse sub-navigation popup
-    if root.compact-layout && root.browse-subnav-menu-open : Rectangle {
+        // Compact mode Browse sub-navigation popup
+        if root.compact-layout && root.browse-subnav-menu-open : Rectangle {
         x: 0px;
         y: 0px;
         width: 100%;
@@ -7289,13 +7559,13 @@ export component MainWindow inherits Window {
                 }
             }
         }
-    }
+        }
 
-    // Ctrl + wheel card zoom. The overlay is active only while Ctrl is held
-    // (tracked by the root FocusScope), so plain wheel scrolling keeps going
-    // to the underlying lists. Zoom is session-only: it resets to 100% on
-    // every launch and is never written to settings.
-    WheelZoomCapture {
+        // Ctrl + wheel card zoom. The overlay is active only while Ctrl is held
+        // (tracked by the root FocusScope), so plain wheel scrolling keeps going
+        // to the underlying lists. Zoom is session-only: it resets to 100% on
+        // every launch and is never written to settings.
+        WheelZoomCapture {
         width: 100%;
         height: 100%;
         active: KeyboardState.ctrl-held && !root.is-fullscreen && root.active-screen != "player";
@@ -7304,258 +7574,8 @@ export component MainWindow inherits Window {
             let step = Math.max(-0.1, Math.min(0.1, dy / 120 * 0.1));
             root.card-zoom = Math.max(0.6, Math.min(1.6, root.card-zoom + step));
         }
-    }
-
-    keys := FocusScope {
-        changed has-focus => {
-            if !self.has-focus {
-                KeyboardState.ctrl-held = false;
-            }
-        }
-
-        key-released(event) => {
-            if (!event.modifiers.control) {
-                KeyboardState.ctrl-held = false;
-            }
-            EventResult.accept
-        }
-
-        key-pressed(event) => {
-            KeyboardState.ctrl-held = event.modifiers.control;
-            if (KeyboardState.text-input-focused && event.text != Key.Escape) {
-                return reject;
-            }
-            // Panic Exit: Ctrl+Shift+Q
-            if (event.modifiers.control && event.modifiers.shift && (event.text == "q" || event.text == "Q")) {
-                root.panic-exit();
-                return accept;
-            }
-
-            if (event.modifiers.control && (event.text == "f" || event.text == "F") && root.active-screen == "browse") {
-                if (root.active-category == "Performers" && !root.is-catalog-search-results) {
-                    root.search-focus-target = "performer";
-                } else {
-                    root.search-focus-target = "catalog";
-                }
-                root.search-focus-sequence += 1;
-                return accept;
-            }
-
-            if (root.active-screen == "player" && root.player-media-loaded) {
-                root.player-controls-visible = true;
-                player-controls-hide-timer.restart();
-            }
-
-            // Quick navigation (Stage 9)
-            if (event.text == "1") {
-                root.switch-screen("browse");
-                return accept;
-            }
-            if (event.text == "2") {
-                root.switch-screen("channels");
-                return accept;
-            }
-            if (event.text == "3") {
-                root.switch-screen("player");
-                return accept;
-            }
-            if (event.text == "4") {
-                root.switch-screen("settings");
-                return accept;
-            }
-
-            // Android TV Grid Navigation: Arrow keys & Return
-            if (event.text == Key.LeftArrow) {
-                if (root.active-screen == "browse") {
-                    if (root.focused-card-index > 0) {
-                        root.focused-card-index -= 1;
-                    }
-                    return accept;
-                }
-                if (root.active-screen == "channels") {
-                    if (root.focused-channel-card-index > 0) {
-                        root.focused-channel-card-index -= 1;
-                    }
-                    return accept;
-                }
-                if (root.active-screen == "player" && root.player-media-loaded) {
-                    root.seek-with-acceleration(-1);
-                    return accept;
-                }
-            }
-            if (event.text == Key.RightArrow) {
-                if (root.active-screen == "browse") {
-                    if (root.focused-card-index + 1 < root.catalog-items.length) {
-                        root.focused-card-index += 1;
-                    }
-                    return accept;
-                }
-                if (root.active-screen == "channels") {
-                    if (root.focused-channel-card-index + 1 < root.channel-items.length) {
-                        root.focused-channel-card-index += 1;
-                    }
-                    return accept;
-                }
-                if (root.active-screen == "player" && root.player-media-loaded) {
-                    root.seek-with-acceleration(1);
-                    return accept;
-                }
-            }
-            if (event.text == Key.UpArrow) {
-                if (root.active-screen == "browse") {
-                    if (root.focused-card-index >= root.catalog-column-count) {
-                        root.focused-card-index -= root.catalog-column-count;
-                    }
-                    return accept;
-                }
-                if (root.active-screen == "channels") {
-                    if (root.focused-channel-card-index >= root.channel-column-count) {
-                        root.focused-channel-card-index -= root.channel-column-count;
-                    }
-                    return accept;
-                }
-                if (root.active-screen == "player" && root.player-media-loaded) {
-                    root.adjust-volume(5.0);
-                    return accept;
-                }
-            }
-            if (event.text == Key.DownArrow) {
-                if (root.active-screen == "browse") {
-                    if (root.focused-card-index + root.catalog-column-count < root.catalog-items.length) {
-                        root.focused-card-index += root.catalog-column-count;
-                    }
-                    return accept;
-                }
-                if (root.active-screen == "channels") {
-                    if (root.focused-channel-card-index + root.channel-column-count < root.channel-items.length) {
-                        root.focused-channel-card-index += root.channel-column-count;
-                    }
-                    return accept;
-                }
-                if (root.active-screen == "player" && root.player-media-loaded) {
-                    root.adjust-volume(-5.0);
-                    return accept;
-                }
-            }
-            if (event.text == Key.Return) {
-                if (root.active-screen == "browse") {
-                    root.activate-focused-card();
-                    return accept;
-                }
-                if (root.active-screen == "channels") {
-                    root.activate-focused-channel-card();
-                    return accept;
-                }
-            }
-
-            // Player controls are active only for a loaded source.
-            if (root.active-screen == "player" && root.player-media-loaded) {
-            if (event.text == Key.Space) {
-                root.toggle-play();
-                return accept;
-            }
-            if (event.text == "[" || event.text == "{") {
-                root.seek-relative(-30.0);
-                return accept;
-            }
-            if (event.text == "]" || event.text == "}") {
-                root.seek-relative(30.0);
-                return accept;
-            }
-            if (event.text == "f" || event.text == "F") {
-                root.toggle-fullscreen();
-                return accept;
-            }
-            if (event.text == "i" || event.text == "I") {
-                root.toggle-hud();
-                return accept;
-            }
-            if (event.text == "m" || event.text == "M" || event.text == "0") {
-                root.toggle-mute();
-                return accept;
-            }
-            if (event.text == "s" || event.text == "S" || event.text == "," || event.text == "<") {
-                root.cycle-speed();
-                return accept;
-            }
-            if (event.text == "b" || event.text == "B") {
-                root.cycle-buffer-profile();
-                return accept;
-            }
-            if (event.text == "h" || event.text == "H") {
-                root.toggle-hwdec();
-                return accept;
-            }
-            if (event.text == "n" || event.text == "N") {
-                root.play-random();
-                return accept;
-            }
-            }
-            if (event.text == Key.Escape) {
-                if (root.player-volume-flyout-open) {
-                    root.player-volume-flyout-open = false;
-                    return accept;
-                }
-                if (root.download-panel-open) {
-                    root.download-panel-open = false;
-                    return accept;
-                }
-                if (root.player-more-controls-visible) {
-                    root.player-more-controls-visible = false;
-                    return accept;
-                }
-                if (root.licenses-visible) {
-                    root.licenses-visible = false;
-                    return accept;
-                }
-                if (root.confirm-dialog-visible) {
-                    root.confirm-dialog-visible = false;
-                    return accept;
-                }
-                if (root.catalog-filter-picker-visible) {
-                    root.catalog-filter-picker-visible = false;
-                    return accept;
-                }
-                if (root.playback-ended-visible) {
-                    root.autoplay-countdown-sec = 0;
-                    root.playback-ended-visible = false;
-                    root.active-screen = "browse";
-                    return accept;
-                }
-                if (root.toast-visible) {
-                    root.toast-visible = false;
-                    return accept;
-                }
-                if (root.resolver-prompt-dialog-visible) {
-                    root.resolver-prompt-dialog-visible = false;
-                    return accept;
-                }
-                if (root.login-modal-visible) {
-                    root.login-modal-visible = false;
-                    return accept;
-                }
-                if (root.performer-profile-visible) {
-                    root.close-performer-profile();
-                    return accept;
-                }
-                if (root.studio-profile-visible) {
-                    root.close-studio-profile();
-                    return accept;
-                }
-                if (root.browse-subnav-menu-open) {
-                    root.browse-subnav-menu-open = false;
-                    return accept;
-                }
-                if (root.detail-visible) {
-                    root.detail-more-actions-visible = false;
-                    root.close-item-detail();
-                    return accept;
-                }
-                root.escape-pressed();
-                return accept;
-            }
-            reject
         }
     }
+
 }
 

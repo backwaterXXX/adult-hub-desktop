@@ -625,10 +625,17 @@ export component WheelZoomCapture inherits TouchArea {
     enabled: root.active;
 
     scroll-event(event) => {
-        if (root.active) {
+        if (event.modifiers.control) {
             root.zoom-delta(event.delta-y / 1px);
+            EventResult.accept
+        } else {
+            // Ctrl is physically not held: heal a stuck ctrl-held flag and let
+            // this wheel notch fall through to the list underneath.
+            if (KeyboardState.ctrl-held) {
+                KeyboardState.ctrl-held = false;
+            }
+            EventResult.reject
         }
-        EventResult.accept
     }
 }
 
