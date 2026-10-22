@@ -4,7 +4,7 @@
 
 Adult Hub Desktop connects to a Jellyfin server you configure and brings library browsing, performer and studio details, Resolver channels, downloads, and video playback together in one Windows or Linux app.
 
-Adult Hub also provides separate Android TV and mobile apps. The desktop, TV, and mobile clients can connect to the same Jellyfin server and Resolver, so your media library and channel setup stay in the same ecosystem. Desktop has its own interface, built for a keyboard, mouse, or HTPC setup.
+The [Adult Hub ecosystem](https://github.com/backwaterXXX/adult-hub) also provides separate Android TV and mobile apps. The desktop, TV, and mobile clients can connect to the same Jellyfin server and Resolver, so your media library and channel setup stay in the same ecosystem. Desktop has its own interface, built for a keyboard, mouse, or HTPC setup.
 
 For a server on another network, use a secure HTTPS reverse proxy that you control. The app is a client and does not include or host the Jellyfin server, Resolver, or a reverse proxy.
 
