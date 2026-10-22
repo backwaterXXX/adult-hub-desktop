@@ -1,0 +1,33 @@
+[package]
+name = "adult-hub-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Adult Hub Desktop player prototype"
+
+[dependencies]
+adult-hub-player = { path = "../player" }
+adult-hub-client = { path = "../client" }
+adult-hub-storage = { path = "../storage" }
+glow.workspace = true
+slint.workspace = true
+uuid.workspace = true
+regex.workspace = true
+ring.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+thiserror.workspace = true
+url.workspace = true
+sysinfo.workspace = true
+libloading = "0.9"
+image = { version = "0.25.10", default-features = false, features = ["ico", "jpeg", "png", "webp"] }
+fastrand = "2.3"
+
+
+[target.'cfg(windows)'.dependencies]
+rfd = { version = "0.17", default-features = false }
+
+[build-dependencies]
+slint-build.workspace = true

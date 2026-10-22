@@ -1,0 +1,195 @@
+name: Desktop CI & Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'desktop-v*'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  lint-and-test:
+    name: Check, Lint & Test
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libmpv-dev mpv ffmpeg libsqlite3-dev libssl-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev \
+            libfreetype-dev libgl1-mesa-dev libegl1-mesa-dev libx11-dev \
+            libxcursor-dev libxrandr-dev libxi-dev libasound2-dev libpulse-dev
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
+          components: rustfmt, clippy
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "desktop -> desktop/target"
+
+      - name: Check code formatting
+        run: cargo fmt --manifest-path desktop/Cargo.toml --all -- --check
+
+      - name: Clippy linting
+        run: cargo clippy --manifest-path desktop/Cargo.toml --all-targets -- -D warnings
+
+      - name: Run unit & integration tests
+        run: cargo test --manifest-path desktop/Cargo.toml
+
+  build-linux:
+    name: Build Linux Packages (.deb & AppImage)
+    runs-on: ubuntu-24.04
+    needs: lint-and-test
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libmpv-dev libsqlite3-dev libssl-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libfontconfig1-dev libfreetype-dev libgl1-mesa-dev libegl1-mesa-dev libx11-dev \
+            libxcursor-dev libxrandr-dev libxi-dev libasound2-dev libpulse-dev dpkg-dev
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "desktop -> desktop/target"
+
+      - name: Build Linux release binary
+        run: |
+          cargo build --manifest-path desktop/Cargo.toml --release
+          mkdir -p bin
+          cp desktop/target/release/adult-hub-desktop bin/
+          chmod +x bin/adult-hub-desktop
+
+      - name: Package Debian / Ubuntu .deb
+        run: ./scripts/package-deb.sh
+
+      - name: Package Linux AppImage
+        run: ./scripts/package-appimage.sh
+
+      - name: Upload Linux Artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-packages
+          path: |
+            bin/*.deb
+            bin/*.AppImage
+            bin/adult-hub-desktop
+
+  build-windows:
+    name: Build Windows EXE and Runtime DLL
+    runs-on: ubuntu-24.04
+    needs: lint-and-test
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install MinGW and archive tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            mingw-w64 p7zip-full curl
+
+      - name: Setup Rust toolchain for Windows target
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
+          targets: x86_64-pc-windows-gnu
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "desktop -> desktop/target"
+
+      - name: Build Windows release files
+        run: ./scripts/package-windows.sh
+
+      - name: Upload Windows Artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-packages
+          path: |
+            bin/adult-hub-desktop.exe
+            bin/libmpv-2.dll
+
+  release:
+    name: Publish Release & Manifest
+    runs-on: ubuntu-24.04
+    if: startsWith(github.ref, 'refs/tags/desktop-v')
+    needs: [build-linux, build-windows]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Download all package artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: bin-artifacts
+
+      - name: Consolidate packages into bin/
+        run: |
+          mkdir -p bin
+          find bin-artifacts -type f -exec cp {} bin/ \;
+          ls -la bin/
+
+      - name: Validate Release Version
+        run: |
+          TAG_VER="${GITHUB_REF#refs/tags/desktop-v}"
+          CARGO_VER=$(grep '^version = ' desktop/Cargo.toml | head -1 | cut -d '"' -f 2)
+          echo "Tag version: ${TAG_VER}, Cargo.toml version: ${CARGO_VER}"
+          if [[ "${TAG_VER}" != "${CARGO_VER}" ]]; then
+            echo "::error::Tag version '${TAG_VER}' does not match desktop/Cargo.toml version '${CARGO_VER}'"
+            exit 1
+          fi
+
+      - name: Generate & Sign Manifest
+        env:
+          RELEASE_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          TAG_NAME="${GITHUB_REF#refs/tags/desktop-v}"
+          if [[ -z "${RELEASE_KEY}" ]]; then
+            echo "::error::Repository secret RELEASE_SIGNING_KEY is not set; the release manifest cannot be signed."
+            exit 1
+          fi
+          mkdir -p dev
+          echo "${RELEASE_KEY}" > dev/release-signing-key.pem
+          chmod 600 dev/release-signing-key.pem
+          ./scripts/sign-release.sh "${TAG_NAME}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            bin/adult-hub-desktop_*.deb
+            bin/Adult_Hub_Desktop-*.AppImage
+            bin/adult-hub-desktop
+            bin/adult-hub-desktop.exe
+            bin/libmpv-2.dll
+            bin/adult-hub-update-manifest.json
+            bin/adult-hub-update-manifest.json.sig
+          draft: false
+          prerelease: false
+          generate_release_notes: true

@@ -1,0 +1,37 @@
+# Rust build output
+target/
+**/target/
+
+# Generated packages and build artifacts
+bin/*
+!bin/.gitkeep
+dist/
+build/
+*.AppImage
+*.deb
+*.msi
+*.exe
+
+# Local tooling and editor state
+.idea/
+.vscode/
+.qoder/
+docs/
+*.log
+*.tmp
+.cache/
+core
+core.*
+*.mp4
+*.mkv
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local environment overrides and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key

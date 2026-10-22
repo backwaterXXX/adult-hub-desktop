@@ -1,0 +1,109 @@
+import { HubTheme } from "theme.slint";
+
+export component Toast inherits Rectangle {
+    in property <bool> is-open: false;
+    in property <string> message: "";
+    in property <string> toast-type: "info"; // "info", "warning", "error", "success"
+    in property <string> action-text: "";
+    callback action-clicked();
+    callback dismiss();
+
+    visible: root.is-open;
+    z: 1000;
+    height: 48px;
+    border-radius: 8px;
+    background: HubTheme.surface;
+    border-width: 1px;
+    border-color: root.toast-type == "error" ? HubTheme.error : (root.toast-type == "warning" ? HubTheme.warning : (root.toast-type == "success" ? HubTheme.success : HubTheme.separator));
+
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        spacing: 12px;
+        alignment: center;
+
+        // Compact, font-independent status mark.
+        Rectangle {
+            width: 28px;
+            height: 28px;
+            border-radius: 14px;
+            background: root.toast-type == "error" ? #FB718518 : (root.toast-type == "warning" ? #FBBF2418 : (root.toast-type == "success" ? #4ADE8018 : HubTheme.navigation-background));
+
+            Image {
+                source: root.toast-type == "error" || root.toast-type == "warning"
+                    ? @image-url("../../../assets/icons/alert.svg")
+                    : (root.toast-type == "success"
+                        ? @image-url("../../../assets/icons/check-circle.svg")
+                        : @image-url("../../../assets/icons/info.svg"));
+                x: 6px;
+                y: 6px;
+                width: 16px;
+                height: 16px;
+                image-fit: contain;
+            }
+        }
+
+        // Message
+        Text {
+            text: root.message;
+            color: #ffffff;
+            font-size: 13px;
+            font-weight: 600;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+
+        // Optional action button
+        if root.action-text != "" : Rectangle {
+            height: 40px;
+            border-radius: 6px;
+            background: HubTheme.accent;
+
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                Text {
+                    text: root.action-text;
+                    color: #ffffff;
+                    font-size: HubTheme.metadata-size;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+            }
+
+            accessible-role: button;
+            accessible-label: root.action-text;
+            accessible-action-default => { root.action-clicked(); }
+
+            action-touch := TouchArea {
+                clicked => { root.action-clicked(); }
+            }
+        }
+
+        // Close button
+        Rectangle {
+            width: 40px;
+            height: 40px;
+            border-radius: 8px;
+            background: close-touch.has-hover ? #ffffff22 : transparent;
+
+            Image {
+                source: @image-url("../../../assets/icons/close.svg");
+                x: 12px;
+                y: 12px;
+                width: 16px;
+                height: 16px;
+                image-fit: contain;
+            }
+
+            accessible-role: button;
+            accessible-label: "Dismiss notification";
+            accessible-action-default => { root.dismiss(); }
+
+            close-touch := TouchArea {
+                clicked => { root.dismiss(); }
+            }
+        }
+    }
+}

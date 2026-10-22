@@ -1,0 +1,58 @@
+// Adult Hub Fluent 2 Dark visual foundation.
+// Keep component colors and dimensions bound to these shared roles.
+export global HubTheme {
+    in property <color> app-background: #101114;
+    in property <color> navigation-background: #15161A;
+    in property <color> surface: #17191E;
+    in property <color> surface-raised: #1C1E24;
+    in property <color> surface-hover: #272A32;
+    in property <color> separator: #30333C;
+    in property <color> control-border: #3D424E;
+
+    in property <color> text-primary: #F5F6F8;
+    in property <color> text-secondary: #B3B8C4;
+    in property <color> text-muted: #878E9D;
+
+    in property <color> accent: #C2185B;
+    in property <color> accent-hover: #D81B67;
+    in property <color> accent-pressed: #9D1449;
+    in property <color> accent-outline: #C2185B;
+    in property <color> accent-text: #F5A6C7;
+    in property <color> focus-ring: #F5A6C7;
+
+    in property <color> success: #75C991;
+    in property <color> warning: #E8C36A;
+    in property <color> error: #E98787;
+
+    in property <length> space-1: 4px;
+    in property <length> space-2: 8px;
+    in property <length> space-3: 12px;
+    in property <length> space-4: 16px;
+    in property <length> space-6: 24px;
+    in property <length> space-8: 32px;
+    in property <length> space-12: 48px;
+
+    in property <length> content-padding: 28px;
+    in property <length> compact-content-padding: 16px;
+    in property <length> form-card-padding: 24px;
+    in property <length> card-gap: 16px;
+    in property <length> control-radius: 8px;
+    in property <length> card-radius: 12px;
+    in property <length> dialog-radius: 16px;
+    in property <length> control-height: 40px;
+
+    in property <length> hero-title-size: 34px;
+    in property <length> title-size: 28px;
+    in property <length> section-title-size: 20px;
+    in property <length> card-title-size: 15px;
+    in property <length> body-size: 14px;
+    in property <length> metadata-size: 12px;
+}
+
+export global KeyboardState {
+    in-out property <bool> text-input-focused: false;
+    // Tracked from the window's root FocusScope so wheel handlers can tell
+    // Ctrl+scroll (card zoom) from plain scroll (no modifier field on
+    // PointerEvent in Slint 1.18).
+    in-out property <bool> ctrl-held: false;
+}

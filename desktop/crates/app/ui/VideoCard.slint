@@ -1,0 +1,324 @@
+import { HubTheme } from "theme.slint";
+
+export struct VideoCardData {
+    id: string,
+    title: string,
+    genre: string,
+    duration: string,
+    year: string,
+    is_played: bool,
+    provider: string,
+    is_favorite: bool,
+    studio: string,
+    progress: float,
+    has_thumbnail: bool,
+    thumbnail_state: string,
+    thumbnail: image,
+    card_index: int,
+    thumbnail_url: string,
+    fallback_thumbnail_url: string,
+    alternate_thumbnail_url: string,
+}
+
+export struct VideoCardRowData {
+    has_0: bool,
+    card_0: VideoCardData,
+    has_1: bool,
+    card_1: VideoCardData,
+    has_2: bool,
+    card_2: VideoCardData,
+    has_3: bool,
+    card_3: VideoCardData,
+    has_4: bool,
+    card_4: VideoCardData,
+    has_5: bool,
+    card_5: VideoCardData,
+    has_6: bool,
+    card_6: VideoCardData,
+    has_7: bool,
+    card_7: VideoCardData,
+}
+
+export component VideoCard inherits Rectangle {
+    in property <VideoCardData> item;
+    in property <bool> is-focused: false;
+    in property <length> card-width: 250px;
+    in property <bool> fixed-width: false;
+    in property <bool> retry-enabled: true;
+    out property <bool> has-focus: focus-scope.has-focus;
+    callback clicked();
+    callback play();
+    callback open-detail();
+    callback thumbnail-retry(VideoCardData);
+
+    forward-focus: focus-scope;
+    accessible-role: none;
+
+    property <length> artwork-height: root.card-width * 0.5625;
+    property <bool> show-play: touch.has-hover || play-touch.has-hover;
+    property <string> source-label: root.item.studio != "" ? root.item.studio : "";
+
+    horizontal-stretch: root.fixed-width ? 0 : 1;
+    preferred-width: root.card-width;
+    min-width: 160px;
+    max-width: root.fixed-width ? root.card-width : 10000px;
+    height: root.artwork-height + 70px;
+    border-radius: HubTheme.card-radius;
+    background: (touch.has-hover || play-touch.has-hover) ? HubTheme.surface-raised : ((root.is-focused || root.has-focus) ? #FFFFFF08 : transparent);
+    border-width: (root.is-focused || root.has-focus) ? 2px : (touch.has-hover ? 1px : 0px);
+    border-color: (root.is-focused || root.has-focus) ? HubTheme.focus-ring : HubTheme.separator;
+
+    animate background { duration: 150ms; }
+    animate border-color { duration: 150ms; }
+
+    touch := TouchArea {
+        accessible-role: button;
+        accessible-label: root.item.title;
+        accessible-action-default => { root.open-detail(); }
+        clicked => { root.open-detail(); }
+    }
+
+    focus-scope := FocusScope {
+        width: 0px;
+        height: 0px;
+        key-pressed(event) => {
+            if (event.text == Key.Space) {
+                root.play();
+                return accept;
+            }
+            if (event.text == Key.Return) {
+                root.open-detail();
+                return accept;
+            }
+            if ((event.text == "r" || event.text == "R") && root.item.thumbnail_state == "failed") {
+                root.thumbnail-retry(root.item);
+                return accept;
+            }
+            reject
+        }
+    }
+
+    VerticalLayout {
+        padding: 0px;
+        spacing: 0px;
+
+        Rectangle {
+            height: root.artwork-height;
+            background: HubTheme.surface;
+            clip: true;
+            border-radius: HubTheme.card-radius;
+
+            if root.item.has-thumbnail : Image {
+                source: root.item.thumbnail;
+                width: 100%;
+                height: 100%;
+                image-fit: cover;
+            }
+
+            if !root.item.has-thumbnail : Rectangle {
+                width: 100%;
+                height: 100%;
+                background: HubTheme.surface-raised;
+
+                // Subtle, elegant media placeholder icon
+                Image {
+                    source: @image-url("../../../assets/icons/player.svg");
+                    width: 28px;
+                    height: 28px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    image-fit: contain;
+                    opacity: 0.35;
+                }
+
+                // Shimmer line during loading
+                if root.item.thumbnail_state == "loading" : Rectangle {
+                    x: 0px;
+                    y: parent.height - 3px;
+                    width: 100%;
+                    height: 3px;
+                    background: HubTheme.separator;
+                    Rectangle {
+                        x: 0px;
+                        width: parent.width * 0.45;
+                        height: 100%;
+                        background: HubTheme.accent;
+                    }
+                }
+            }
+
+            // Top badges (Watched & Favorite)
+            HorizontalLayout {
+                x: 8px;
+                y: 8px;
+                spacing: 6px;
+                alignment: start;
+
+                if root.item.is_played || root.item.progress >= 0.90 : Rectangle {
+                    width: watched-label.preferred-width + 12px;
+                    height: 20px;
+                    border-radius: 4px;
+                    background: #000000B3;
+
+                    watched-label := Text {
+                        x: 6px;
+                        y: 0px;
+                        width: parent.width - 12px;
+                        height: parent.height;
+                        text: "Watched";
+                        color: #FFFFFF;
+                        font-size: 10px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                        horizontal-alignment: center;
+                    }
+                }
+
+                if root.item.is_favorite : Rectangle {
+                    width: fav-label.preferred-width + 12px;
+                    height: 20px;
+                    border-radius: 4px;
+                    background: #000000B3;
+
+                    fav-label := Text {
+                        x: 6px;
+                        y: 0px;
+                        width: parent.width - 12px;
+                        height: parent.height;
+                        text: "Favorite";
+                        color: #FFFFFF;
+                        font-size: 10px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                        horizontal-alignment: center;
+                    }
+                }
+            }
+
+            // Duration badge in bottom-right corner
+            if root.item.duration != "" : Rectangle {
+                width: duration-label.preferred-width + 12px;
+                height: 20px;
+                x: parent.width - self.width - 8px;
+                y: parent.height - self.height - 8px;
+                border-radius: 4px;
+                background: #000000B3;
+
+                duration-label := Text {
+                    x: 6px;
+                    y: 0px;
+                    width: parent.width - 12px;
+                    height: parent.height;
+                    text: root.item.duration;
+                    color: #FFFFFF;
+                    font-size: 11px;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                    horizontal-alignment: center;
+                }
+            }
+
+            // Prominent Play action on mouse hover
+            Rectangle {
+                visible: root.show-play;
+                width: 44px;
+                height: 44px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                border-radius: 22px;
+                background: play-touch.pressed ? HubTheme.accent-pressed : (play-touch.has-hover ? HubTheme.accent-hover : HubTheme.accent);
+                border-width: 1px;
+                border-color: HubTheme.focus-ring;
+                accessible-role: button;
+                accessible-label: "Play " + root.item.title;
+                accessible-action-default => { root.play(); }
+                z: 10;
+
+                Image {
+                    source: @image-url("../../../assets/icons/play.svg");
+                    x: (parent.width - 20px) / 2 + 1px;
+                    y: (parent.height - 20px) / 2;
+                    width: 20px;
+                    height: 20px;
+                    image-fit: contain;
+                }
+
+                play-touch := TouchArea {
+                    enabled: root.show-play;
+                    clicked => { root.play(); }
+                }
+            }
+
+            // Watched progress bar at bottom edge
+            if root.item.progress > 0.0 && !root.item.is_played && root.item.progress < 0.90 : Rectangle {
+                x: 0px;
+                y: parent.height - 3px;
+                width: 100%;
+                height: 3px;
+                background: #00000088;
+
+                Rectangle {
+                    x: 0px;
+                    y: 0px;
+                    width: parent.width * max(0.0, min(1.0, root.item.progress));
+                    height: 100%;
+                    background: HubTheme.accent;
+                }
+            }
+        }
+
+        VerticalLayout {
+            height: 70px;
+            padding-left: 10px;
+            padding-right: 10px;
+            padding-top: 8px;
+            padding-bottom: 6px;
+            spacing: 2px;
+
+            // Title: always left-aligned, vertical top, max 2 lines, ending with ellipsis
+            Text {
+                text: root.item.title;
+                color: HubTheme.text-primary;
+                font-size: HubTheme.card-title-size;
+                font-weight: 600;
+                horizontal-alignment: left;
+                vertical-alignment: top;
+                wrap: word-wrap;
+                overflow: elide;
+                max-lines: 2;
+                width: 100%;
+                height: 38px;
+            }
+
+            if root.item.year != "" || root.source-label != "" : HorizontalLayout {
+                height: 16px;
+                spacing: 6px;
+                alignment: start;
+
+                if root.item.year != "" : Text {
+                    text: root.item.year;
+                    color: HubTheme.text-secondary;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+
+                if root.item.year != "" && root.source-label != "" : Rectangle {
+                    width: 3px;
+                    height: 3px;
+                    border-radius: 1.5px;
+                    background: HubTheme.separator;
+                    y: 6px;
+                }
+
+                if root.source-label != "" : Text {
+                    text: root.source-label;
+                    color: HubTheme.text-muted;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+            }
+        }
+    }
+}

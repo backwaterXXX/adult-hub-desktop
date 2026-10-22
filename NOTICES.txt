@@ -1,0 +1,73 @@
+Adult Hub Desktop
+Copyright 2026 Adult Hub Contributors
+
+This product is licensed under the Apache License, Version 2.0.
+See LICENSE for details.
+
+================================================================================
+Third-Party Software and Attribution Notices
+================================================================================
+
+1. Slint (GUI Toolkit)
+   License: Royalty-Free Desktop route / GPLv3 / Commercial
+   Website: https://slint.dev
+   Attribution:
+   This product includes software developed by SixtyFPS GmbH (Slint),
+   used under Slint's Free Desktop Application License terms.
+   Portions Copyright (c) SixtyFPS GmbH <info@slint.dev>.
+
+2. libmpv / mpv (Media Playback Engine)
+   License: GNU Lesser General Public License (LGPL) version 2.1 or later /
+            GNU General Public License (GPL) version 2 or later
+   Website: https://mpv.io / https://github.com/mpv-player/mpv
+   Source code: https://github.com/mpv-player/mpv
+   Redistribution & Replacement:
+   The libmpv shared library is dynamically linked at runtime. Users may replace
+   libmpv with a compatible custom-built version:
+   - On Windows: replace `libmpv-2.dll` located in the application installation directory.
+   - On Linux: install or replace the system libmpv library or place in the application lib folder.
+   Build instructions and upstream source code can be obtained at:
+   https://github.com/mpv-player/mpv/blob/master/DOCS/compile-windows.md
+
+3. FFmpeg (Audio/Video Processing Libraries)
+   License: LGPL version 2.1 or later / GPL version 2 or later
+   Website: https://ffmpeg.org
+   Source code: https://ffmpeg.org/download.html
+   FFmpeg libraries are packaged and used through libmpv.
+
+4. Rust Crate Ecosystem
+   This product bundles or links with standard Rust crates from crates.io:
+   - rusqlite (MIT)
+   - reqwest (MIT / Apache-2.0)
+   - ring (OpenSSL / ISC / MIT)
+   - serde / serde_json (MIT / Apache-2.0)
+   - uuid (MIT / Apache-2.0)
+   - regex (MIT / Apache-2.0)
+   - glow (MIT / Apache-2.0)
+   - libloading (ISC)
+   - thiserror (MIT / Apache-2.0)
+   - rfd (MIT)
+
+5. Fluent UI System Icons
+   Package: @fluentui/svg-icons 1.1.344
+   Source: https://github.com/microsoft/fluentui-system-icons
+   Copyright (c) 2020 Microsoft Corporation
+   License: MIT
+
+   Permission is hereby granted, free of charge, to any person obtaining a copy
+   of this software and associated documentation files (the "Software"), to deal
+   in the Software without restriction, including without limitation the rights
+   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+   copies of the Software, and to permit persons to whom the Software is
+   furnished to do so, subject to the following conditions:
+
+   The above copyright notice and this permission notice shall be included in all
+   copies or substantial portions of the Software.
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+   SOFTWARE.
