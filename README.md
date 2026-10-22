@@ -1,8 +1,12 @@
 # Adult Hub Desktop
 
-> A native desktop app for browsing Jellyfin libraries and playing Adult Hub Resolver streams.
+> A modern, privacy-focused desktop client for the Adult Hub ecosystem.
 
-Adult Hub Desktop connects to a Jellyfin server you configure. It brings library browsing, performer and studio details, Resolver channels, downloads, and video playback together in one Windows or Linux app.
+Adult Hub Desktop connects to a Jellyfin server you configure and brings library browsing, performer and studio details, Resolver channels, downloads, and video playback together in one Windows or Linux app.
+
+Adult Hub also provides separate Android TV and mobile apps. The desktop, TV, and mobile clients can connect to the same Jellyfin server and Resolver, so your media library and channel setup stay in the same ecosystem. Desktop has its own interface, built for a keyboard, mouse, or HTPC setup.
+
+For a server on another network, use a secure HTTPS reverse proxy that you control. The app is a client and does not include or host the Jellyfin server, Resolver, or a reverse proxy.
 
 ## How It Works
 
@@ -12,15 +16,46 @@ Adult Hub Desktop connects to a Jellyfin server you configure. It brings library
 
 The app is a client. You provide the Jellyfin server and, when needed, a separate Resolver service.
 
-## Key Features
+## Highlights & Features
 
-- **Jellyfin library browsing**: Search titles, browse categories, and view performer and studio profiles.
-- **Resolver channels**: Browse channel listings and play supported streams in the built-in player.
-- **Integrated video player**: Use hardware-accelerated playback, subtitles, audio tracks, seeking, volume controls, and fullscreen mode.
-- **Download queue**: Queue downloads, pause or resume work, and review completed items.
-- **Playback progress**: Resume videos and report playback progress to Jellyfin.
-- **Keyboard and HTPC controls**: Navigate the app without a mouse; use `Ctrl+Shift+Q` for the panic exit.
-- **Signed updates**: Verify the release signature and package hash before installing an in-app update.
+### 🎬 Your Media Collection, Organized
+
+- **Full library browsing**: Browse movies, categories, performers, and studios, with search and filters.
+- **Detailed profiles**: Explore performer and studio pages and related titles.
+- **Watch progress and history**: Resume playback from Jellyfin progress and keep a local playback history.
+- **Download queue**: Queue downloads, pause or resume them, and review completed items.
+
+### 📡 Resolver Channels
+
+- Browse channel listings and play supported streams directly in the built-in player.
+- Use the companion Resolver service for synchronized channel catalogs and streams.
+
+### ⚡ Powerful Video Player
+
+- **libmpv playback**: Hardware-accelerated playback with seeking, volume, and fullscreen controls.
+- **Track selection**: Switch audio and subtitle tracks during playback.
+- **Playback details**: View technical stream information in the player HUD.
+- **Custom buffering**: Choose Fast Start, Standard, or Large Buffer profiles.
+
+### 🎲 Smart Discovery
+
+- Use **Surprise Me** or shuffle to find a title when you are not sure what to watch.
+- Browse and filter the catalog by performers, studios, and categories.
+
+### 🖥️ Built for Desktop and HTPC
+
+- Available for Windows and Linux, with keyboard controls for common playback and navigation actions.
+- Use `Ctrl+Shift+Q` as a quick panic exit; it hides app windows, silences audio, and closes the app.
+
+### 🔒 Privacy by Design
+
+- Connect only to the Jellyfin and Resolver addresses you configure; use HTTPS for remote servers.
+- Credentials stay on your device and use the operating system's protected credential store when available.
+- Export diagnostics only when requested; sensitive values are redacted.
+
+### 🔄 Signed In-App Updates
+
+- Check for new releases on GitHub and verify the update signature and package hash before installation.
 
 ## Supported Platforms
 
