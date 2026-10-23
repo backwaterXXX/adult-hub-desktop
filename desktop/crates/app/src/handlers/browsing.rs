@@ -1,8 +1,8 @@
 use crate::catalog::{
-    FetchedThumbnail, ThumbnailRequest, card_index_by_request, fetch_thumbnail_batch,
-    filter_catalog_items, no_thumbnail_state, refresh_catalog_thumbnails_async,
-    sample_catalog_tv_items, set_catalog, set_discovered_servers, tv_item_to_card,
-    tv_item_to_card_for_server,
+    FetchedThumbnail, ThumbnailRequest, append_catalog_page, card_index_by_request,
+    fetch_thumbnail_batch, filter_catalog_items, no_thumbnail_state,
+    refresh_catalog_thumbnails_async, sample_catalog_tv_items, set_catalog, set_discovered_servers,
+    tv_item_to_card, tv_item_to_card_for_server,
 };
 use crate::context::AppContext;
 use crate::playback::show_error;
@@ -15,6 +15,7 @@ use adult_hub_client::{
 };
 use adult_hub_storage::{LocalStore, Session};
 use slint::{ComponentHandle, Model};
+use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -290,6 +291,7 @@ fn resolve_home_category_ids(categories: &[TvItem], local_store: &LocalStore) ->
 struct CatalogPageState {
     category: String,
     query: String,
+    library_id: String,
     next_start: usize,
     has_more: bool,
     loading_more: bool,
@@ -312,6 +314,31 @@ struct CatalogFilters {
     performer: String,
     performer_id: String,
     performer_letter: String,
+}
+
+#[derive(Clone)]
+struct CatalogViewSnapshot {
+    cards: Vec<VideoCardData>,
+    items: Vec<TvItem>,
+    page: CatalogPageState,
+    total_count: i32,
+    has_more: bool,
+    scroll_y: f32,
+    anchor_index: i32,
+    anchor_screen_y: f32,
+    more_error: String,
+    is_search: bool,
+    search_query: String,
+    search_applied_query: String,
+    search_error: String,
+    search_results_filter: String,
+    search_movie_count: i32,
+    search_performer_count: i32,
+    search_studio_count: i32,
+    search_tag_count: i32,
+    search_channel_count: i32,
+    search_all_has_more: bool,
+    search_all_total_count: i32,
 }
 
 #[derive(Clone)]
@@ -452,6 +479,102 @@ fn set_category_filters(
         .lock()
         .unwrap()
         .insert(category.to_string(), filters);
+}
+
+fn catalog_view_key(page: &CatalogPageState) -> String {
+    format!(
+        "{}\0{}\0{}\0{:?}",
+        page.library_id, page.category, page.query, page.filters
+    )
+}
+
+fn save_catalog_view(
+    ui: &MainWindow,
+    paging: &Arc<Mutex<CatalogPageState>>,
+    cached_items: &Arc<Mutex<Vec<TvItem>>>,
+    views: &Rc<RefCell<std::collections::HashMap<String, CatalogViewSnapshot>>>,
+) {
+    if ui.get_is_loading_catalog() {
+        return;
+    }
+    let mut page = paging.lock().unwrap().clone();
+    if page.category.is_empty() {
+        return;
+    }
+    page.loading_more = false;
+    let model = ui.get_catalog_items();
+    let cards = (0..model.row_count())
+        .filter_map(|index| model.row_data(index))
+        .collect::<Vec<_>>();
+    let snapshot = CatalogViewSnapshot {
+        cards,
+        items: cached_items.lock().unwrap().clone(),
+        page: page.clone(),
+        total_count: ui.get_catalog_total_count(),
+        has_more: ui.get_catalog_has_more(),
+        scroll_y: ui.get_catalog_scroll_y(),
+        anchor_index: ui.get_catalog_anchor_index(),
+        anchor_screen_y: ui.get_catalog_anchor_screen_y(),
+        more_error: ui.get_catalog_more_error().to_string(),
+        is_search: ui.get_is_catalog_search_results(),
+        search_query: ui.get_search_query().to_string(),
+        search_applied_query: ui.get_search_applied_query().to_string(),
+        search_error: ui.get_search_error_message().to_string(),
+        search_results_filter: ui.get_search_results_filter().to_string(),
+        search_movie_count: ui.get_search_movie_count(),
+        search_performer_count: ui.get_search_performer_count(),
+        search_studio_count: ui.get_search_studio_count(),
+        search_tag_count: ui.get_search_tag_count(),
+        search_channel_count: ui.get_search_channel_count(),
+        search_all_has_more: ui.get_search_all_has_more(),
+        search_all_total_count: ui.get_search_all_total_count(),
+    };
+    views.borrow_mut().insert(catalog_view_key(&page), snapshot);
+}
+
+fn restore_catalog_view(
+    ui: &MainWindow,
+    key: &str,
+    paging: &Arc<Mutex<CatalogPageState>>,
+    cached_items: &Arc<Mutex<Vec<TvItem>>>,
+    views: &Rc<RefCell<std::collections::HashMap<String, CatalogViewSnapshot>>>,
+    generation: &Arc<AtomicU64>,
+    search_generation: &Arc<AtomicU64>,
+) -> Option<(u64, Vec<VideoCardData>)> {
+    let snapshot = views.borrow().get(key).cloned()?;
+    let request_id = generation.fetch_add(1, Ordering::SeqCst) + 1;
+    search_generation.fetch_add(1, Ordering::SeqCst);
+    let mut page = snapshot.page.clone();
+    page.loading_more = false;
+    sync_catalog_filters_to_ui(ui, &page.category, &page.filters);
+    *paging.lock().unwrap() = page;
+    *cached_items.lock().unwrap() = snapshot.items.clone();
+
+    set_catalog(ui, snapshot.cards.clone());
+    ui.set_catalog_total_count(snapshot.total_count);
+    ui.set_catalog_has_more(snapshot.has_more);
+    ui.set_catalog_more_error(snapshot.more_error.into());
+    ui.set_is_loading_catalog(false);
+    ui.set_is_loading_more(false);
+    ui.set_is_catalog_search_results(snapshot.is_search);
+    ui.set_search_query(snapshot.search_query.into());
+    ui.set_search_applied_query(snapshot.search_applied_query.into());
+    ui.set_search_error_message(snapshot.search_error.into());
+    ui.set_search_results_filter(snapshot.search_results_filter.into());
+    ui.set_search_movie_count(snapshot.search_movie_count);
+    ui.set_search_performer_count(snapshot.search_performer_count);
+    ui.set_search_studio_count(snapshot.search_studio_count);
+    ui.set_search_tag_count(snapshot.search_tag_count);
+    ui.set_search_channel_count(snapshot.search_channel_count);
+    ui.set_search_all_has_more(snapshot.search_all_has_more);
+    ui.set_search_all_total_count(snapshot.search_all_total_count);
+    ui.set_catalog_anchor_index(snapshot.anchor_index);
+    ui.set_catalog_anchor_screen_y(snapshot.anchor_screen_y);
+    ui.set_catalog_anchor_pending(!snapshot.cards.is_empty());
+    ui.set_catalog_scroll_y(snapshot.scroll_y);
+    ui.set_status("Ready".into());
+    ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
+    Some((request_id, snapshot.cards))
 }
 
 fn sync_catalog_filters_to_ui(ui: &MainWindow, category: &str, filters: &CatalogFilters) {
@@ -1781,6 +1904,10 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
     let performer_search_generation = Arc::new(AtomicU64::new(0));
     let home_generation = Arc::new(AtomicU64::new(0));
     let catalog_paging = Arc::new(Mutex::new(CatalogPageState::default()));
+    let catalog_views = Rc::new(RefCell::new(std::collections::HashMap::<
+        String,
+        CatalogViewSnapshot,
+    >::new()));
     let catalog_filters = Arc::new(Mutex::new(std::collections::HashMap::<
         String,
         CatalogFilters,
@@ -2612,13 +2739,48 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
         let search_debounce_generation = search_debounce_generation.clone();
         let catalog_paging = catalog_paging.clone();
         let catalog_filters = catalog_filters.clone();
+        let catalog_views = catalog_views.clone();
         ui.on_search_catalog(move |query| {
             let Some(ui) = weak.upgrade() else { return };
+            save_catalog_view(&ui, &catalog_paging, &cached_catalog, &catalog_views);
+            let query = query.trim().to_string();
+            let filters = get_category_filters(&catalog_filters, "Search");
+            let library_id = local_store
+                .get_setting("selected_library_id")
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            let target_page = CatalogPageState {
+                category: "Latest".into(),
+                query: query.clone(),
+                library_id,
+                filters: filters.clone(),
+                ..CatalogPageState::default()
+            };
+            if let Some((request_id, cards)) = restore_catalog_view(
+                &ui,
+                &catalog_view_key(&target_page),
+                &catalog_paging,
+                &cached_catalog,
+                &catalog_views,
+                &catalog_generation,
+                &search_debounce_generation,
+            ) {
+                if let Some(session) = credential_store.get().ok().flatten() {
+                    refresh_catalog_thumbnails_async(
+                        ui.as_weak(),
+                        cards,
+                        session.access_token,
+                        cached_catalog.clone(),
+                        Some((catalog_generation.clone(), request_id)),
+                    );
+                }
+                return;
+            }
             ui.set_status("Searching library…".into());
             ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
             ui.set_catalog_total_count(0);
             ui.set_is_loading_catalog(true);
-            let query = query.trim().to_string();
             ui.set_is_catalog_search_results(!query.is_empty());
             ui.set_search_applied_query(query.clone().into());
             ui.set_search_error_message("".into());
@@ -2640,7 +2802,6 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             let catalog_generation = catalog_generation.clone();
             let search_debounce_generation = search_debounce_generation.clone();
             let catalog_paging = catalog_paging.clone();
-            let filters = get_category_filters(&catalog_filters, "Search");
             ui.set_is_loading_more(false);
             ui.set_catalog_has_more(false);
             ui.set_catalog_total_count(0);
@@ -2712,6 +2873,11 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                         *catalog_paging.lock().unwrap() = CatalogPageState {
                             category: "Latest".into(),
                             query,
+                            library_id: local_store
+                                .get_setting("selected_library_id")
+                                .ok()
+                                .flatten()
+                                .unwrap_or_default(),
                             next_start,
                             has_more,
                             loading_more: false,
@@ -2858,6 +3024,21 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
         });
     }
 
+    {
+        let weak = ui.as_weak();
+        let catalog_paging = catalog_paging.clone();
+        let cached_catalog = cached_catalog.clone();
+        let catalog_views = catalog_views.clone();
+        let catalog_generation = catalog_generation.clone();
+        let search_debounce_generation = search_debounce_generation.clone();
+        ui.on_cache_catalog_view(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            save_catalog_view(&ui, &catalog_paging, &cached_catalog, &catalog_views);
+            catalog_generation.fetch_add(1, Ordering::SeqCst);
+            search_debounce_generation.fetch_add(1, Ordering::SeqCst);
+        });
+    }
+
     // 6. Filter Category
     {
         let weak = ui.as_weak();
@@ -2870,23 +3051,70 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
         let search_debounce_generation = search_debounce_generation.clone();
         let performer_search_generation = performer_search_generation.clone();
         let catalog_paging = catalog_paging.clone();
+        let catalog_views = catalog_views.clone();
         let catalog_filters = catalog_filters.clone();
         ui.on_filter_category(move |cat| {
             let Some(ui) = weak.upgrade() else { return };
             if cat != "Latest" {
                 ui.set_catalog_category_drilldown(false);
             }
+            save_catalog_view(&ui, &catalog_paging, &cached_catalog, &catalog_views);
             performer_search_generation.fetch_add(1, Ordering::SeqCst);
             search_debounce_generation.fetch_add(1, Ordering::SeqCst);
-            ui.set_is_catalog_search_results(false);
-            ui.set_search_error_message("".into());
-            ui.set_search_results_filter("all".into());
-            let request_id = catalog_generation.fetch_add(1, Ordering::SeqCst) + 1;
             if cat == "Channels" {
+                catalog_generation.fetch_add(1, Ordering::SeqCst);
                 ui.set_active_screen("channels".into());
                 ui.invoke_select_channel_category("All Channels".into());
                 return;
             }
+            let performer_letter = ui.get_performer_letter().to_string();
+            let performers_photo_only = ui.get_performers_photo_only();
+            let performer_search_query = if cat == "Performers" {
+                ui.get_performer_search_query().to_string()
+            } else {
+                String::new()
+            };
+            let cat = cat.to_string();
+            let mut filters = get_category_filters(&catalog_filters, &cat);
+            if cat == "Performers" {
+                filters.performer_letter = performer_letter.clone();
+            }
+            let library_id = local_store
+                .get_setting("selected_library_id")
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            let target_page = CatalogPageState {
+                category: cat.clone(),
+                query: performer_search_query.clone(),
+                library_id: library_id.clone(),
+                filters: filters.clone(),
+                ..CatalogPageState::default()
+            };
+            if let Some((request_id, cards)) = restore_catalog_view(
+                &ui,
+                &catalog_view_key(&target_page),
+                &catalog_paging,
+                &cached_catalog,
+                &catalog_views,
+                &catalog_generation,
+                &search_debounce_generation,
+            ) {
+                if let Some(session) = credential_store.get().ok().flatten() {
+                    refresh_catalog_thumbnails_async(
+                        ui.as_weak(),
+                        cards,
+                        session.access_token,
+                        cached_catalog.clone(),
+                        Some((catalog_generation.clone(), request_id)),
+                    );
+                }
+                return;
+            }
+            let request_id = catalog_generation.fetch_add(1, Ordering::SeqCst) + 1;
+            ui.set_is_catalog_search_results(false);
+            ui.set_search_error_message("".into());
+            ui.set_search_results_filter("all".into());
             ui.set_is_loading_catalog(true);
             ui.set_is_loading_more(false);
             ui.set_catalog_has_more(false);
@@ -2904,14 +3132,6 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             };
             ui.set_status(loading_msg.into());
             ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
-            let performer_letter = ui.get_performer_letter().to_string();
-            let performers_photo_only = ui.get_performers_photo_only();
-            let performer_search_query = if cat == "Performers" {
-                ui.get_performer_search_query().to_string()
-            } else {
-                String::new()
-            };
-            let cat = cat.to_string();
             let weak = weak.clone();
             let jellyfin = jellyfin.clone();
             let resolver = resolver.clone();
@@ -2920,11 +3140,8 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             let cached_catalog = cached_catalog.clone();
             let catalog_generation = catalog_generation.clone();
             let catalog_paging = catalog_paging.clone();
-            let mut filters = get_category_filters(&catalog_filters, &cat);
+            let library_id = library_id.clone();
             sync_catalog_filters_to_ui(&ui, &cat, &filters);
-            if cat == "Performers" {
-                filters.performer_letter = performer_letter.clone();
-            }
 
             std::thread::spawn(move || {
                 let mut is_unauth = false;
@@ -2986,6 +3203,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                         *catalog_paging.lock().unwrap() = CatalogPageState {
                             category: cat,
                             query: performer_search_query,
+                            library_id,
                             next_start,
                             has_more,
                             loading_more: false,
@@ -3234,7 +3452,8 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                                 loading_more: false,
                                 ..requested_page
                             };
-                            set_catalog(&ui, cards.clone());
+                            ui.set_catalog_anchor_pending(true);
+                            append_catalog_page(&ui, cards.clone());
                             if is_search {
                                 let (
                                     movie_count,

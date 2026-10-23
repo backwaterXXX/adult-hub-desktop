@@ -1,6 +1,7 @@
 use crate::MainWindow;
 use crate::catalog::{
-    filter_catalog_items, refresh_channel_thumbnails_async, set_channel_catalog, tv_item_to_card,
+    append_channel_page, filter_catalog_items, refresh_channel_thumbnails_async,
+    set_channel_catalog, tv_item_to_card,
 };
 use crate::context::AppContext;
 use adult_hub_client::{ResolverError, TvItem};
@@ -746,7 +747,7 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
                         .iter()
                         .map(tv_item_to_card)
                         .collect::<Vec<_>>();
-                    set_channel_catalog(&ui, cards.clone());
+                    append_channel_page(&ui, cards.clone());
                     ui.set_channel_has_more(has_more);
                     ui.set_channel_loading(false);
                     if let Some(error_kind) = error_kind {

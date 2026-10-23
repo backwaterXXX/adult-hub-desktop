@@ -31,7 +31,7 @@ use reporter::PlaybackReporter;
 use session::PlaybackSessionController;
 use slint::Model;
 use slint::winit_030::{EventResult, WinitWindowAccessor, winit};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
@@ -125,6 +125,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Arc::new(LocalStore::open_in_memory().expect("in-memory sqlite store"))
         }
     };
+    let _card_zoom_persistence = install_card_zoom_persistence(&ui, local_store.clone());
     let credential_store = Arc::new(CredentialStore::new());
     if let Ok(None) = credential_store.get()
         && let Ok(Some(legacy_session)) = local_store.load_legacy_session()
@@ -591,79 +592,177 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     ui.show()?;
     ui.run()?;
+    let _ = local_store.set_setting("card_zoom", &format!("{:.4}", ui.get_card_zoom()));
     Ok(())
 }
 
-/// Handle zoom before Slint dispatches the event. A TouchArea overlay would
-/// grab pointer presses even without a click handler, so keep all non-zoom
-/// input on Slint's normal path.
+fn install_card_zoom_persistence(
+    ui: &MainWindow,
+    local_store: Arc<LocalStore>,
+) -> Rc<slint::Timer> {
+    const KEY: &str = "card_zoom";
+
+    let initial_zoom = local_store
+        .get_setting(KEY)
+        .ok()
+        .flatten()
+        .and_then(|value| value.parse::<f32>().ok())
+        .filter(|value| value.is_finite())
+        .map(|value| value.clamp(0.6, 1.6))
+        .unwrap_or(1.0);
+    ui.set_card_zoom(initial_zoom);
+
+    let pending_zoom = Rc::new(Cell::new(initial_zoom));
+    let timer = Rc::new(slint::Timer::default());
+    let save_value = pending_zoom.clone();
+    timer.start(
+        slint::TimerMode::SingleShot,
+        Duration::from_millis(350),
+        move || {
+            let _ = local_store.set_setting(KEY, &format!("{:.4}", save_value.get()));
+        },
+    );
+
+    let restart_timer = timer.clone();
+    ui.on_card_zoom_changed(move |value| {
+        pending_zoom.set(value.clamp(0.6, 1.6));
+        restart_timer.restart();
+    });
+    timer
+}
+
+/// Handle card zoom before Slint dispatches input. All unrelated pointer and
+/// keyboard events stay on Slint's normal path.
 fn install_card_zoom_event_filter(ui: &MainWindow) {
     use slint::ComponentHandle;
 
     let weak = ui.as_weak();
-    #[cfg(not(target_os = "windows"))]
-    let mut ctrl_held = false;
-    ui.window().on_winit_window_event(move |_window, event| {
-        #[cfg(target_os = "windows")]
-        let ctrl_held = {
-            use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL};
-            (unsafe { GetAsyncKeyState(VK_CONTROL as i32) }) as u16 & 0x8000 != 0
-        };
-
-        #[cfg(not(target_os = "windows"))]
-        {
+    // Keep Winit's modifier events and physical Ctrl key transitions, with
+    // Windows key-state checks as a fallback for wheel messages that arrive
+    // between keyboard and modifier events.
+    let mut ctrl_modifier = false;
+    let mut left_ctrl_down = false;
+    let mut right_ctrl_down = false;
+    ui.window()
+        .on_winit_window_event(move |slint_window, event| {
             match event {
                 winit::event::WindowEvent::ModifiersChanged(modifiers) => {
-                    ctrl_held = modifiers.state().control_key();
+                    ctrl_modifier = modifiers.state().control_key();
                 }
-                winit::event::WindowEvent::Focused(false) => ctrl_held = false,
+                winit::event::WindowEvent::KeyboardInput { event: key, .. } => {
+                    use winit::keyboard::{KeyCode, PhysicalKey};
+                    let is_down = key.state == winit::event::ElementState::Pressed;
+                    match key.physical_key {
+                        PhysicalKey::Code(KeyCode::ControlLeft) => left_ctrl_down = is_down,
+                        PhysicalKey::Code(KeyCode::ControlRight) => right_ctrl_down = is_down,
+                        _ => {}
+                    }
+                }
+                winit::event::WindowEvent::Focused(false) => {
+                    ctrl_modifier = false;
+                    left_ctrl_down = false;
+                    right_ctrl_down = false;
+                }
                 _ => {}
             }
-        }
 
-        let winit::event::WindowEvent::MouseWheel { delta, .. } = event else {
-            return EventResult::Propagate;
-        };
-        if !ctrl_held {
-            return EventResult::Propagate;
-        }
+            #[cfg(target_os = "windows")]
+            let ctrl_held = {
+                use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+                    GetAsyncKeyState, GetKeyState, VK_CONTROL,
+                };
+                ctrl_modifier
+                    || left_ctrl_down
+                    || right_ctrl_down
+                    || (unsafe { GetKeyState(VK_CONTROL as i32) }) as u16 & 0x8000 != 0
+                    || (unsafe { GetAsyncKeyState(VK_CONTROL as i32) }) as u16 & 0x8000 != 0
+            };
 
-        let delta_y = match delta {
-            winit::event::MouseScrollDelta::LineDelta(_, y) => f64::from(*y),
-            winit::event::MouseScrollDelta::PixelDelta(position) => position.y / 60.0,
-        };
-        if delta_y == 0.0 {
-            return EventResult::Propagate;
-        }
+            #[cfg(not(target_os = "windows"))]
+            let ctrl_held = ctrl_modifier || left_ctrl_down || right_ctrl_down;
 
-        let Some(ui) = weak.upgrade() else {
-            return EventResult::Propagate;
-        };
-        let screen = ui.get_active_screen();
-        let browse_surface = matches!(
-            screen.as_str(),
-            "browse" | "channels" | "performer-details" | "studio-details"
-        );
-        let modal_open = ui.get_is_fullscreen()
-            || ui.get_catalog_filter_picker_visible()
-            || ui.get_browse_subnav_menu_open()
-            || ui.get_channel_picker_open()
-            || ui.get_cleartext_consent_visible()
-            || ui.get_licenses_visible()
-            || ui.get_download_panel_open()
-            || ui.get_resolver_prompt_dialog_visible()
-            || ui.get_login_modal_visible()
-            || ui.get_confirm_dialog_visible();
-        if !browse_surface || modal_open {
-            return EventResult::Propagate;
-        }
+            let Some(ui) = weak.upgrade() else {
+                return EventResult::Propagate;
+            };
+            let screen = ui.get_active_screen();
+            let browse_surface = matches!(
+                screen.as_str(),
+                "browse" | "channels" | "performer-details" | "studio-details"
+            );
+            let modal_open = ui.get_is_fullscreen()
+                || ui.get_catalog_filter_picker_visible()
+                || ui.get_browse_subnav_menu_open()
+                || ui.get_channel_picker_open()
+                || ui.get_cleartext_consent_visible()
+                || ui.get_licenses_visible()
+                || ui.get_download_panel_open()
+                || ui.get_resolver_prompt_dialog_visible()
+                || ui.get_login_modal_visible()
+                || ui.get_confirm_dialog_visible();
+            if !browse_surface || modal_open {
+                return EventResult::Propagate;
+            }
 
-        // Winit reports mouse-wheel lines directly; touchpads report pixels.
-        // Treat 1 line or 60 logical pixels as a 10% zoom step.
-        let zoom = (f64::from(ui.get_card_zoom()) + delta_y * 0.1).clamp(0.6, 1.6);
-        ui.set_card_zoom(zoom as f32);
-        EventResult::PreventDefault
-    });
+            let text_input_focused = ui.get_text_input_focused();
+            if let winit::event::WindowEvent::KeyboardInput { event: key, .. } = event {
+                if ctrl_held
+                    && key.state == winit::event::ElementState::Pressed
+                    && !key.repeat
+                    && !text_input_focused
+                {
+                    use winit::keyboard::{Key, KeyCode, PhysicalKey};
+                    let key_action = match key.physical_key {
+                        PhysicalKey::Code(KeyCode::Equal | KeyCode::NumpadAdd) => Some(1.0_f32),
+                        PhysicalKey::Code(KeyCode::Minus | KeyCode::NumpadSubtract) => {
+                            Some(-1.0_f32)
+                        }
+                        PhysicalKey::Code(KeyCode::Digit0 | KeyCode::Numpad0) => Some(0.0_f32),
+                        _ => match key.logical_key.as_ref() {
+                            Key::Character("+" | "=") => Some(1.0),
+                            Key::Character("-") => Some(-1.0),
+                            Key::Character("0") => Some(0.0),
+                            _ => None,
+                        },
+                    };
+                    if let Some(action) = key_action {
+                        let zoom = if action == 0.0 {
+                            1.0
+                        } else {
+                            (ui.get_card_zoom() + action * 0.1).clamp(0.6, 1.6)
+                        };
+                        ui.set_card_zoom(zoom);
+                        return EventResult::PreventDefault;
+                    }
+                }
+                return EventResult::Propagate;
+            }
+
+            let winit::event::WindowEvent::MouseWheel { delta, .. } = event else {
+                return EventResult::Propagate;
+            };
+            if !ctrl_held || text_input_focused {
+                return EventResult::Propagate;
+            }
+
+            let delta_y = match delta {
+                winit::event::MouseScrollDelta::LineDelta(_, y) => f64::from(*y),
+                winit::event::MouseScrollDelta::PixelDelta(position) => {
+                    let scale = slint_window
+                        .with_winit_window(|window| window.scale_factor())
+                        .unwrap_or(1.0);
+                    position.y / scale / 60.0
+                }
+            };
+            if delta_y == 0.0 {
+                return EventResult::Propagate;
+            }
+
+            // Winit reports wheel lines or high-resolution pixel deltas. Scale
+            // linearly so touchpad movement remains smooth and small deltas count.
+            let zoom = (f64::from(ui.get_card_zoom()) + delta_y * 0.1).clamp(0.6, 1.6);
+            ui.set_card_zoom(zoom as f32);
+            EventResult::PreventDefault
+        });
 }
 
 fn run_demo_shuffle(ui: &MainWindow) {
@@ -1148,6 +1247,58 @@ mod tests {
         assert!(!rows_2[0].has_2);
         assert!(rows_2[1].has_0);
         assert!(rows_2[1].has_1);
+    }
+
+    #[test]
+    fn partial_catalog_rows_keep_their_fixed_column_slots() {
+        use crate::catalog::cards_to_rows;
+
+        let cards_for = |count: usize| {
+            (0..count)
+                .map(|index| VideoCardData {
+                    id: format!("layout-{index}").into(),
+                    ..Default::default()
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert!(cards_to_rows(&cards_for(0), 5).is_empty());
+        for count in 1..=3 {
+            let rows = cards_to_rows(&cards_for(count), 5);
+            assert_eq!(rows.len(), 1);
+            let occupied = [
+                rows[0].has_0,
+                rows[0].has_1,
+                rows[0].has_2,
+                rows[0].has_3,
+                rows[0].has_4,
+            ];
+            assert!(occupied.iter().take(count).all(|slot| *slot));
+            assert!(occupied.iter().skip(count).all(|slot| !slot));
+        }
+
+        let full_and_partial = cards_to_rows(&cards_for(7), 5);
+        assert_eq!(full_and_partial.len(), 2);
+        assert_eq!(
+            [
+                full_and_partial[0].has_0,
+                full_and_partial[0].has_1,
+                full_and_partial[0].has_2,
+                full_and_partial[0].has_3,
+                full_and_partial[0].has_4,
+            ],
+            [true; 5]
+        );
+        assert_eq!(
+            [
+                full_and_partial[1].has_0,
+                full_and_partial[1].has_1,
+                full_and_partial[1].has_2,
+                full_and_partial[1].has_3,
+                full_and_partial[1].has_4,
+            ],
+            [true, true, false, false, false]
+        );
     }
 
     #[test]

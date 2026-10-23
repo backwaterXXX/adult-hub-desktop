@@ -3,6 +3,33 @@ import { VideoCard, VideoCardData } from "VideoCard.slint";
 import { HubTheme } from "theme.slint";
 import { SectionHeader } from "common-controls.slint";
 
+// Shared responsive grid for video collections in performer and studio
+// profiles. The caller selects the same HubGrid card width used by catalog
+// rows; this component handles wrapping, spacing, and card actions uniformly.
+export component VideoCardGrid inherits FlexboxLayout {
+    in property <[VideoCardData]> items: [];
+    in property <length> grid-width: 0px;
+    in property <length> card-width: 220px;
+    in property <length> gap: 20px;
+    callback play(string);
+    callback open-detail(string);
+
+    width: root.grid-width;
+    // Every row starts at the first column. Keep unused space after the last
+    // card instead of redistributing it across a partial row.
+    alignment: start;
+    spacing-horizontal: root.gap;
+    spacing-vertical: root.gap;
+
+    for item in root.items : VideoCard {
+        item: item;
+        card-width: root.card-width;
+        fixed-width: true;
+        play => { root.play(item.id); }
+        open-detail => { root.open-detail(item.id); }
+    }
+}
+
 export component PerformerCard inherits Rectangle {
     in property <VideoCardData> item;
     in property <bool> is-focused: false;
@@ -119,23 +146,27 @@ export component StudioCard inherits Rectangle {
     accessible-action-default => { root.clicked(); }
 
     in property <length> card-width: 240px;
-    property <length> artwork-height: min(140px, root.card-width * 0.5);
-
     width: root.card-width;
     preferred-width: root.card-width;
-    height: root.artwork-height + 64px;
+    height: 72px;
     border-radius: HubTheme.card-radius;
     background: touch.has-hover ? HubTheme.surface-hover : ((root.is-focused || root.has-focus) ? #FFFFFF08 : HubTheme.surface);
     border-width: (root.is-focused || root.has-focus) ? 2px : (touch.has-hover ? 1px : 0px);
     border-color: (root.is-focused || root.has-focus) ? HubTheme.focus-ring : HubTheme.separator;
     clip: true;
 
-    VerticalLayout {
-        spacing: 0px;
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: 12px;
+        alignment: start;
 
         Rectangle {
-            height: root.artwork-height;
-            background: #181920;
+            width: 38px;
+            height: 38px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 10px;
+            background: HubTheme.surface-raised;
             clip: true;
 
             if root.item.has-thumbnail : Image {
@@ -145,49 +176,27 @@ export component StudioCard inherits Rectangle {
                 image-fit: contain;
             }
 
-            if !root.item.has-thumbnail : Rectangle {
-                width: 100%;
-                height: 100%;
-                background: @linear-gradient(135deg, #1f1b29 0%, #16151c 100%);
-                Image {
-                    source: @image-url("../../../assets/icons/browse.svg");
-                    width: 36px;
-                    height: 36px;
-                    x: (parent.width - self.width) / 2;
-                    y: (parent.height - self.height) / 2;
-                    image-fit: contain;
-                    opacity: 0.35;
-                }
+            if !root.item.has-thumbnail : Image {
+                source: @image-url("../../../assets/icons/building.svg");
+                width: 18px;
+                height: 18px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                image-fit: contain;
+                opacity: 0.45;
             }
         }
 
-        VerticalLayout {
-            height: 64px;
-            padding-left: 12px;
-            padding-right: 12px;
-            padding-top: 8px;
-            padding-bottom: 8px;
-            spacing: 2px;
-            alignment: center;
-
-            Text {
-                text: root.item.title;
-                color: HubTheme.text-primary;
-                font-size: HubTheme.card-title-size;
-                font-weight: 600;
-                horizontal-alignment: left;
-                vertical-alignment: center;
-                overflow: elide;
-                width: 100%;
-            }
-
-            Text {
-                text: "Studio";
-                color: HubTheme.text-muted;
-                font-size: 11px;
-                horizontal-alignment: left;
-                vertical-alignment: center;
-            }
+        Text {
+            text: root.item.title;
+            horizontal-stretch: 1;
+            color: HubTheme.text-primary;
+            font-size: HubTheme.card-title-size;
+            font-weight: 600;
+            vertical-alignment: center;
+            overflow: elide;
+            max-lines: 2;
+            wrap: word-wrap;
         }
     }
 

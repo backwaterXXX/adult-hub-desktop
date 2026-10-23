@@ -343,6 +343,11 @@ pub fn cards_to_rows(cards: &[VideoCardData], cols_per_row: usize) -> Vec<VideoC
 }
 
 pub fn set_catalog(ui: &MainWindow, items: Vec<VideoCardData>) {
+    ui.set_catalog_has_more(false);
+    ui.set_catalog_scroll_y(0.0);
+    ui.set_catalog_anchor_index(0);
+    ui.set_catalog_anchor_screen_y(0.0);
+    ui.set_catalog_anchor_pending(false);
     let mut indexed = items;
     for (i, card) in indexed.iter_mut().enumerate() {
         card.card_index = i as i32;
@@ -356,6 +361,11 @@ pub fn set_catalog(ui: &MainWindow, items: Vec<VideoCardData>) {
 }
 
 pub fn set_channel_catalog(ui: &MainWindow, items: Vec<VideoCardData>) {
+    ui.set_channel_has_more(false);
+    ui.set_channel_scroll_y(0.0);
+    ui.set_channel_anchor_index(0);
+    ui.set_channel_anchor_screen_y(0.0);
+    ui.set_channel_anchor_pending(false);
     let mut indexed = items;
     for (i, card) in indexed.iter_mut().enumerate() {
         card.card_index = i as i32;
@@ -366,6 +376,168 @@ pub fn set_channel_catalog(ui: &MainWindow, items: Vec<VideoCardData>) {
 
     let model = Rc::new(slint::VecModel::from(indexed));
     ui.set_channel_items(model.into());
+}
+
+fn set_row_card(row: &mut VideoCardRowData, column: usize, card: VideoCardData) {
+    match column {
+        0 => {
+            row.has_0 = true;
+            row.card_0 = card;
+        }
+        1 => {
+            row.has_1 = true;
+            row.card_1 = card;
+        }
+        2 => {
+            row.has_2 = true;
+            row.card_2 = card;
+        }
+        3 => {
+            row.has_3 = true;
+            row.card_3 = card;
+        }
+        4 => {
+            row.has_4 = true;
+            row.card_4 = card;
+        }
+        5 => {
+            row.has_5 = true;
+            row.card_5 = card;
+        }
+        6 => {
+            row.has_6 = true;
+            row.card_6 = card;
+        }
+        7 => {
+            row.has_7 = true;
+            row.card_7 = card;
+        }
+        _ => unreachable!("grid rows have at most eight cards"),
+    }
+}
+
+fn append_grid_page(
+    cards_model: &slint::ModelRc<VideoCardData>,
+    rows_model: &slint::ModelRc<VideoCardRowData>,
+    cards: Vec<VideoCardData>,
+    columns: usize,
+) -> bool {
+    let Some(cards_vec) = cards_model
+        .as_any()
+        .downcast_ref::<slint::VecModel<VideoCardData>>()
+    else {
+        return false;
+    };
+    let Some(rows_vec) = rows_model
+        .as_any()
+        .downcast_ref::<slint::VecModel<VideoCardRowData>>()
+    else {
+        return false;
+    };
+
+    let old_len = cards_vec.row_count();
+    if cards.len() < old_len
+        || (0..old_len).any(|index| {
+            cards_vec
+                .row_data(index)
+                .as_ref()
+                .map(|card| card.id.as_str())
+                != cards.get(index).map(|card| card.id.as_str())
+        })
+    {
+        return false;
+    }
+
+    let columns = columns.clamp(1, 8);
+    let appended = cards
+        .into_iter()
+        .skip(old_len)
+        .enumerate()
+        .map(|(offset, mut card)| {
+            card.card_index = (old_len + offset) as i32;
+            card
+        })
+        .collect::<Vec<_>>();
+    if appended.is_empty() {
+        return true;
+    }
+
+    let fill_tail = if old_len > 0 && old_len % columns != 0 {
+        let row_index = old_len / columns;
+        let Some(mut row) = rows_vec.row_data(row_index) else {
+            return false;
+        };
+        let start_column = old_len % columns;
+        let fill = (columns - start_column).min(appended.len());
+        for (offset, card) in appended.iter().take(fill).enumerate() {
+            set_row_card(&mut row, start_column + offset, card.clone());
+        }
+        rows_vec.set_row_data(row_index, row);
+        fill
+    } else {
+        0
+    };
+
+    cards_vec.extend_from_slice(&appended);
+
+    for chunk in appended[fill_tail..].chunks(columns) {
+        rows_vec.push(cards_to_rows(chunk, columns).remove(0));
+    }
+    true
+}
+
+pub fn append_catalog_page(ui: &MainWindow, cards: Vec<VideoCardData>) {
+    if !append_grid_page(
+        &ui.get_catalog_items(),
+        &ui.get_catalog_rows(),
+        cards.clone(),
+        ui.get_catalog_column_count() as usize,
+    ) {
+        let previous = ui.get_catalog_items();
+        let anchor_id = previous
+            .row_data(ui.get_catalog_anchor_index().max(0) as usize)
+            .map(|card| card.id);
+        let anchor_screen_y = ui.get_catalog_anchor_screen_y();
+        set_catalog(ui, cards);
+        if let Some(anchor_id) = anchor_id
+            && let Some(index) = (0..ui.get_catalog_items().row_count()).find(|index| {
+                ui.get_catalog_items()
+                    .row_data(*index)
+                    .is_some_and(|card| card.id == anchor_id)
+            })
+        {
+            ui.set_catalog_anchor_index(index as i32);
+            ui.set_catalog_anchor_screen_y(anchor_screen_y);
+            ui.set_catalog_anchor_pending(true);
+        }
+    }
+}
+
+pub fn append_channel_page(ui: &MainWindow, cards: Vec<VideoCardData>) {
+    if !append_grid_page(
+        &ui.get_channel_items(),
+        &ui.get_channel_rows(),
+        cards.clone(),
+        ui.get_channel_column_count() as usize,
+    ) {
+        let previous = ui.get_channel_items();
+        let anchor_id = previous
+            .row_data(ui.get_channel_anchor_index().max(0) as usize)
+            .map(|card| card.id);
+        let anchor_screen_y = ui.get_channel_anchor_screen_y();
+        set_channel_catalog(ui, cards);
+        if let Some(anchor_id) = anchor_id
+            && let Some(index) = (0..ui.get_channel_items().row_count()).find(|index| {
+                ui.get_channel_items()
+                    .row_data(*index)
+                    .is_some_and(|card| card.id == anchor_id)
+            })
+        {
+            ui.set_channel_anchor_index(index as i32);
+            ui.set_channel_anchor_screen_y(anchor_screen_y);
+            ui.set_channel_anchor_pending(true);
+        }
+    }
 }
 
 pub fn reflow_grid(ui: &MainWindow, catalog_columns: usize, channel_columns: usize) {
@@ -905,14 +1077,17 @@ pub fn tv_item_to_card(item: &TvItem) -> VideoCardData {
     } else {
         String::new()
     };
+    // Cache entries are keyed by the actual source URL. Falling back to the
+    // item ID can reuse an image cached by an older mapping even when this
+    // record currently has no matching artwork source.
     let cache_key = if !thumbnail_url.is_empty() {
-        thumbnail_url.as_str()
+        Some(thumbnail_url.as_str())
     } else if !fallback_thumbnail_url.is_empty() {
-        fallback_thumbnail_url.as_str()
+        Some(fallback_thumbnail_url.as_str())
     } else {
-        item.id.as_str()
+        None
     };
-    let (has_thumbnail, thumbnail) = if !cache_key.is_empty() {
+    let (has_thumbnail, thumbnail) = if let Some(cache_key) = cache_key {
         if let Some(img) = crate::thumbnails::load_cached_image(cache_key) {
             (true, img)
         } else {
@@ -1220,6 +1395,20 @@ pub fn fetch_thumbnail_batch(
     })
 }
 
+fn log_records_without_thumbnail_source(requests: &[ThumbnailRequest]) {
+    for request in requests.iter().filter(|request| {
+        request.primary_url.is_empty()
+            && request.fallback_url.is_empty()
+            && request.alternate_url.is_empty()
+    }) {
+        let short_id = request.id.chars().take(8).collect::<String>();
+        crate::diagnostics::GLOBAL_LOG.w(
+            "Thumbnail",
+            &format!("record {short_id}: source response contained no usable artwork URL"),
+        );
+    }
+}
+
 pub fn refresh_catalog_thumbnails_async(
     ui: slint::Weak<MainWindow>,
     cards: Vec<VideoCardData>,
@@ -1228,6 +1417,7 @@ pub fn refresh_catalog_thumbnails_async(
     generation: Option<(Arc<AtomicU64>, u64)>,
 ) {
     let requests = cards.iter().map(ThumbnailRequest::from).collect::<Vec<_>>();
+    log_records_without_thumbnail_source(&requests);
     std::thread::spawn(move || {
         for start in (0..requests.len()).step_by(THUMBNAIL_BATCH_SIZE) {
             if generation.as_ref().is_some_and(|(generation, request_id)| {
@@ -1295,6 +1485,7 @@ pub fn refresh_channel_thumbnails_async(
     request_id: u64,
 ) {
     let requests = cards.iter().map(ThumbnailRequest::from).collect::<Vec<_>>();
+    log_records_without_thumbnail_source(&requests);
     std::thread::spawn(move || {
         for start in (0..requests.len()).step_by(THUMBNAIL_BATCH_SIZE) {
             if !thumbnail_generation_is_current(&generation, request_id) {

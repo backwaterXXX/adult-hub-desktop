@@ -488,7 +488,19 @@ pub fn load_cached_image(url: &str) -> Option<slint::Image> {
     }
     let path = url_to_cache_path(url);
     if path.is_file() {
-        slint::Image::load_from_path(&path).ok()
+        match slint::Image::load_from_path(&path) {
+            Ok(image) => Some(image),
+            Err(_) => {
+                crate::diagnostics::GLOBAL_LOG.w(
+                    "Thumbnail",
+                    &format!(
+                        "{}: cached image could not be decoded; a background fetch will replace it",
+                        diagnostic_subject(url)
+                    ),
+                );
+                None
+            }
+        }
     } else {
         None
     }
@@ -499,9 +511,47 @@ pub fn load_cached_image_bytes(url: &str) -> Option<Vec<u8>> {
     if url.trim().is_empty() {
         return None;
     }
-    let bytes = std::fs::read(url_to_cache_path(url)).ok()?;
-    decode_dynamic_image(&bytes)?;
-    Some(bytes)
+    let path = url_to_cache_path(url);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            crate::diagnostics::GLOBAL_LOG.w(
+                "Thumbnail",
+                &format!(
+                    "{}: cached image could not be read ({})",
+                    diagnostic_subject(url),
+                    error.kind()
+                ),
+            );
+            return None;
+        }
+    };
+    if decode_dynamic_image(&bytes).is_some() {
+        Some(bytes)
+    } else {
+        discard_corrupt_cache_entry(url, &path);
+        None
+    }
+}
+
+fn discard_corrupt_cache_entry(url: &str, path: &std::path::Path) {
+    let removed = CACHE_WRITE_LOCK
+        .lock()
+        .ok()
+        .is_some_and(|_guard| std::fs::remove_file(path).is_ok());
+    crate::diagnostics::GLOBAL_LOG.w(
+        "Thumbnail",
+        &format!(
+            "{}: cached image failed decoding{}",
+            diagnostic_subject(url),
+            if removed {
+                " and the corrupt entry was removed"
+            } else {
+                ""
+            }
+        ),
+    );
 }
 
 /// Create a Slint image from encoded bytes. Call this on the UI thread; Slint
@@ -590,8 +640,7 @@ fn fetch_and_cache_image_data(
     }
     let path = url_to_cache_path(url);
     if allow_cached_image
-        && path.is_file()
-        && let Ok(cached_bytes) = std::fs::read(&path)
+        && let Some(cached_bytes) = load_cached_image_bytes(url)
         && let Some((image, normalized_bytes)) = decode_image(&cached_bytes)
     {
         return Some((image, normalized_bytes));
@@ -840,6 +889,7 @@ mod tests {
     use std::io::{Cursor, Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::Mutex;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     static RESOLVER_REQUEST_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -1079,5 +1129,31 @@ mod tests {
             .write_to(&mut oversized, image::ImageFormat::Png)
             .unwrap();
         assert!(decode_dynamic_image(oversized.get_ref()).is_none());
+    }
+
+    #[test]
+    fn corrupt_cache_recovery_removes_only_the_bad_entry() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "adult-hub-thumbnail-corrupt-cache-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let corrupt = directory.join("corrupt.png");
+        let neighbor = directory.join("unrelated.png");
+        std::fs::write(&corrupt, b"not an image").unwrap();
+        std::fs::write(&neighbor, b"leave this cache entry alone").unwrap();
+
+        super::discard_corrupt_cache_entry(
+            "https://jellyfin.example/Items/12345678-1234-4234-8234-123456789012/Images/Primary",
+            &corrupt,
+        );
+
+        assert!(!corrupt.exists());
+        assert!(neighbor.exists());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

@@ -1,6 +1,6 @@
 import { ListView, ScrollView } from "std-widgets.slint";
 import { VideoCard, VideoCardData, VideoCardRowData } from "VideoCard.slint";
-import { DashboardShelf, PerformerCard, StudioCard, CategoryCard } from "DashboardShelf.slint";
+import { DashboardShelf, PerformerCard, StudioCard, CategoryCard, VideoCardGrid } from "DashboardShelf.slint";
 import { Toast } from "Toast.slint";
 import { HubTheme, KeyboardState } from "theme.slint";
 import { Button, IconButton, FilterIconButton, LoadingState, PageHeader, AccentSpinner } from "common-controls.slint";
@@ -56,20 +56,38 @@ export global HubGrid {
         return Math.max(1, Math.min(8, floor(n)));
     }
 
-    // Session-only Ctrl+wheel zoom starts at 1.0 and scales the fitted card
-    // width directly, while columns reflow to keep cards inside the grid.
+    public pure function zoomed-columns(available: length, zoom: float, base-card: length, min-width: length) -> int {
+        return HubGrid.columns(available, max(min-width, base-card * zoom));
+    }
+
+    // Select columns from the requested size, then fit those cards evenly in
+    // the viewport. The column count does not depend on the fitted width.
+    public pure function zoomed-card-width(available: length, zoom: float, base-card: length, min-width: length) -> length {
+        let requested = max(min-width, base-card * zoom);
+        let cols = HubGrid.zoomed-columns(available, zoom, base-card, min-width);
+        return min(requested, HubGrid.card-width(available, cols));
+    }
+
+    public pure function catalog-row-height(available: length, cols: int, category: string) -> length {
+        let width = HubGrid.card-width(available, cols);
+        if category == "Performers" {
+            return width * 1.35 + 58px + HubGrid.gap();
+        }
+        if category == "Studios" {
+            return 72px + HubGrid.gap();
+        }
+        if category == "Categories" {
+            return min(120px, width * 0.45) + 56px + HubGrid.gap();
+        }
+        return width * 0.5625 + 70px + HubGrid.gap();
+    }
+
     public pure function video-min-card(zoom: float) -> length {
         return 220px * zoom;
     }
 
     public pure function performer-min-card(zoom: float) -> length {
         return 150px * zoom;
-    }
-
-    public pure function zoomed-card-width(available: length, zoom: float, min-card: length, min-width: length) -> length {
-        let base-columns = HubGrid.columns(available, min-card);
-        let base-width = HubGrid.card-width(available, base-columns);
-        return max(min-width, base-width * zoom);
     }
 
     public pure function card-width(available: length, cols: int) -> length {
@@ -1221,7 +1239,7 @@ component CatalogGridCard inherits Rectangle {
     width: root.card-width;
     preferred-width: root.card-width;
     height: root.card.provider == "performer" ? (root.card-width * 1.35 + 58px) :
-            (root.card.provider == "studio" ? (min(140px, root.card-width * 0.5) + 64px) :
+            (root.card.provider == "studio" ? 72px :
             ((root.card.provider == "genre" || root.card.provider == "category") ? (min(120px, root.card-width * 0.45) + 56px) :
             (root.card-width * 0.5625 + 70px)));
 
@@ -1362,13 +1380,76 @@ export component MainWindow inherits Window {
     in-out property <bool> catalog-has-more: false;
     in-out property <int> catalog-total-count: 0;
     in-out property <string> catalog-more-error: "";
-    // Ctrl + wheel card zoom. Session-only: never written to settings, and it
-    // starts at 1.0 on every launch.
+    // Shared card zoom, persisted locally and loaded at application startup.
     in-out property <float> card-zoom: 1.0;
-    // Measured widths of the real grid surfaces, used for column math so the
-    // catalog, channels and the profile filmographies all share one rule.
-    in-out property <length> catalog-content-width: 0px;
-    in-out property <length> channel-content-width: 0px;
+    callback card-zoom-changed(float);
+    changed card-zoom => {
+        if root.active-screen == "browse" && root.catalog-items.length > 0 {
+            root.catalog-anchor-pending = true;
+        }
+        if root.active-screen == "channels" && root.channel-items.length > 0 {
+            root.channel-anchor-pending = true;
+        }
+        if root.active-screen == "performer-details" && root.performer-items.length > 0 {
+            root.performer-anchor-pending = true;
+        }
+        if root.active-screen == "studio-details" && root.studio-items.length > 0 {
+            root.studio-anchor-pending = true;
+        }
+        root.card-zoom-changed(root.card-zoom);
+    }
+    in-out property <bool> text-input-focused <=> KeyboardState.text-input-focused;
+    function set-card-zoom(value: float) {
+        root.card-zoom = max(0.6, min(1.6, value));
+    }
+    in property <length> app-navigation-width: root.is-fullscreen || root.active-screen == "player" || root.nav-collapsed
+        ? 0px
+        : (root.compact-layout ? 72px : 216px);
+    // Derive viewport width from the window and sidebars. It does not depend
+    // on card sizes or list content, so the responsive grid has no measurement loop.
+    in property <length> catalog-content-width: max(240px, root.width - root.app-navigation-width
+        - 2 * (root.compact-layout ? HubTheme.compact-content-padding : HubTheme.content-padding));
+    in property <length> channel-content-width: max(240px, root.width - root.app-navigation-width
+        - (root.compact-layout ? 0px : 232px)
+        - 2 * (root.compact-layout ? HubTheme.compact-content-padding : HubTheme.content-padding));
+    in-out property <length> catalog-scroll-y: 0px;
+    in-out property <length> channel-scroll-y: 0px;
+    in-out property <int> catalog-anchor-index: 0;
+    in-out property <length> catalog-anchor-screen-y: 0px;
+    in-out property <bool> catalog-anchor-pending: false;
+    in-out property <int> channel-anchor-index: 0;
+    in-out property <length> channel-anchor-screen-y: 0px;
+    in-out property <bool> channel-anchor-pending: false;
+    in-out property <length> performer-scroll-y: 0px;
+    in-out property <int> performer-anchor-index: 0;
+    in-out property <length> performer-anchor-screen-y: 0px;
+    in-out property <bool> performer-anchor-pending: false;
+    in-out property <length> studio-scroll-y: 0px;
+    in-out property <int> studio-anchor-index: 0;
+    in-out property <length> studio-anchor-screen-y: 0px;
+    in-out property <bool> studio-anchor-pending: false;
+    in-out property <length> catalog-grid-x: 0px;
+    in-out property <length> catalog-grid-y: 0px;
+    in-out property <length> catalog-grid-width: 0px;
+    in-out property <length> catalog-grid-height: 0px;
+    in-out property <length> channel-grid-x: 0px;
+    in-out property <length> channel-grid-y: 0px;
+    in-out property <length> channel-grid-width: 0px;
+    in-out property <length> channel-grid-height: 0px;
+    in-out property <length> performer-film-grid-x: 0px;
+    in-out property <length> performer-film-grid-y: 0px;
+    in-out property <length> performer-film-grid-width: 0px;
+    in-out property <length> performer-film-grid-height: 0px;
+    in-out property <length> performer-film-grid-content-y: 0px;
+    in-out property <int> performer-film-grid-cols: 1;
+    in-out property <length> performer-film-grid-card-width: 160px;
+    in-out property <length> studio-film-grid-x: 0px;
+    in-out property <length> studio-film-grid-y: 0px;
+    in-out property <length> studio-film-grid-width: 0px;
+    in-out property <length> studio-film-grid-height: 0px;
+    in-out property <length> studio-film-grid-content-y: 0px;
+    in-out property <int> studio-film-grid-cols: 1;
+    in-out property <length> studio-film-grid-card-width: 160px;
     in-out property <bool> is-resolving-stream: false;
     in-out property <string> search-query: "";
     in-out property <string> search-focus-target: "catalog";
@@ -1507,6 +1588,7 @@ export component MainWindow inherits Window {
     callback search-catalog(string);
     callback filter-search-results(string);
     callback filter-category(string);
+    callback cache-catalog-view();
     callback request-performer-search();
     callback load-more-catalog();
     callback update-catalog-filter(string);
@@ -1727,13 +1809,22 @@ export component MainWindow inherits Window {
 
     changed width => {
         root.compact-layout = root.width < 1100px;
+        if root.active-screen == "browse" && root.catalog-items.length > 0 {
+            root.catalog-anchor-pending = true;
+        }
+        if root.active-screen == "channels" && root.channel-items.length > 0 {
+            root.channel-anchor-pending = true;
+        }
+        if root.active-screen == "performer-details" && root.performer-items.length > 0 {
+            root.performer-anchor-pending = true;
+        }
+        if root.active-screen == "studio-details" && root.studio-items.length > 0 {
+            root.studio-anchor-pending = true;
+        }
     }
 
-    // Shared responsive rule (see HubGrid): column counts come from the
-    // measured width of the actual grid surfaces and the scaled card width.
-    // Rust re-chunks the existing
-    // models into rows on reflow, so resizing or zooming never discards
-    // already loaded cards.
+    // Shared responsive rule (see HubGrid): width is derived from the window
+    // viewport, and column count from the requested card size.
     in property <length> desired-catalog-card-width: HubGrid.zoomed-card-width(
         root.catalog-content-width,
         root.card-zoom,
@@ -1741,11 +1832,19 @@ export component MainWindow inherits Window {
         root.active-category == "Performers" ? 150px : 160px);
     in property <length> desired-channel-card-width: HubGrid.zoomed-card-width(
         root.channel-content-width, root.card-zoom, HubGrid.video-min-card(1.0), 160px);
-    in property <int> desired-catalog-columns: HubGrid.columns(root.catalog-content-width, root.desired-catalog-card-width);
-    in property <int> desired-channel-columns: HubGrid.columns(root.channel-content-width, root.desired-channel-card-width);
+    in property <int> desired-catalog-columns: HubGrid.zoomed-columns(
+        root.catalog-content-width,
+        root.card-zoom,
+        root.active-category == "Performers" ? HubGrid.performer-min-card(1.0) : HubGrid.video-min-card(1.0),
+        root.active-category == "Performers" ? 150px : 160px);
+    in property <int> desired-channel-columns: HubGrid.zoomed-columns(
+        root.channel-content-width, root.card-zoom, HubGrid.video-min-card(1.0), 160px);
 
     changed desired-catalog-columns => {
         if root.catalog-column-count != root.desired-catalog-columns {
+            if root.catalog-items.length > 0 {
+                root.catalog-anchor-pending = true;
+            }
             root.catalog-column-count = root.desired-catalog-columns;
             root.reflow-grid(root.catalog-column-count, root.channel-column-count);
         }
@@ -1753,6 +1852,9 @@ export component MainWindow inherits Window {
 
     changed desired-channel-columns => {
         if root.channel-column-count != root.desired-channel-columns {
+            if root.channel-items.length > 0 {
+                root.channel-anchor-pending = true;
+            }
             root.channel-column-count = root.desired-channel-columns;
             root.reflow-grid(root.catalog-column-count, root.channel-column-count);
         }
@@ -1772,6 +1874,24 @@ export component MainWindow inherits Window {
         key-pressed(event) => {
             if (KeyboardState.text-input-focused && event.text != Key.Escape) {
                 return reject;
+            }
+            let card-grid-screen = root.active-screen == "browse"
+                || root.active-screen == "channels"
+                || root.active-screen == "performer-details"
+                || root.active-screen == "studio-details";
+            if event.modifiers.control && card-grid-screen {
+                if event.text == "+" || event.text == "=" {
+                    root.set-card-zoom(root.card-zoom + 0.1);
+                    return accept;
+                }
+                if event.text == "-" {
+                    root.set-card-zoom(root.card-zoom - 0.1);
+                    return accept;
+                }
+                if event.text == "0" {
+                    root.set-card-zoom(1.0);
+                    return accept;
+                }
             }
             // Panic Exit: Ctrl+Shift+Q
             if (event.modifiers.control && event.modifiers.shift && (event.text == "q" || event.text == "Q")) {
@@ -2539,6 +2659,7 @@ export component MainWindow inherits Window {
             // 2. BROWSE SCREEN
             // ==========================================
             if root.active-screen == "browse" : VerticalLayout {
+                horizontal-stretch: 1;
                 padding: root.compact-layout ? HubTheme.compact-content-padding : HubTheme.content-padding;
                 spacing: 16px;
 
@@ -3302,16 +3423,44 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                if !root.is-loading-catalog && root.catalog-rows.length > 0 : ListView {
+                if !root.is-loading-catalog && root.catalog-rows.length > 0 : catalog-list := ListView {
                     vertical-stretch: 1;
+                    content-y <=> root.catalog-scroll-y;
 
-                    changed width => {
-                        root.catalog-content-width = self.width;
+                    changed visible-width => {
+                        root.catalog-grid-width = self.visible-width;
+                    }
+                    changed visible-height => {
+                        root.catalog-grid-height = self.visible-height;
+                    }
+                    changed absolute-position => {
+                        root.catalog-grid-x = self.absolute-position.x;
+                        root.catalog-grid-y = self.absolute-position.y;
+                    }
+                    changed content-height => {
+                        if root.catalog-anchor-pending && self.content-height > 0px {
+                            let row-height = HubGrid.catalog-row-height(root.catalog-content-width,
+                                root.catalog-column-count, root.active-category);
+                            let row-index = floor(root.catalog-anchor-index / root.catalog-column-count);
+                            let restored-y = root.catalog-anchor-screen-y - row-index * row-height;
+                            root.catalog-scroll-y = min(0px, max(self.visible-height - self.content-height, restored-y));
+                            root.catalog-anchor-pending = false;
+                        }
                     }
 
                     changed content-y => {
+                        if root.catalog-items.length > 0 {
+                            let row-height = HubGrid.catalog-row-height(root.catalog-content-width,
+                                root.catalog-column-count, root.active-category);
+                            let visible-row = min(root.catalog-rows.length - 1,
+                                max(0, floor(-self.content-y / row-height)));
+                            root.catalog-anchor-index = min(root.catalog-items.length - 1,
+                                visible-row * root.catalog-column-count);
+                            root.catalog-anchor-screen-y = visible-row * row-height + self.content-y;
+                        }
                         // Prefetch roughly two rows before the end of the list.
-                        let prefetch = 2 * HubGrid.row-height(self.width, root.catalog-column-count);
+                        let prefetch = 2 * HubGrid.catalog-row-height(root.catalog-content-width,
+                            root.catalog-column-count, root.active-category);
                         if root.catalog-has-more
                             && !root.is-loading-more
                             && !root.is-loading-catalog
@@ -3324,6 +3473,9 @@ export component MainWindow inherits Window {
                     for row in root.catalog-rows : HorizontalLayout {
                         padding-bottom: HubGrid.gap();
                         spacing: HubGrid.gap();
+                        // Use the same column origins for full and partial
+                        // rows. HorizontalLayout's space-between spreads a
+                        // two-card row across the entire viewport.
                         alignment: start;
 
                         if row.has-0 : CatalogGridCard { card: row.card-0; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
@@ -3379,6 +3531,7 @@ export component MainWindow inherits Window {
             // 2. CHANNELS SCREEN (Stage 8)
             // ==========================================
             if root.active-screen == "channels" : HorizontalLayout {
+                horizontal-stretch: 1;
                 spacing: 0px;
 
                 // Left Sidebar: Categories & Channels
@@ -3694,16 +3847,44 @@ export component MainWindow inherits Window {
                         vertical-stretch: 1;
                     }
 
-                    if root.channel-rows.length > 0 : ListView {
+                    if root.channel-rows.length > 0 : channel-list := ListView {
                         vertical-stretch: 1;
+                        content-y <=> root.channel-scroll-y;
 
-                        changed width => {
-                            root.channel-content-width = self.width;
+                        changed visible-width => {
+                            root.channel-grid-width = self.visible-width;
+                        }
+                        changed visible-height => {
+                            root.channel-grid-height = self.visible-height;
+                        }
+                        changed absolute-position => {
+                            root.channel-grid-x = self.absolute-position.x;
+                            root.channel-grid-y = self.absolute-position.y;
+                        }
+                        changed content-height => {
+                            if root.channel-anchor-pending && self.content-height > 0px {
+                                let row-height = HubGrid.row-height(root.channel-content-width,
+                                    root.channel-column-count);
+                                let row-index = floor(root.channel-anchor-index / root.channel-column-count);
+                                let restored-y = root.channel-anchor-screen-y - row-index * row-height;
+                                root.channel-scroll-y = min(0px, max(self.visible-height - self.content-height, restored-y));
+                                root.channel-anchor-pending = false;
+                            }
                         }
 
                         changed content-y => {
+                            if root.channel-items.length > 0 {
+                                let row-height = HubGrid.row-height(root.channel-content-width,
+                                    root.channel-column-count);
+                                let visible-row = min(root.channel-rows.length - 1,
+                                    max(0, floor(-self.content-y / row-height)));
+                                root.channel-anchor-index = min(root.channel-items.length - 1,
+                                    visible-row * root.channel-column-count);
+                                root.channel-anchor-screen-y = visible-row * row-height + self.content-y;
+                            }
                             // Prefetch roughly two rows before the end.
-                            let prefetch = 2 * HubGrid.row-height(self.width, root.channel-column-count);
+                            let prefetch = 2 * HubGrid.row-height(root.channel-content-width,
+                                root.channel-column-count);
                             if root.channel-has-more
                                 && !root.channel-loading
                                 && (self.content-height <= self.height
@@ -6451,6 +6632,7 @@ export component MainWindow inherits Window {
             // 6. PERFORMER DETAILS SCREEN
             // ==========================================
             if root.active-screen == "performer-details" : VerticalLayout {
+                horizontal-stretch: 1;
                 spacing: 0px;
 
                 // Fixed Navigation Header
@@ -6503,9 +6685,34 @@ export component MainWindow inherits Window {
 
                 perf-scroll := ScrollView {
                     vertical-stretch: 1;
+                    content-y <=> root.performer-scroll-y;
                     vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
                     horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
                     mouse-drag-pan-enabled: true;
+
+                    changed content-height => {
+                        if root.performer-anchor-pending && self.content-height > 0px {
+                            let row-height = root.performer-film-grid-card-width * 0.5625 + 70px + HubGrid.gap();
+                            let row-index = root.performer-anchor-index / root.performer-film-grid-cols;
+                            let restored-y = root.performer-anchor-screen-y
+                                - root.performer-film-grid-content-y - row-index * row-height;
+                            root.performer-scroll-y = min(0px,
+                                max(self.visible-height - self.content-height, restored-y));
+                            root.performer-anchor-pending = false;
+                        }
+                    }
+
+                    changed content-y => {
+                        if root.performer-items.length > 0 {
+                            let row-height = root.performer-film-grid-card-width * 0.5625 + 70px + HubGrid.gap();
+                            let row-from-top = max(0px, -self.content-y - root.performer-film-grid-content-y);
+                            let visible-row = max(0, floor(row-from-top / row-height));
+                            root.performer-anchor-index = min(root.performer-items.length - 1,
+                                visible-row * root.performer-film-grid-cols);
+                            root.performer-anchor-screen-y = root.performer-film-grid-content-y
+                                + visible-row * row-height + self.content-y;
+                        }
+                    }
 
                     VerticalLayout {
                         width: perf-scroll.visible-width;
@@ -6634,26 +6841,46 @@ export component MainWindow inherits Window {
                         }
 
                         // State 4: Ready Grid of Cards (Responsive Grid spanning available width)
-                        if !root.performer-loading && root.performer-items.length > 0 : perf-film-grid := FlexboxLayout {
-                            spacing-horizontal: HubGrid.gap();
-                            spacing-vertical: HubGrid.gap();
+                        if !root.performer-loading && root.performer-items.length > 0 : perf-film-grid := VideoCardGrid {
+                            items: root.performer-items;
+                            grid-width: self.avail-w;
+                            card-width: self.card-w;
 
                             // Measure the real viewport (not self.width, which
                             // loops through the Flickable) so this grid and the
                             // catalog agree on columns at the same width.
                             property <length> content-pad: root.compact-layout ? HubTheme.compact-content-padding : HubTheme.content-padding;
                             property <length> avail-w: max(240px, perf-scroll.visible-width - 2 * self.content-pad);
+                            property <int> cols: HubGrid.zoomed-columns(self.avail-w, root.card-zoom, HubGrid.video-min-card(1.0), 160px);
                             property <length> card-w: HubGrid.zoomed-card-width(self.avail-w, root.card-zoom, HubGrid.video-min-card(1.0), 160px);
-                            property <int> cols: HubGrid.columns(self.avail-w, self.card-w);
 
-                            for item in root.performer-items : VideoCard {
-                                item: item;
-                                card-width: perf-film-grid.card-w;
-                                fixed-width: true;
-                                clicked => { root.open-item-detail(item.id); }
-                                play => { root.play-item(item.id); }
-                                open-detail => { root.open-item-detail(item.id); }
+                            play(id) => { root.play-item(id); }
+                            open-detail(id) => { root.open-item-detail(id); }
+
+                            changed cols => { root.performer-film-grid-cols = self.cols; }
+                            changed card-w => { root.performer-film-grid-card-width = self.card-w; }
+
+                            changed absolute-position => {
+                                root.performer-film-grid-x = self.absolute-position.x;
+                                root.performer-film-grid-y = max(self.absolute-position.y, perf-scroll.absolute-position.y);
+                                root.performer-film-grid-width = min(self.width, perf-scroll.visible-width);
+                                let viewport-bottom = perf-scroll.absolute-position.y + perf-scroll.visible-height;
+                                root.performer-film-grid-height = max(0px,
+                                    min(viewport-bottom, self.absolute-position.y + self.height)
+                                    - root.performer-film-grid-y);
+                                root.performer-film-grid-content-y = self.absolute-position.y
+                                    - perf-scroll.absolute-position.y - perf-scroll.content-y;
                             }
+                            changed width => {
+                                root.performer-film-grid-width = min(self.width, perf-scroll.visible-width);
+                            }
+                            changed height => {
+                                let viewport-bottom = perf-scroll.absolute-position.y + perf-scroll.visible-height;
+                                root.performer-film-grid-height = max(0px,
+                                    min(viewport-bottom, self.absolute-position.y + self.height)
+                                    - root.performer-film-grid-y);
+                            }
+
                         }
                     }
                 }
@@ -6663,6 +6890,7 @@ export component MainWindow inherits Window {
             // 7. STUDIO DETAILS SCREEN
             // ==========================================
             if root.active-screen == "studio-details" : VerticalLayout {
+                horizontal-stretch: 1;
                 spacing: 0px;
 
                 // Fixed Navigation Header
@@ -6715,9 +6943,34 @@ export component MainWindow inherits Window {
 
                 studio-scroll := ScrollView {
                     vertical-stretch: 1;
+                    content-y <=> root.studio-scroll-y;
                     vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
                     horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
                     mouse-drag-pan-enabled: true;
+
+                    changed content-height => {
+                        if root.studio-anchor-pending && self.content-height > 0px {
+                            let row-height = root.studio-film-grid-card-width * 0.5625 + 70px + HubGrid.gap();
+                            let row-index = root.studio-anchor-index / root.studio-film-grid-cols;
+                            let restored-y = root.studio-anchor-screen-y
+                                - root.studio-film-grid-content-y - row-index * row-height;
+                            root.studio-scroll-y = min(0px,
+                                max(self.visible-height - self.content-height, restored-y));
+                            root.studio-anchor-pending = false;
+                        }
+                    }
+
+                    changed content-y => {
+                        if root.studio-items.length > 0 {
+                            let row-height = root.studio-film-grid-card-width * 0.5625 + 70px + HubGrid.gap();
+                            let row-from-top = max(0px, -self.content-y - root.studio-film-grid-content-y);
+                            let visible-row = max(0, floor(row-from-top / row-height));
+                            root.studio-anchor-index = min(root.studio-items.length - 1,
+                                visible-row * root.studio-film-grid-cols);
+                            root.studio-anchor-screen-y = root.studio-film-grid-content-y
+                                + visible-row * row-height + self.content-y;
+                        }
+                    }
 
                     VerticalLayout {
                         width: studio-scroll.visible-width;
@@ -6733,7 +6986,7 @@ export component MainWindow inherits Window {
                             border-radius: 12px;
                             background: HubTheme.surface;
                             border-width: 1px;
-                            border-color: #ff663333;
+                            border-color: HubTheme.separator;
 
                             HorizontalLayout {
                                 padding: 20px;
@@ -6744,9 +6997,7 @@ export component MainWindow inherits Window {
                                     width: 100px;
                                     height: 100px;
                                     border-radius: 12px;
-                                    background: #ff663322;
-                                    border-width: 2px;
-                                    border-color: #ff6633;
+                                    background: HubTheme.surface-raised;
 
                                     Image {
                                         source: @image-url("../../../assets/icons/building.svg");
@@ -6755,6 +7006,7 @@ export component MainWindow inherits Window {
                                         x: (parent.width - self.width) / 2;
                                         y: (parent.height - self.height) / 2;
                                         image-fit: contain;
+                                        opacity: 0.65;
                                     }
                                 }
 
@@ -6770,12 +7022,6 @@ export component MainWindow inherits Window {
                                         color: HubTheme.text-primary;
                                     }
 
-                                    Text {
-                                        text: "Studio Catalog & Releases";
-                                        font-size: 14px;
-                                        color: #ffaa88;
-                                        font-weight: 600;
-                                    }
                                 }
                             }
                         }
@@ -6783,7 +7029,7 @@ export component MainWindow inherits Window {
                         // Releases Header
                         HorizontalLayout {
                             spacing: 12px;
-                            alignment: center;
+                            alignment: start;
 
                             Text {
                                 text: root.studio-loading ? "Releases (Loading…)" :
@@ -6851,23 +7097,43 @@ export component MainWindow inherits Window {
                         }
 
                         // State 4: Ready Grid of Cards (Responsive Grid spanning available width)
-                        if !root.studio-loading && root.studio-items.length > 0 : studio-film-grid := FlexboxLayout {
-                            spacing-horizontal: HubGrid.gap();
-                            spacing-vertical: HubGrid.gap();
+                        if !root.studio-loading && root.studio-items.length > 0 : studio-film-grid := VideoCardGrid {
+                            items: root.studio-items;
+                            grid-width: self.avail-w;
+                            card-width: self.card-w;
 
                             property <length> content-pad: root.compact-layout ? HubTheme.compact-content-padding : HubTheme.content-padding;
                             property <length> avail-w: max(240px, studio-scroll.visible-width - 2 * self.content-pad);
+                            property <int> cols: HubGrid.zoomed-columns(self.avail-w, root.card-zoom, HubGrid.video-min-card(1.0), 160px);
                             property <length> card-w: HubGrid.zoomed-card-width(self.avail-w, root.card-zoom, HubGrid.video-min-card(1.0), 160px);
-                            property <int> cols: HubGrid.columns(self.avail-w, self.card-w);
 
-                            for item in root.studio-items : VideoCard {
-                                item: item;
-                                card-width: studio-film-grid.card-w;
-                                fixed-width: true;
-                                clicked => { root.open-item-detail(item.id); }
-                                play => { root.play-item(item.id); }
-                                open-detail => { root.open-item-detail(item.id); }
+                            play(id) => { root.play-item(id); }
+                            open-detail(id) => { root.open-item-detail(id); }
+
+                            changed cols => { root.studio-film-grid-cols = self.cols; }
+                            changed card-w => { root.studio-film-grid-card-width = self.card-w; }
+
+                            changed absolute-position => {
+                                root.studio-film-grid-x = self.absolute-position.x;
+                                root.studio-film-grid-y = max(self.absolute-position.y, studio-scroll.absolute-position.y);
+                                root.studio-film-grid-width = min(self.width, studio-scroll.visible-width);
+                                let viewport-bottom = studio-scroll.absolute-position.y + studio-scroll.visible-height;
+                                root.studio-film-grid-height = max(0px,
+                                    min(viewport-bottom, self.absolute-position.y + self.height)
+                                    - root.studio-film-grid-y);
+                                root.studio-film-grid-content-y = self.absolute-position.y
+                                    - studio-scroll.absolute-position.y - studio-scroll.content-y;
                             }
+                            changed width => {
+                                root.studio-film-grid-width = min(self.width, studio-scroll.visible-width);
+                            }
+                            changed height => {
+                                let viewport-bottom = studio-scroll.absolute-position.y + studio-scroll.visible-height;
+                                root.studio-film-grid-height = max(0px,
+                                    min(viewport-bottom, self.absolute-position.y + self.height)
+                                    - root.studio-film-grid-y);
+                            }
+
                         }
                     }
                 }

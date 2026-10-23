@@ -376,9 +376,14 @@ pub fn install_stage7_handlers(ui: &MainWindow, ctx: &AppContext) {
         let ctx_prof = ctx.clone();
         ui.on_open_performer_profile(move |name| {
             let Some(ui) = weak.upgrade() else { return };
+            ui.invoke_cache_catalog_view();
             ctx_prof.push_nav_destination(crate::handlers::browsing::current_nav_destination(&ui));
             let name_str = name.to_string();
             ui.set_performer_name(name);
+            ui.set_performer_scroll_y(0.0);
+            ui.set_performer_anchor_index(0);
+            ui.set_performer_anchor_screen_y(0.0);
+            ui.set_performer_anchor_pending(false);
             ui.set_performer_loading(true);
             ui.set_performer_error("".into());
             ui.set_performer_movie_count(-1);
@@ -429,9 +434,14 @@ pub fn install_stage7_handlers(ui: &MainWindow, ctx: &AppContext) {
         let ctx_prof = ctx.clone();
         ui.on_open_studio_profile(move |name| {
             let Some(ui) = weak.upgrade() else { return };
+            ui.invoke_cache_catalog_view();
             ctx_prof.push_nav_destination(crate::handlers::browsing::current_nav_destination(&ui));
             let studio_str = name.to_string();
             ui.set_studio_name(name);
+            ui.set_studio_scroll_y(0.0);
+            ui.set_studio_anchor_index(0);
+            ui.set_studio_anchor_screen_y(0.0);
+            ui.set_studio_anchor_pending(false);
             ui.set_studio_loading(true);
             ui.set_studio_error("".into());
             ui.set_studio_items(Rc::new(slint::VecModel::default()).into());
