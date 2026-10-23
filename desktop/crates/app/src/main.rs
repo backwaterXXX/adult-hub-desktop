@@ -31,6 +31,7 @@ use reporter::PlaybackReporter;
 use session::PlaybackSessionController;
 use slint::Model;
 use slint::winit_030::WinitWindowAccessor;
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
@@ -41,6 +42,24 @@ slint::include_modules!();
 pub use handlers::controls::ASPECTS;
 
 const LICENSES_TEXT: &str = include_str!("../../../../NOTICES.txt");
+
+thread_local! {
+    static APP_CLIPBOARD: RefCell<Option<arboard::Clipboard>> = const { RefCell::new(None) };
+}
+
+pub(crate) fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
+    APP_CLIPBOARD.with(|clipboard| {
+        let mut clipboard = clipboard.borrow_mut();
+        if clipboard.is_none() {
+            *clipboard = Some(arboard::Clipboard::new().map_err(|error| error.to_string())?);
+        }
+        clipboard
+            .as_mut()
+            .expect("clipboard initialized above")
+            .set_text(text)
+            .map_err(|error| error.to_string())
+    })
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_os = "windows")]

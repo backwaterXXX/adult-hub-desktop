@@ -19,6 +19,41 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
     let cached_catalog = ctx.cached_catalog.clone();
     let home_catalog = ctx.home_catalog.clone();
 
+    {
+        let weak = ui.as_weak();
+        ui.on_open_detail_source_url(move |raw_url| {
+            let Some(ui) = weak.upgrade() else { return };
+            let raw_url = raw_url.to_string();
+            let Ok(parsed) = url::Url::parse(&raw_url) else {
+                ui.set_status("Source URL is invalid".into());
+                return;
+            };
+            if !matches!(parsed.scheme(), "http" | "https") {
+                ui.set_status("Only HTTP and HTTPS source links can be opened".into());
+                return;
+            }
+            if let Err(error) = webbrowser::open(parsed.as_str()) {
+                eprintln!("Could not open source URL: {error}");
+                ui.set_status("Could not open source URL".into());
+            }
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        ui.on_copy_detail_item_id(move |item_id| {
+            let Some(ui) = weak.upgrade() else { return };
+            match crate::copy_text_to_clipboard(item_id.as_str()) {
+                Ok(()) => ui.set_detail_id_copied(true),
+                Err(error) => {
+                    eprintln!("Could not copy item ID: {error}");
+                    ui.set_detail_id_copied(false);
+                    ui.set_status("Could not copy item ID to clipboard".into());
+                }
+            }
+        });
+    }
+
     // 1. Open Item Detail Modal
     {
         let weak = ui.as_weak();
@@ -166,9 +201,7 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
             let artwork_token = artwork_session
                 .as_ref()
                 .map(|session| session.access_token.clone());
-            let backdrop_url = if is_telegram_item {
-                crate::thumbnails::phash_thumbnail_url(&target_item.id)
-            } else {
+            let backdrop_url = if !is_telegram_item {
                 target_item.backdrop_image_tag.as_deref().and_then(|tag| {
                     artwork_server.as_ref().map(|server| {
                         JellyfinClient::image_url(
@@ -180,6 +213,10 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                         )
                     })
                 })
+            } else {
+                // Telegram pHash images are poster frames, not wide backdrops.
+                // The detail page renders the poster in its contain-fit header.
+                None
             };
             let cached_backdrop = backdrop_url
                 .as_deref()
@@ -363,6 +400,7 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
             ui.set_detail_original_title(original_title_str.into());
             ui.set_detail_channel(extracted_channel.into());
             ui.set_detail_source_url(extracted_source_url.into());
+            ui.set_detail_id_copied(false);
             ui.set_detail_overview(overview_str.into());
             ui.set_detail_year(year_str.into());
             ui.set_detail_duration(duration_str.into());

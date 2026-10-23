@@ -1612,6 +1612,7 @@ export component MainWindow inherits Window {
     in-out property <string> detail-original-title: "";
     in-out property <string> detail-channel: "";
     in-out property <string> detail-source-url: "";
+    in-out property <bool> detail-id-copied: false;
     in-out property <string> detail-container: "";
     in-out property <string> detail-file-size: "";
     in-out property <image> detail-thumbnail;
@@ -1627,6 +1628,8 @@ export component MainWindow inherits Window {
 
     callback open-item-detail(string);
     callback close-item-detail();
+    callback open-detail-source-url(string);
+    callback copy-detail-item-id(string);
     callback toggle-detail-favorite(string);
     callback toggle-detail-played(string);
     callback play-detail-item(string, bool);
@@ -6379,7 +6382,34 @@ export component MainWindow inherits Window {
                                     if root.detail-source-url != "" : HorizontalLayout {
                                         spacing: 8px;
                                         Text { text: "Source URL"; color: HubTheme.text-muted; font-size: HubTheme.body-size; width: 140px; }
-                                        Text { text: root.detail-source-url; color: #ff9abc; font-size: HubTheme.body-size; horizontal-stretch: 1; wrap: word-wrap; overflow: elide; max-height: 42px; }
+                                        Rectangle {
+                                            horizontal-stretch: 1;
+                                            height: source-url-text.preferred-height;
+                                            background: transparent;
+                                            source-url-text := Text {
+                                                width: 100%;
+                                                text: root.detail-source-url;
+                                                color: source-url-touch.has-hover ? #ffc1d4 : #ff9abc;
+                                                font-size: HubTheme.body-size;
+                                                wrap: word-wrap;
+                                                overflow: elide;
+                                                max-height: 42px;
+                                            }
+                                            source-url-touch := TouchArea {
+                                                clicked => { root.open-detail-source-url(root.detail-source-url); }
+                                            }
+                                            source-url-focus := FocusScope {
+                                                width: 0px;
+                                                height: 0px;
+                                                key-pressed(event) => {
+                                                    if (event.text == Key.Return || event.text == Key.Space) {
+                                                        root.open-detail-source-url(root.detail-source-url);
+                                                        return accept;
+                                                    }
+                                                    reject
+                                                }
+                                            }
+                                        }
                                     }
 
                                     if root.detail-container != "" : HorizontalLayout {
@@ -6404,6 +6434,10 @@ export component MainWindow inherits Window {
                                         spacing: 8px;
                                         Text { text: "Item ID"; color: HubTheme.text-muted; font-size: HubTheme.body-size; width: 140px; }
                                         Text { text: root.detail-id; color: HubTheme.text-muted; font-size: 12px; font-family: "Consolas"; horizontal-stretch: 1; wrap: word-wrap; }
+                                        Button {
+                                            text: root.detail-id-copied ? "Copied" : "Copy ID";
+                                            clicked => { root.copy-detail-item-id(root.detail-id); }
+                                        }
                                     }
                                 }
                             }

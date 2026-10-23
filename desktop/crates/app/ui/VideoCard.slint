@@ -55,6 +55,7 @@ export component VideoCard inherits Rectangle {
     accessible-role: none;
 
     property <length> artwork-height: root.card-width * 0.5625;
+    property <bool> portrait-thumbnail: root.item.thumbnail.height > root.item.thumbnail.width;
     property <bool> show-play: touch.has-hover || play-touch.has-hover;
     property <string> source-label: root.item.studio != "" ? root.item.studio : "";
 
@@ -112,7 +113,7 @@ export component VideoCard inherits Rectangle {
                 source: root.item.thumbnail;
                 width: 100%;
                 height: 100%;
-                image-fit: cover;
+                image-fit: root.portrait-thumbnail ? contain : cover;
             }
 
             if !root.item.has-thumbnail : Rectangle {

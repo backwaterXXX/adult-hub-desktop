@@ -10,6 +10,8 @@ description = "Adult Hub Desktop player prototype"
 adult-hub-player = { path = "../player" }
 adult-hub-client = { path = "../client" }
 adult-hub-storage = { path = "../storage" }
+arboard = { version = "3.7", default-features = false }
+webbrowser = "1.2"
 glow.workspace = true
 slint.workspace = true
 uuid.workspace = true
