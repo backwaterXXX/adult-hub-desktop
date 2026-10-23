@@ -63,15 +63,20 @@ export global HubGrid {
         return Math.max(1, Math.min(8, floor(n)));
     }
 
-    // Session-only Ctrl+wheel card zoom is passed in as `zoom` (1.0 at every
-    // launch, never persisted) and only affects the minimum card width, so
-    // column counts recompute while gaps and margins stay stable.
+    // Session-only Ctrl+wheel zoom starts at 1.0 and scales the fitted card
+    // width directly, while columns reflow to keep cards inside the grid.
     public pure function video-min-card(zoom: float) -> length {
         return 220px * zoom;
     }
 
     public pure function performer-min-card(zoom: float) -> length {
         return 150px * zoom;
+    }
+
+    public pure function zoomed-card-width(available: length, zoom: float, min-card: length, min-width: length) -> length {
+        let base-columns = HubGrid.columns(available, min-card);
+        let base-width = HubGrid.card-width(available, base-columns);
+        return max(min-width, base-width * zoom);
     }
 
     public pure function card-width(available: length, cols: int) -> length {
@@ -1225,7 +1230,7 @@ component CatalogGridCard inherits Rectangle {
     height: root.card.provider == "performer" ? (root.card-width * 1.35 + 58px) :
             (root.card.provider == "studio" ? (min(140px, root.card-width * 0.5) + 64px) :
             ((root.card.provider == "genre" || root.card.provider == "category") ? (min(120px, root.card-width * 0.45) + 56px) :
-            (min(220px, root.card-width * 0.5625) + 70px)));
+            (root.card-width * 0.5625 + 70px)));
 
     if root.card.provider == "performer" : PerformerCard {
         width: 100%;
@@ -1732,14 +1737,19 @@ export component MainWindow inherits Window {
     }
 
     // Shared responsive rule (see HubGrid): column counts come from the
-    // measured width of the actual grid surfaces — not from estimated window
-    // math — and from the session card zoom. Rust re-chunks the existing
+    // measured width of the actual grid surfaces and the scaled card width.
+    // Rust re-chunks the existing
     // models into rows on reflow, so resizing or zooming never discards
     // already loaded cards.
-    in property <int> desired-catalog-columns: HubGrid.columns(root.catalog-content-width,
-        root.active-category == "Performers" ? HubGrid.performer-min-card(root.card-zoom) : HubGrid.video-min-card(root.card-zoom));
-    in property <int> desired-channel-columns: HubGrid.columns(root.channel-content-width,
-        HubGrid.video-min-card(root.card-zoom));
+    in property <length> desired-catalog-card-width: HubGrid.zoomed-card-width(
+        root.catalog-content-width,
+        root.card-zoom,
+        root.active-category == "Performers" ? HubGrid.performer-min-card(1.0) : HubGrid.video-min-card(1.0),
+        root.active-category == "Performers" ? 150px : 160px);
+    in property <length> desired-channel-card-width: HubGrid.zoomed-card-width(
+        root.channel-content-width, root.card-zoom, HubGrid.video-min-card(1.0), 160px);
+    in property <int> desired-catalog-columns: HubGrid.columns(root.catalog-content-width, root.desired-catalog-card-width);
+    in property <int> desired-channel-columns: HubGrid.columns(root.channel-content-width, root.desired-channel-card-width);
 
     changed desired-catalog-columns => {
         if root.catalog-column-count != root.desired-catalog-columns {
@@ -3347,14 +3357,14 @@ export component MainWindow inherits Window {
                         spacing: HubGrid.gap();
                         alignment: start;
 
-                        if row.has-0 : CatalogGridCard { card: row.card-0; card-width: max(HubGrid.card-width(parent.width, root.catalog-column-count), root.active-category == "Performers" ? HubGrid.performer-min-card(root.card-zoom) : HubGrid.video-min-card(root.card-zoom)); focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
-                        if row.has-1 : CatalogGridCard { card: row.card-1; card-width: max(HubGrid.card-width(parent.width, root.catalog-column-count), root.active-category == "Performers" ? HubGrid.performer-min-card(root.card-zoom) : HubGrid.video-min-card(root.card-zoom)); focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
-                        if row.has-2 : CatalogGridCard { card: row.card-2; card-width: max(HubGrid.card-width(parent.width, root.catalog-column-count), root.active-category == "Performers" ? HubGrid.performer-min-card(root.card-zoom) : HubGrid.video-min-card(root.card-zoom)); focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
-                        if row.has-3 : CatalogGridCard { card: row.card-3; card-width: max(HubGrid.card-width(parent.width, root.catalog-column-count), root.active-category == "Performers" ? HubGrid.performer-min-card(root.card-zoom) : HubGrid.video-min-card(root.card-zoom)); focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
-                        if row.has-4 : CatalogGridCard { card: row.card-4; card-width: max(HubGrid.card-width(parent.width, root.catalog-column-count), root.active-category == "Performers" ? HubGrid.performer-min-card(root.card-zoom) : HubGrid.video-min-card(root.card-zoom)); focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
-                        if row.has-5 : CatalogGridCard { card: row.card-5; card-width: max(HubGrid.card-width(parent.width, root.catalog-column-count), root.active-category == "Performers" ? HubGrid.performer-min-card(root.card-zoom) : HubGrid.video-min-card(root.card-zoom)); focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
-                        if row.has-6 : CatalogGridCard { card: row.card-6; card-width: max(HubGrid.card-width(parent.width, root.catalog-column-count), root.active-category == "Performers" ? HubGrid.performer-min-card(root.card-zoom) : HubGrid.video-min-card(root.card-zoom)); focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
-                        if row.has-7 : CatalogGridCard { card: row.card-7; card-width: max(HubGrid.card-width(parent.width, root.catalog-column-count), root.active-category == "Performers" ? HubGrid.performer-min-card(root.card-zoom) : HubGrid.video-min-card(root.card-zoom)); focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
+                        if row.has-0 : CatalogGridCard { card: row.card-0; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
+                        if row.has-1 : CatalogGridCard { card: row.card-1; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
+                        if row.has-2 : CatalogGridCard { card: row.card-2; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
+                        if row.has-3 : CatalogGridCard { card: row.card-3; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
+                        if row.has-4 : CatalogGridCard { card: row.card-4; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
+                        if row.has-5 : CatalogGridCard { card: row.card-5; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
+                        if row.has-6 : CatalogGridCard { card: row.card-6; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
+                        if row.has-7 : CatalogGridCard { card: row.card-7; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
                     }
                 }
 
@@ -3739,7 +3749,7 @@ export component MainWindow inherits Window {
                             alignment: start;
 
                             if row.has-0 : VideoCard {
-                                card-width: max(HubGrid.card-width(parent.width, root.channel-column-count), HubGrid.video-min-card(root.card-zoom));
+                                card-width: root.desired-channel-card-width;
                                 fixed-width: true;
                                 item: row.card-0;
                                 is-focused: root.focused-channel-card-index == row.card-0.card-index;
@@ -3749,7 +3759,7 @@ export component MainWindow inherits Window {
                             }
 
                             if row.has-1 : VideoCard {
-                                card-width: max(HubGrid.card-width(parent.width, root.channel-column-count), HubGrid.video-min-card(root.card-zoom));
+                                card-width: root.desired-channel-card-width;
                                 fixed-width: true;
                                 item: row.card-1;
                                 is-focused: root.focused-channel-card-index == row.card-1.card-index;
@@ -3759,7 +3769,7 @@ export component MainWindow inherits Window {
                             }
 
                             if row.has-2 : VideoCard {
-                                card-width: max(HubGrid.card-width(parent.width, root.channel-column-count), HubGrid.video-min-card(root.card-zoom));
+                                card-width: root.desired-channel-card-width;
                                 fixed-width: true;
                                 item: row.card-2;
                                 is-focused: root.focused-channel-card-index == row.card-2.card-index;
@@ -3769,7 +3779,7 @@ export component MainWindow inherits Window {
                             }
 
                             if row.has-3 : VideoCard {
-                                card-width: max(HubGrid.card-width(parent.width, root.channel-column-count), HubGrid.video-min-card(root.card-zoom));
+                                card-width: root.desired-channel-card-width;
                                 fixed-width: true;
                                 item: row.card-3;
                                 is-focused: root.focused-channel-card-index == row.card-3.card-index;
@@ -3779,7 +3789,7 @@ export component MainWindow inherits Window {
                             }
 
                             if row.has-4 : VideoCard {
-                                card-width: max(HubGrid.card-width(parent.width, root.channel-column-count), HubGrid.video-min-card(root.card-zoom));
+                                card-width: root.desired-channel-card-width;
                                 fixed-width: true;
                                 item: row.card-4;
                                 is-focused: root.focused-channel-card-index == row.card-4.card-index;
@@ -3789,7 +3799,7 @@ export component MainWindow inherits Window {
                             }
 
                             if row.has-5 : VideoCard {
-                                card-width: max(HubGrid.card-width(parent.width, root.channel-column-count), HubGrid.video-min-card(root.card-zoom));
+                                card-width: root.desired-channel-card-width;
                                 fixed-width: true;
                                 item: row.card-5;
                                 is-focused: root.focused-channel-card-index == row.card-5.card-index;
@@ -3799,7 +3809,7 @@ export component MainWindow inherits Window {
                             }
 
                             if row.has-6 : VideoCard {
-                                card-width: max(HubGrid.card-width(parent.width, root.channel-column-count), HubGrid.video-min-card(root.card-zoom));
+                                card-width: root.desired-channel-card-width;
                                 fixed-width: true;
                                 item: row.card-6;
                                 is-focused: root.focused-channel-card-index == row.card-6.card-index;
@@ -3809,7 +3819,7 @@ export component MainWindow inherits Window {
                             }
 
                             if row.has-7 : VideoCard {
-                                card-width: max(HubGrid.card-width(parent.width, root.channel-column-count), HubGrid.video-min-card(root.card-zoom));
+                                card-width: root.desired-channel-card-width;
                                 fixed-width: true;
                                 item: row.card-7;
                                 is-focused: root.focused-channel-card-index == row.card-7.card-index;
@@ -6433,10 +6443,32 @@ export component MainWindow inherits Window {
                                     HorizontalLayout {
                                         spacing: 8px;
                                         Text { text: "Item ID"; color: HubTheme.text-muted; font-size: HubTheme.body-size; width: 140px; }
-                                        Text { text: root.detail-id; color: HubTheme.text-muted; font-size: 12px; font-family: "Consolas"; horizontal-stretch: 1; wrap: word-wrap; }
-                                        Button {
-                                            text: root.detail-id-copied ? "Copied" : "Copy ID";
-                                            clicked => { root.copy-detail-item-id(root.detail-id); }
+                                        Rectangle {
+                                            horizontal-stretch: 1;
+                                            height: item-id-text.preferred-height;
+                                            background: transparent;
+                                            item-id-text := Text {
+                                                width: 100%;
+                                                text: root.detail-id;
+                                                color: root.detail-id-copied ? HubTheme.success : (item-id-touch.has-hover ? #ff9abc : HubTheme.text-muted);
+                                                font-size: 12px;
+                                                font-family: "Consolas";
+                                                wrap: word-wrap;
+                                            }
+                                            item-id-touch := TouchArea {
+                                                clicked => { root.copy-detail-item-id(root.detail-id); }
+                                            }
+                                            item-id-focus := FocusScope {
+                                                width: 0px;
+                                                height: 0px;
+                                                key-pressed(event) => {
+                                                    if (event.text == Key.Return || event.text == Key.Space) {
+                                                        root.copy-detail-item-id(root.detail-id);
+                                                        return accept;
+                                                    }
+                                                    reject
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -6642,8 +6674,8 @@ export component MainWindow inherits Window {
                             // catalog agree on columns at the same width.
                             property <length> content-pad: root.compact-layout ? HubTheme.compact-content-padding : HubTheme.content-padding;
                             property <length> avail-w: max(240px, perf-scroll.visible-width - 2 * self.content-pad);
-                            property <int> cols: HubGrid.columns(self.avail-w, HubGrid.video-min-card(root.card-zoom));
-                            property <length> card-w: HubGrid.card-width(self.avail-w, self.cols);
+                            property <length> card-w: HubGrid.zoomed-card-width(self.avail-w, root.card-zoom, HubGrid.video-min-card(1.0), 160px);
+                            property <int> cols: HubGrid.columns(self.avail-w, self.card-w);
 
                             for item in root.performer-items : VideoCard {
                                 item: item;
@@ -6856,8 +6888,8 @@ export component MainWindow inherits Window {
 
                             property <length> content-pad: root.compact-layout ? HubTheme.compact-content-padding : HubTheme.content-padding;
                             property <length> avail-w: max(240px, studio-scroll.visible-width - 2 * self.content-pad);
-                            property <int> cols: HubGrid.columns(self.avail-w, HubGrid.video-min-card(root.card-zoom));
-                            property <length> card-w: HubGrid.card-width(self.avail-w, self.cols);
+                            property <length> card-w: HubGrid.zoomed-card-width(self.avail-w, root.card-zoom, HubGrid.video-min-card(1.0), 160px);
+                            property <int> cols: HubGrid.columns(self.avail-w, self.card-w);
 
                             for item in root.studio-items : VideoCard {
                                 item: item;
@@ -7602,14 +7634,15 @@ export component MainWindow inherits Window {
         }
         }
 
-        // Ctrl + wheel card zoom. The overlay is active only while Ctrl is held
-        // (tracked by the root FocusScope), so plain wheel scrolling keeps going
-        // to the underlying lists. Zoom is session-only: it resets to 100% on
-        // every launch and is never written to settings.
+        // Ctrl + wheel card zoom. The overlay rejects ordinary wheel events so
+        // they continue to the underlying list. Zoom is session-only.
         WheelZoomCapture {
         width: 100%;
         height: 100%;
-        active: KeyboardState.ctrl-held && !root.is-fullscreen && root.active-screen != "player";
+        active: !root.is-fullscreen && (root.active-screen == "browse"
+            || root.active-screen == "channels"
+            || root.active-screen == "performer-details"
+            || root.active-screen == "studio-details");
         zoom-delta(dy) => {
             // One wheel notch (±120px delta) moves the zoom by 10%.
             let step = Math.max(-0.1, Math.min(0.1, dy / 120 * 0.1));

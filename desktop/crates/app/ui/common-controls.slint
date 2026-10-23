@@ -615,9 +615,8 @@ export component EmptyState inherits VerticalLayout {
     }
 }
 
-// Invisible wheel overlay for the Ctrl+scroll card zoom. It only captures
-// events while `active` (the physical Ctrl state); otherwise the wheel falls
-// through to the ListView/ScrollView underneath, so plain scrolling is unchanged.
+// Invisible wheel overlay for card zoom. It stays enabled on browse surfaces
+// so it can see event modifiers and the native physical Ctrl state.
 export component WheelZoomCapture inherits TouchArea {
     in property <bool> active: false;
     callback zoom-delta(float);
@@ -625,11 +624,12 @@ export component WheelZoomCapture inherits TouchArea {
     enabled: root.active;
 
     scroll-event(event) => {
-        // On Windows the native keyboard poll is authoritative. Slint's
-        // ScrollEvent modifiers can still say Ctrl is up (notably for right
-        // Ctrl), even while this overlay is enabled by the physical key state.
-        root.zoom-delta(event.delta-y / 1px);
-        EventResult.accept
+        if (event.modifiers.control || KeyboardState.ctrl-held) {
+            root.zoom-delta(event.delta-y / 1px);
+            EventResult.accept
+        } else {
+            EventResult.reject
+        }
     }
 }
 
