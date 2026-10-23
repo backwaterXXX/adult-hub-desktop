@@ -3,17 +3,10 @@ import { VideoCard, VideoCardData, VideoCardRowData } from "VideoCard.slint";
 import { DashboardShelf, PerformerCard, StudioCard, CategoryCard } from "DashboardShelf.slint";
 import { Toast } from "Toast.slint";
 import { HubTheme, KeyboardState } from "theme.slint";
-import { Button, IconButton, FilterIconButton, LoadingState, PageHeader, AccentSpinner, WheelZoomCapture } from "common-controls.slint";
+import { Button, IconButton, FilterIconButton, LoadingState, PageHeader, AccentSpinner } from "common-controls.slint";
 import { SettingsView, DiscoveredServerItem, HomeCategoryOption, LibraryOptionData } from "SettingsView.slint";
 export { DiscoveredServerItem, HomeCategoryOption, LibraryOptionData }
 export { VideoCardData, VideoCardRowData }
-
-// Bridge to the theme KeyboardState so Rust code can set ctrl-held: only items
-// exported from this file get generated Rust accessors. The alias keeps the
-// theme global as the single source of truth for the wheel-zoom handlers.
-export global NativeKeyboardState {
-    in-out property <bool> ctrl-held <=> KeyboardState.ctrl-held;
-}
 
 export struct HomeCategoryShelfData {
     name: string,
@@ -1772,21 +1765,11 @@ export component MainWindow inherits Window {
         x: 0; y: 0;
         width: 100%; height: 100%;
 
-        changed has-focus => {
-            if !self.has-focus {
-                KeyboardState.ctrl-held = false;
-            }
-        }
-
         key-released(event) => {
-            if (!event.modifiers.control) {
-                KeyboardState.ctrl-held = false;
-            }
             EventResult.accept
         }
 
         key-pressed(event) => {
-            KeyboardState.ctrl-held = event.modifiers.control;
             if (KeyboardState.text-input-focused && event.text != Key.Escape) {
                 return reject;
             }
@@ -2020,20 +2003,6 @@ export component MainWindow inherits Window {
                 return accept;
             }
             reject
-        }
-
-        capture-key-pressed(event) => {
-            if (event.modifiers.control) {
-                KeyboardState.ctrl-held = true;
-            }
-            EventResult.reject
-        }
-
-        capture-key-released(event) => {
-            if (!event.modifiers.control) {
-                KeyboardState.ctrl-held = false;
-            }
-            EventResult.reject
         }
 
         HorizontalLayout {
@@ -7634,21 +7603,6 @@ export component MainWindow inherits Window {
         }
         }
 
-        // Ctrl + wheel card zoom. The overlay rejects ordinary wheel events so
-        // they continue to the underlying list. Zoom is session-only.
-        WheelZoomCapture {
-        width: 100%;
-        height: 100%;
-        active: !root.is-fullscreen && (root.active-screen == "browse"
-            || root.active-screen == "channels"
-            || root.active-screen == "performer-details"
-            || root.active-screen == "studio-details");
-        zoom-delta(dy) => {
-            // One wheel notch (±120px delta) moves the zoom by 10%.
-            let step = Math.max(-0.1, Math.min(0.1, dy / 120 * 0.1));
-            root.card-zoom = Math.max(0.6, Math.min(1.6, root.card-zoom + step));
-        }
-        }
     }
 
 }

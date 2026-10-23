@@ -615,24 +615,6 @@ export component EmptyState inherits VerticalLayout {
     }
 }
 
-// Invisible wheel overlay for card zoom. It stays enabled on browse surfaces
-// so it can see event modifiers and the native physical Ctrl state.
-export component WheelZoomCapture inherits TouchArea {
-    in property <bool> active: false;
-    callback zoom-delta(float);
-
-    enabled: root.active;
-
-    scroll-event(event) => {
-        if (event.modifiers.control || KeyboardState.ctrl-held) {
-            root.zoom-delta(event.delta-y / 1px);
-            EventResult.accept
-        } else {
-            EventResult.reject
-        }
-    }
-}
-
 export component AccentSpinner inherits Rectangle {
     in property <length> size: 24px;
     in property <color> brush: HubTheme.accent;

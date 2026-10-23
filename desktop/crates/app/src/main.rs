@@ -30,7 +30,7 @@ use renderer::install_renderer;
 use reporter::PlaybackReporter;
 use session::PlaybackSessionController;
 use slint::Model;
-use slint::winit_030::WinitWindowAccessor;
+use slint::winit_030::{EventResult, WinitWindowAccessor, winit};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
@@ -74,9 +74,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let options = Options::parse(std::env::args().skip(1))?;
 
-    slint::BackendSelector::new().require_opengl().select()?;
+    slint::BackendSelector::new()
+        .backend_name("winit".into())
+        .require_opengl()
+        .select()?;
 
     let ui = MainWindow::new()?;
+    install_card_zoom_event_filter(&ui);
     if let Ok(size_str) = std::env::var("AH_WINDOW_SIZE") {
         if size_str == "960x640" {
             ui.set_window_target_width(960.0);
@@ -585,36 +589,81 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         run_demo_shuffle(&ui);
     }
 
-    #[cfg(target_os = "windows")]
-    let _ctrl_watch = start_ctrl_key_watch(&ui);
-
     ui.show()?;
     ui.run()?;
     Ok(())
 }
 
-/// Windows-only: poll the physical Ctrl key state and mirror it into
-/// `KeyboardState.ctrl-held`. The winit backend never reports presses of the
-/// right Ctrl alone, so FocusScope-based tracking alone misses it, and the
-/// Ctrl+wheel zoom overlay would never activate from the right hand.
-#[cfg(target_os = "windows")]
-fn start_ctrl_key_watch(ui: &MainWindow) -> slint::Timer {
+/// Handle zoom before Slint dispatches the event. A TouchArea overlay would
+/// grab pointer presses even without a click handler, so keep all non-zoom
+/// input on Slint's normal path.
+fn install_card_zoom_event_filter(ui: &MainWindow) {
     use slint::ComponentHandle;
-    use std::time::Duration;
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL};
 
     let weak = ui.as_weak();
-    let timer = slint::Timer::default();
-    timer.start(
-        slint::TimerMode::Repeated,
-        Duration::from_millis(80),
-        move || {
-            let Some(ui) = weak.upgrade() else { return };
-            let pressed = unsafe { GetAsyncKeyState(VK_CONTROL as i32) } as u16 & 0x8000 != 0;
-            ui.global::<NativeKeyboardState>().set_ctrl_held(pressed);
-        },
-    );
-    timer
+    #[cfg(not(target_os = "windows"))]
+    let mut ctrl_held = false;
+    ui.window().on_winit_window_event(move |_window, event| {
+        #[cfg(target_os = "windows")]
+        let ctrl_held = {
+            use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL};
+            (unsafe { GetAsyncKeyState(VK_CONTROL as i32) }) as u16 & 0x8000 != 0
+        };
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            match event {
+                winit::event::WindowEvent::ModifiersChanged(modifiers) => {
+                    ctrl_held = modifiers.state().control_key();
+                }
+                winit::event::WindowEvent::Focused(false) => ctrl_held = false,
+                _ => {}
+            }
+        }
+
+        let winit::event::WindowEvent::MouseWheel { delta, .. } = event else {
+            return EventResult::Propagate;
+        };
+        if !ctrl_held {
+            return EventResult::Propagate;
+        }
+
+        let delta_y = match delta {
+            winit::event::MouseScrollDelta::LineDelta(_, y) => f64::from(*y),
+            winit::event::MouseScrollDelta::PixelDelta(position) => position.y / 60.0,
+        };
+        if delta_y == 0.0 {
+            return EventResult::Propagate;
+        }
+
+        let Some(ui) = weak.upgrade() else {
+            return EventResult::Propagate;
+        };
+        let screen = ui.get_active_screen();
+        let browse_surface = matches!(
+            screen.as_str(),
+            "browse" | "channels" | "performer-details" | "studio-details"
+        );
+        let modal_open = ui.get_is_fullscreen()
+            || ui.get_catalog_filter_picker_visible()
+            || ui.get_browse_subnav_menu_open()
+            || ui.get_channel_picker_open()
+            || ui.get_cleartext_consent_visible()
+            || ui.get_licenses_visible()
+            || ui.get_download_panel_open()
+            || ui.get_resolver_prompt_dialog_visible()
+            || ui.get_login_modal_visible()
+            || ui.get_confirm_dialog_visible();
+        if !browse_surface || modal_open {
+            return EventResult::Propagate;
+        }
+
+        // Winit reports mouse-wheel lines directly; touchpads report pixels.
+        // Treat 1 line or 60 logical pixels as a 10% zoom step.
+        let zoom = (f64::from(ui.get_card_zoom()) + delta_y * 0.1).clamp(0.6, 1.6);
+        ui.set_card_zoom(zoom as f32);
+        EventResult::PreventDefault
+    });
 }
 
 fn run_demo_shuffle(ui: &MainWindow) {
