@@ -8,6 +8,13 @@ import { SettingsView, DiscoveredServerItem, HomeCategoryOption, LibraryOptionDa
 export { DiscoveredServerItem, HomeCategoryOption, LibraryOptionData }
 export { VideoCardData, VideoCardRowData }
 
+// Bridge to the theme KeyboardState so Rust code can set ctrl-held: only items
+// exported from this file get generated Rust accessors. The alias keeps the
+// theme global as the single source of truth for the wheel-zoom handlers.
+export global NativeKeyboardState {
+    in-out property <bool> ctrl-held <=> KeyboardState.ctrl-held;
+}
+
 export struct HomeCategoryShelfData {
     name: string,
     items: [VideoCardData],

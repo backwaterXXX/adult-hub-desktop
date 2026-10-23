@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/player", "crates/client", "crates/storage", "crates/app"]
 
 [workspace.package]
-version = "0.2.6"
+version = "0.2.7"
 edition = "2024"
 license = "Apache-2.0"
 rust-version = "1.85"
@@ -22,6 +22,10 @@ uuid = { version = "1.10", features = ["v4"] }
 thiserror = "2.0"
 regex = "1.11"
 ring = "0.17"
-windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security_Credentials"] }
+windows-sys = { version = "=0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security_Credentials",
+    "Win32_UI_Input_KeyboardAndMouse",
+] }
 sysinfo = { version = "0.35.2", default-features = false, features = ["system"] }
 

@@ -51,8 +51,10 @@ export global HubTheme {
 
 export global KeyboardState {
     in-out property <bool> text-input-focused: false;
-    // Tracked from the window's root FocusScope so wheel handlers can tell
-    // Ctrl+scroll (card zoom) from plain scroll (no modifier field on
-    // PointerEvent in Slint 1.18).
+    // Ctrl+wheel card zoom needs the physical Ctrl state. ScrollEvent carries
+    // modifiers, but they only update from dispatched key events, and the winit
+    // backend never reports a press of the right Ctrl alone. On Windows the
+    // value is polled natively (GetAsyncKeyState) every 80 ms; elsewhere it
+    // comes from the root FocusScope handlers.
     in-out property <bool> ctrl-held: false;
 }

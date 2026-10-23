@@ -28,6 +28,7 @@ fastrand = "2.3"
 
 [target.'cfg(windows)'.dependencies]
 rfd = { version = "0.17", default-features = false }
+windows-sys.workspace = true
 
 [build-dependencies]
 slint-build.workspace = true

@@ -5,7 +5,6 @@ use std::path::PathBuf;
 pub struct Options {
     pub url: Option<String>,
     pub headers: Vec<String>,
-    pub demo_capture: bool,
     pub demo_shuffle: bool,
 }
 
@@ -15,9 +14,6 @@ impl Options {
         let mut args = args.into_iter();
         while let Some(argument) = args.next() {
             match argument.as_str() {
-                "--demo-capture" => {
-                    options.demo_capture = true;
-                }
                 "--demo-shuffle" => {
                     options.demo_shuffle = true;
                 }
