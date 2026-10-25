@@ -167,6 +167,8 @@ pub fn trigger_movie_switch(ui: &MainWindow, ctx: &AppContext, is_random: bool) 
     ui.set_toast_visible(false);
     ui.set_player_controls_visible(true);
     ui.set_player_more_controls_visible(false);
+    ui.set_player_volume_flyout_open(false);
+    ui.set_download_panel_open(false);
     ui.set_player_has_quality_alternatives(false);
     ui.set_player_quality_panel_open(false);
     ui.set_player_quality_subpage_open(false);

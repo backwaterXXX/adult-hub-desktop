@@ -13,6 +13,7 @@ pub enum NavDestination {
     Home,
     Browse {
         category: String,
+        is_search: bool,
         search_query: String,
         genre_query: String,
         studio_query: String,
@@ -266,6 +267,7 @@ mod tests {
             &mut history,
             Browse {
                 category: "Latest".into(),
+                is_search: false,
                 search_query: String::new(),
                 genre_query: String::new(),
                 studio_query: String::new(),

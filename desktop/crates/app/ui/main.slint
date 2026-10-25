@@ -2397,6 +2397,7 @@ export component MainWindow inherits Window {
                             root.active-category = "Latest";
                             root.catalog-category-drilldown = false;
                             root.catalog-genre-query = "";
+                            root.search-query = "";
                             root.switch-screen("browse");
                             root.filter-category("Latest");
                         }
@@ -2411,6 +2412,7 @@ export component MainWindow inherits Window {
                             root.active-category = "Continue Watching";
                             root.catalog-category-drilldown = false;
                             root.catalog-genre-query = "";
+                            root.search-query = "";
                             root.switch-screen("browse");
                             root.filter-category("Continue Watching");
                         }
@@ -2425,6 +2427,7 @@ export component MainWindow inherits Window {
                             root.active-category = "Favorites";
                             root.catalog-category-drilldown = false;
                             root.catalog-genre-query = "";
+                            root.search-query = "";
                             root.switch-screen("browse");
                             root.filter-category("Favorites");
                         }
@@ -2439,6 +2442,7 @@ export component MainWindow inherits Window {
                             root.active-category = "Watch History";
                             root.catalog-category-drilldown = false;
                             root.catalog-genre-query = "";
+                            root.search-query = "";
                             root.switch-screen("browse");
                             root.filter-category("Watch History");
                         }
@@ -2453,6 +2457,7 @@ export component MainWindow inherits Window {
                             root.active-category = "Categories";
                             root.catalog-category-drilldown = false;
                             root.catalog-genre-query = "";
+                            root.search-query = "";
                             root.switch-screen("browse");
                             root.filter-category("Categories");
                         }
@@ -2467,6 +2472,7 @@ export component MainWindow inherits Window {
                             root.active-category = "Performers";
                             root.catalog-category-drilldown = false;
                             root.catalog-genre-query = "";
+                            root.search-query = "";
                             root.switch-screen("browse");
                             root.filter-category("Performers");
                         }
@@ -2481,6 +2487,7 @@ export component MainWindow inherits Window {
                             root.active-category = "Studios";
                             root.catalog-category-drilldown = false;
                             root.catalog-genre-query = "";
+                            root.search-query = "";
                             root.switch-screen("browse");
                             root.filter-category("Studios");
                         }
@@ -2915,8 +2922,10 @@ export component MainWindow inherits Window {
                         open-performer(name) => { root.open-performer-profile(name); }
                         show-all(category-name) => {
                             root.active-category = "Latest";
-                            root.switch-screen("browse");
+                            root.catalog-category-drilldown = true;
                             root.catalog-genre-query = category-name;
+                            root.search-query = "";
+                            root.switch-screen("browse");
                             root.set-catalog-text-filter("genre", category-name);
                         }
                         retry => { root.refresh-home(); }
@@ -3775,14 +3784,14 @@ export component MainWindow inherits Window {
                         // two-card row across the entire viewport.
                         alignment: start;
 
-                        if row.has-0 : CatalogGridCard { card: row.card-0; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
-                        if row.has-1 : CatalogGridCard { card: row.card-1; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
-                        if row.has-2 : CatalogGridCard { card: row.card-2; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
-                        if row.has-3 : CatalogGridCard { card: row.card-3; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
-                        if row.has-4 : CatalogGridCard { card: row.card-4; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
-                        if row.has-5 : CatalogGridCard { card: row.card-5; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
-                        if row.has-6 : CatalogGridCard { card: row.card-6; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
-                        if row.has-7 : CatalogGridCard { card: row.card-7; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
+                        if row.has-0 : CatalogGridCard { card: row.card-0; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.search-query = ""; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
+                        if row.has-1 : CatalogGridCard { card: row.card-1; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.search-query = ""; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
+                        if row.has-2 : CatalogGridCard { card: row.card-2; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.search-query = ""; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
+                        if row.has-3 : CatalogGridCard { card: row.card-3; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.search-query = ""; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
+                        if row.has-4 : CatalogGridCard { card: row.card-4; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.search-query = ""; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
+                        if row.has-5 : CatalogGridCard { card: row.card-5; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.search-query = ""; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
+                        if row.has-6 : CatalogGridCard { card: row.card-6; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.search-query = ""; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
+                        if row.has-7 : CatalogGridCard { card: row.card-7; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.search-query = ""; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
                     }
                 }
 
@@ -4523,8 +4532,14 @@ export component MainWindow inherits Window {
                         width: 100%;
                         height: parent.height - root.player-control-band-height;
                         clicked => {
-                            if (root.player-volume-flyout-open) {
+                            if (root.player-quality-panel-open || root.player-more-controls-visible || root.download-panel-open || root.player-volume-flyout-open) {
+                                root.player-quality-panel-open = false;
+                                root.player-more-controls-visible = false;
+                                root.download-panel-open = false;
                                 root.player-volume-flyout-open = false;
+                                root.player-controls-visible = true;
+                                player-controls-hide-timer.restart();
+                                return;
                             }
                             root.player-controls-visible = true;
                             player-controls-hide-timer.restart();
@@ -4791,10 +4806,10 @@ export component MainWindow inherits Window {
                     y: parent.height - self.height;
                     width: 100%;
                     visible: root.player-media-loaded;
-                    height: (root.player-controls-visible || !root.playing || root.player-more-controls-visible || root.player-volume-flyout-open || root.player-timeline-dragging)
+                    height: (root.player-controls-visible || !root.playing || root.player-more-controls-visible || root.player-volume-flyout-open || root.player-quality-panel-open || root.download-panel-open || root.player-timeline-dragging)
                         ? root.player-control-band-height
                         : 0px;
-                    opacity: (root.player-controls-visible || !root.playing || root.player-more-controls-visible || root.player-volume-flyout-open || root.player-timeline-dragging) ? 1 : 0;
+                    opacity: (root.player-controls-visible || !root.playing || root.player-more-controls-visible || root.player-volume-flyout-open || root.player-quality-panel-open || root.download-panel-open || root.player-timeline-dragging) ? 1 : 0;
                     background: @linear-gradient(180deg, #00000000 0%, #10111499 22%, #101114FA 100%);
                     clip: false;
                     z: 60;
@@ -4813,11 +4828,11 @@ export component MainWindow inherits Window {
                             EventResult.accept
                         }
                         clicked => {
-                            if (root.player-volume-flyout-open) {
-                                root.player-volume-flyout-open = false;
-                            }
-                            if (root.player-more-controls-visible) {
+                            if (root.player-quality-panel-open || root.player-more-controls-visible || root.download-panel-open || root.player-volume-flyout-open) {
+                                root.player-quality-panel-open = false;
                                 root.player-more-controls-visible = false;
+                                root.download-panel-open = false;
+                                root.player-volume-flyout-open = false;
                             }
                             root.player-controls-visible = true;
                             player-controls-hide-timer.restart();
@@ -5115,63 +5130,6 @@ export component MainWindow inherits Window {
                                 }
                             }
 
-                            // Next button
-                            next-btn := Rectangle {
-                                width: 44px;
-                                height: 44px;
-                                y: (parent.height - self.height) / 2;
-                                border-radius: 22px;
-                                background: next-touch.has-hover ? #F5F6F818 : transparent;
-                                border-width: next-focus.has-focus ? 2px : 0px;
-                                border-color: HubTheme.focus-ring;
-                                forward-focus: next-focus;
-                                accessible-role: button;
-                                accessible-label: "Play next video";
-
-                                Image {
-                                    source: @image-url("../../../assets/icons/chevron-right.svg");
-                                    width: 22px;
-                                    height: 22px;
-                                    x: (parent.width - self.width) / 2;
-                                    y: (parent.height - self.height) / 2;
-                                    image-fit: contain;
-                                }
-
-                                next-touch := TouchArea {
-                                    pointer-event(event) => {
-                                        if (event.kind == PointerEventKind.move) {
-                                            root.player-controls-visible = true;
-                                            player-controls-hide-timer.restart();
-                                        }
-                                    }
-                                    clicked => {
-                                        if (root.player-volume-flyout-open) {
-                                            root.player-volume-flyout-open = false;
-                                        }
-                                        root.player-controls-visible = true;
-                                        player-controls-hide-timer.restart();
-                                        root.play-next();
-                                    }
-                                }
-
-                                next-focus := FocusScope {
-                                    width: 0px;
-                                    height: 0px;
-                                    key-pressed(event) => {
-                                        if (event.text == Key.Space || event.text == Key.Return) {
-                                            if (root.player-volume-flyout-open) {
-                                                root.player-volume-flyout-open = false;
-                                            }
-                                            root.player-controls-visible = true;
-                                            player-controls-hide-timer.restart();
-                                            root.play-next();
-                                            return accept;
-                                        }
-                                        reject
-                                    }
-                                }
-                            }
-
                             // Shuffle button
                             shuffle-btn := Rectangle {
                                 width: 44px;
@@ -5251,7 +5209,8 @@ export component MainWindow inherits Window {
                                 visible: root.player-has-quality-alternatives;
                                 width: root.player-has-quality-alternatives ? 44px : 0px;
                                 height: 44px;
-                                clip: true;
+                                clip: false;
+                                out property <bool> is-hovered: ql-touch.has-hover;
                                 y: (parent.height - self.height) / 2;
                                 border-radius: 22px;
                                 background: ql-touch.has-hover || root.player-quality-panel-open ? #F5F6F822 : transparent;
@@ -5282,28 +5241,6 @@ export component MainWindow inherits Window {
                                     x: (parent.width - self.width) / 2;
                                     y: (parent.height - self.height) / 2;
                                     image-fit: contain;
-                                }
-
-                                // Tooltip visible on hover
-                                if ql-touch.has-hover && !root.player-quality-panel-open : Rectangle {
-                                    y: -32px;
-                                    x: (parent.width - self.width) / 2;
-                                    height: 24px;
-                                    width: ql-tooltip-text.preferred-width + 16px;
-                                    border-radius: 4px;
-                                    background: #1e2029ee;
-                                    border-width: 1px;
-                                    border-color: #FFFFFF22;
-                                    z: 100;
-
-                                    ql-tooltip-text := Text {
-                                        text: "Quality";
-                                        font-size: 11px;
-                                        font-weight: 500;
-                                        color: HubTheme.text-primary;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
-                                    }
                                 }
 
                                 ql-touch := TouchArea {
@@ -5374,6 +5311,12 @@ export component MainWindow inherits Window {
                                 accessible-action-default => {
                                     if (root.player-quality-panel-open) {
                                         root.player-quality-panel-open = false;
+                                    }
+                                    if (root.player-more-controls-visible) {
+                                        root.player-more-controls-visible = false;
+                                    }
+                                    if (root.player-volume-flyout-open) {
+                                        root.player-volume-flyout-open = false;
                                     }
                                     if (root.download-status == "downloading" || root.download-status == "preparing" || root.download-status == "completed" || root.download-status == "error") {
                                         root.toggle-download-panel();
@@ -5496,6 +5439,12 @@ export component MainWindow inherits Window {
                                         if (root.player-quality-panel-open) {
                                             root.player-quality-panel-open = false;
                                         }
+                                        if (root.player-more-controls-visible) {
+                                            root.player-more-controls-visible = false;
+                                        }
+                                        if (root.player-volume-flyout-open) {
+                                            root.player-volume-flyout-open = false;
+                                        }
                                         if (root.download-status == "downloading" || root.download-status == "preparing" || root.download-status == "completed" || root.download-status == "error") {
                                             root.toggle-download-panel();
                                         } else {
@@ -5513,6 +5462,12 @@ export component MainWindow inherits Window {
                                             player-controls-hide-timer.restart();
                                             if (root.player-quality-panel-open) {
                                                 root.player-quality-panel-open = false;
+                                            }
+                                            if (root.player-more-controls-visible) {
+                                                root.player-more-controls-visible = false;
+                                            }
+                                            if (root.player-volume-flyout-open) {
+                                                root.player-volume-flyout-open = false;
                                             }
                                             if (root.download-status == "downloading" || root.download-status == "preparing" || root.download-status == "completed" || root.download-status == "error") {
                                                 root.toggle-download-panel();
@@ -5560,6 +5515,11 @@ export component MainWindow inherits Window {
                                             if (event.kind == PointerEventKind.move) {
                                                 root.player-controls-visible = true;
                                                 player-controls-hide-timer.restart();
+                                                if (!root.player-volume-flyout-open) {
+                                                    root.player-quality-panel-open = false;
+                                                    root.download-panel-open = false;
+                                                    root.player-more-controls-visible = false;
+                                                }
                                                 root.player-volume-flyout-open = true;
                                             }
                                             EventResult.accept
@@ -5674,6 +5634,11 @@ export component MainWindow inherits Window {
                                                 if (event.kind == PointerEventKind.move) {
                                                     root.player-controls-visible = true;
                                                     player-controls-hide-timer.restart();
+                                                    if (!root.player-volume-flyout-open) {
+                                                        root.player-quality-panel-open = false;
+                                                        root.download-panel-open = false;
+                                                        root.player-more-controls-visible = false;
+                                                    }
                                                     root.player-volume-flyout-open = true;
                                                 }
                                                 EventResult.reject
@@ -5681,6 +5646,15 @@ export component MainWindow inherits Window {
                                             clicked => {
                                                 root.player-controls-visible = true;
                                                 player-controls-hide-timer.restart();
+                                                if (root.player-quality-panel-open) {
+                                                    root.player-quality-panel-open = false;
+                                                }
+                                                if (root.download-panel-open) {
+                                                    root.download-panel-open = false;
+                                                }
+                                                if (root.player-more-controls-visible) {
+                                                    root.player-more-controls-visible = false;
+                                                }
                                                 root.toggle-mute();
                                             }
                                         }
@@ -5701,6 +5675,9 @@ export component MainWindow inherits Window {
                                                 return accept;
                                             }
                                             if (event.text == Key.UpArrow) {
+                                                if (root.player-quality-panel-open) { root.player-quality-panel-open = false; }
+                                                if (root.download-panel-open) { root.download-panel-open = false; }
+                                                if (root.player-more-controls-visible) { root.player-more-controls-visible = false; }
                                                 root.player-volume-flyout-open = true;
                                                 if (root.muted) { root.toggle-mute(); }
                                                 root.set-volume(Math.min(100.0, root.volume + 5.0));
@@ -5709,6 +5686,9 @@ export component MainWindow inherits Window {
                                                 return accept;
                                             }
                                             if (event.text == Key.DownArrow) {
+                                                if (root.player-quality-panel-open) { root.player-quality-panel-open = false; }
+                                                if (root.download-panel-open) { root.download-panel-open = false; }
+                                                if (root.player-more-controls-visible) { root.player-more-controls-visible = false; }
                                                 if (root.muted) { root.toggle-mute(); }
                                                 root.set-volume(Math.max(0.0, root.volume - 5.0));
                                                 root.player-controls-visible = true;
@@ -5716,6 +5696,9 @@ export component MainWindow inherits Window {
                                                 return accept;
                                             }
                                             if (event.text == Key.PageUp) {
+                                                if (root.player-quality-panel-open) { root.player-quality-panel-open = false; }
+                                                if (root.download-panel-open) { root.download-panel-open = false; }
+                                                if (root.player-more-controls-visible) { root.player-more-controls-visible = false; }
                                                 if (root.muted) { root.toggle-mute(); }
                                                 root.set-volume(Math.min(100.0, root.volume + 10.0));
                                                 root.player-controls-visible = true;
@@ -5723,6 +5706,9 @@ export component MainWindow inherits Window {
                                                 return accept;
                                             }
                                             if (event.text == Key.PageDown) {
+                                                if (root.player-quality-panel-open) { root.player-quality-panel-open = false; }
+                                                if (root.download-panel-open) { root.download-panel-open = false; }
+                                                if (root.player-more-controls-visible) { root.player-more-controls-visible = false; }
                                                 if (root.muted) { root.toggle-mute(); }
                                                 root.set-volume(Math.max(0.0, root.volume - 10.0));
                                                 root.player-controls-visible = true;
@@ -5730,11 +5716,17 @@ export component MainWindow inherits Window {
                                                 return accept;
                                             }
                                             if (event.text == Key.Home) {
+                                                if (root.player-quality-panel-open) { root.player-quality-panel-open = false; }
+                                                if (root.download-panel-open) { root.download-panel-open = false; }
+                                                if (root.player-more-controls-visible) { root.player-more-controls-visible = false; }
                                                 if (root.muted) { root.toggle-mute(); }
                                                 root.set-volume(100.0);
                                                 return accept;
                                             }
                                             if (event.text == Key.End) {
+                                                if (root.player-quality-panel-open) { root.player-quality-panel-open = false; }
+                                                if (root.download-panel-open) { root.download-panel-open = false; }
+                                                if (root.player-more-controls-visible) { root.player-more-controls-visible = false; }
                                                 root.set-volume(0.0);
                                                 return accept;
                                             }
@@ -5781,6 +5773,9 @@ export component MainWindow inherits Window {
                                         if (root.player-quality-panel-open) {
                                             root.player-quality-panel-open = false;
                                         }
+                                        if (root.download-panel-open) {
+                                            root.download-panel-open = false;
+                                        }
                                         if (root.player-volume-flyout-open) {
                                             root.player-volume-flyout-open = false;
                                         }
@@ -5798,10 +5793,15 @@ export component MainWindow inherits Window {
                                             if (root.player-quality-panel-open) {
                                                 root.player-quality-panel-open = false;
                                             }
-                                            root.player-more-controls-visible = !root.player-more-controls-visible;
-                                            if (root.player-more-controls-visible) {
+                                            if (root.download-panel-open) {
+                                                root.download-panel-open = false;
+                                            }
+                                            if (root.player-volume-flyout-open) {
                                                 root.player-volume-flyout-open = false;
                                             }
+                                            root.player-more-controls-visible = !root.player-more-controls-visible;
+                                            root.player-controls-visible = true;
+                                            player-controls-hide-timer.restart();
                                             return accept;
                                         }
                                         reject
@@ -5870,10 +5870,12 @@ export component MainWindow inherits Window {
 
                 // Non-modal Download Details Panel anchored directly above download-btn
                 if root.download-panel-open : Rectangle {
+                    property <length> anchor-btn-y: bottom-panel.y + controls-row.y + download-btn.y;
+                    property <length> anchor-bottom: min(bottom-panel.y - 8px, anchor-btn-y - 10px);
                     width: min(380px, parent.width - 32px);
                     height: min(parent.height - 100px, dl-layout.preferred-height);
                     x: max(16px, min(parent.width - self.width - 16px, 24px + download-btn.x + (download-btn.width - self.width) / 2));
-                    y: max(16px, parent.height - 76px - self.height);
+                    y: max(16px, anchor-bottom - self.height);
                     border-radius: 12px;
                     background: #121319FA;
                     border-width: 1px;
@@ -6271,12 +6273,44 @@ export component MainWindow inherits Window {
                     }
                 }
 
+                // Quality Button Tooltip (placed in overlay layer to avoid any clipping)
+                if quality-btn.is-hovered && !root.player-quality-panel-open && root.player-has-quality-alternatives && (root.player-controls-visible || !root.playing || root.player-more-controls-visible || root.player-volume-flyout-open || root.download-panel-open) : Rectangle {
+                    width: ql-tooltip-text.preferred-width + 16px;
+                    height: 24px;
+                    border-radius: 4px;
+                    background: #1e2029ee;
+                    border-width: 1px;
+                    border-color: #FFFFFF22;
+                    z: 90;
+                    x: max(8px, min(parent.width - self.width - 8px, 24px + quality-btn.x + (quality-btn.width - self.width) / 2));
+                    y: max(8px, bottom-panel.y + controls-row.y + quality-btn.y - self.height - 8px);
+
+                    ql-tooltip-text := Text {
+                        text: "Quality";
+                        font-size: 11px;
+                        font-weight: 500;
+                        color: HubTheme.text-primary;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
                 // Non-modal Quality Selection Panel anchored directly above quality-btn
                 if root.player-quality-panel-open && root.player-has-quality-alternatives : Rectangle {
+                    property <length> anchor-btn-y: bottom-panel.y + controls-row.y + quality-btn.y;
+                    property <length> anchor-bottom: min(bottom-panel.y - 8px, anchor-btn-y - 10px);
+                    property <length> header-chrome-height: 65px;
+                    property <length> item-height: 42px;
+                    property <length> item-gap: 4px;
+                    property <length> list-desired-height: root.player-quality-options.length * item-height + max(0, root.player-quality-options.length - 1) * item-gap;
+                    property <length> max-available-panel-height: max(160px, anchor-bottom - 16px);
+                    property <length> max-list-height: min(340px, max-available-panel-height - header-chrome-height);
+                    property <length> list-view-height: min(list-desired-height, max-list-height);
+
                     width: min(320px, parent.width - 32px);
-                    height: min(340px, min(parent.height - 100px, ql-layout.preferred-height));
+                    height: header-chrome-height + list-view-height;
                     x: max(16px, min(parent.width - self.width - 16px, 24px + quality-btn.x + (quality-btn.width - self.width) / 2));
-                    y: max(16px, parent.height - 76px - self.height);
+                    y: max(16px, anchor-bottom - self.height);
                     border-radius: 12px;
                     background: #121319FA;
                     border-width: 1px;
@@ -6296,15 +6330,16 @@ export component MainWindow inherits Window {
                         }
                     }
 
-                    ql-layout := VerticalLayout {
+                    VerticalLayout {
                         padding-left: 14px;
                         padding-right: 14px;
                         padding-top: 12px;
-                        padding-bottom: 14px;
+                        padding-bottom: 12px;
                         spacing: 8px;
 
                         // Header with Title and Close button
                         HorizontalLayout {
+                            height: 24px;
                             alignment: space-between;
                             Text {
                                 text: "QUALITY";
@@ -6339,16 +6374,16 @@ export component MainWindow inherits Window {
 
                         ScrollView {
                             width: 100%;
-                            height: 100%;
+                            height: list-view-height;
                             vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
                             horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
                             mouse-drag-pan-enabled: true;
 
                             VerticalLayout {
-                                spacing: 4px;
+                                spacing: item-gap;
 
                                 for opt in root.player-quality-options : Rectangle {
-                                    height: 40px;
+                                    height: item-height;
                                     border-radius: 8px;
                                     background: opt-touch.pressed ? #252836 : (opt.is-selected ? #BE185D26 : (opt-touch.has-hover ? #FFFFFF12 : transparent));
                                     border-width: opt.is-selected ? 1px : 0px;
@@ -6432,16 +6467,25 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                // Popover Dismiss Scrim for More Menu
-                if root.player-more-controls-visible : TouchArea {
+                // Popover Dismiss Scrim for Bottom Bar Panels & Menus
+                if root.player-more-controls-visible || root.player-quality-panel-open || root.download-panel-open || root.player-volume-flyout-open : TouchArea {
                     width: 100%;
                     height: 100%;
                     z: 74;
                     pointer-event(event) => {
+                        if (event.kind == PointerEventKind.move) {
+                            root.player-controls-visible = true;
+                            player-controls-hide-timer.restart();
+                        }
                         EventResult.accept
                     }
                     clicked => {
                         root.player-more-controls-visible = false;
+                        root.player-quality-panel-open = false;
+                        root.download-panel-open = false;
+                        root.player-volume-flyout-open = false;
+                        root.player-controls-visible = true;
+                        player-controls-hide-timer.restart();
                     }
                 }
 
@@ -6449,8 +6493,10 @@ export component MainWindow inherits Window {
 
                 // Compact More Menu Popover anchored directly above more-btn
                 if root.player-more-controls-visible && root.player-media-loaded : Rectangle {
+                    property <length> anchor-btn-y: bottom-panel.y + controls-row.y + more-btn.y;
+                    property <length> anchor-bottom: min(bottom-panel.y - 8px, anchor-btn-y - 10px);
                     x: max(16px, min(parent.width - self.width - 16px, 24px + more-btn.x + (more-btn.width - self.width) / 2));
-                    y: max(16px, parent.height - 74px - self.height);
+                    y: max(16px, anchor-bottom - self.height);
                     width: 260px;
                     height: min(440px, parent.height - 100px);
                     border-radius: 12px;
@@ -6617,6 +6663,8 @@ export component MainWindow inherits Window {
                                 activity => { root.player-controls-visible = true; player-controls-hide-timer.restart(); }
                                 clicked => {
                                     root.toggle-hud();
+                                    root.player-more-controls-visible = false;
+                                    more-focus.focus();
                                 }
                             }
                         }
@@ -8030,9 +8078,9 @@ export component MainWindow inherits Window {
 
         player-controls-hide-timer := Timer {
         interval: 3s;
-        running: root.active-screen == "player" && root.player-media-loaded && root.playing && root.player-controls-visible && !root.player-volume-flyout-open && !root.player-more-controls-visible;
+        running: root.active-screen == "player" && root.player-media-loaded && root.playing && root.player-controls-visible && !root.player-volume-flyout-open && !root.player-more-controls-visible && !root.player-quality-panel-open && !root.download-panel-open;
         triggered() => {
-            if (!root.player-volume-flyout-open && !root.player-more-controls-visible) {
+            if (!root.player-volume-flyout-open && !root.player-more-controls-visible && !root.player-quality-panel-open && !root.download-panel-open) {
                 root.player-controls-visible = false;
             }
         }
@@ -8630,6 +8678,9 @@ export component MainWindow inherits Window {
                     clicked => {
                         root.browse-subnav-menu-open = false;
                         root.active-category = "Categories";
+                        root.catalog-category-drilldown = false;
+                        root.catalog-genre-query = "";
+                        root.search-query = "";
                         root.switch-screen("browse");
                         root.filter-category("Categories");
                     }
@@ -8642,6 +8693,9 @@ export component MainWindow inherits Window {
                     clicked => {
                         root.browse-subnav-menu-open = false;
                         root.active-category = "Performers";
+                        root.catalog-category-drilldown = false;
+                        root.catalog-genre-query = "";
+                        root.search-query = "";
                         root.switch-screen("browse");
                         root.filter-category("Performers");
                     }
@@ -8654,6 +8708,9 @@ export component MainWindow inherits Window {
                     clicked => {
                         root.browse-subnav-menu-open = false;
                         root.active-category = "Studios";
+                        root.catalog-category-drilldown = false;
+                        root.catalog-genre-query = "";
+                        root.search-query = "";
                         root.switch-screen("browse");
                         root.filter-category("Studios");
                     }

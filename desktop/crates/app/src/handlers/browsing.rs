@@ -1388,17 +1388,25 @@ pub fn current_nav_destination(
     let active = ui.get_active_screen();
     match active.as_str() {
         "home" => NavDestination::Home,
-        "browse" => NavDestination::Browse {
-            category: ui.get_active_category().to_string(),
-            search_query: ui.get_search_query().to_string(),
-            genre_query: ui.get_catalog_genre_query().to_string(),
-            studio_query: ui.get_catalog_studio_query().to_string(),
-            performer_query: ui.get_catalog_performer_query().to_string(),
-            performer_search_query: ui.get_performer_search_query().to_string(),
-            performer_letter: ui.get_performer_letter().to_string(),
-            performers_photo_only: ui.get_performers_photo_only(),
-            drilldown: ui.get_catalog_category_drilldown(),
-        },
+        "browse" => {
+            let is_search = ui.get_is_catalog_search_results();
+            NavDestination::Browse {
+                category: ui.get_active_category().to_string(),
+                is_search,
+                search_query: if is_search {
+                    ui.get_search_query().to_string()
+                } else {
+                    String::new()
+                },
+                genre_query: ui.get_catalog_genre_query().to_string(),
+                studio_query: ui.get_catalog_studio_query().to_string(),
+                performer_query: ui.get_catalog_performer_query().to_string(),
+                performer_search_query: ui.get_performer_search_query().to_string(),
+                performer_letter: ui.get_performer_letter().to_string(),
+                performers_photo_only: ui.get_performers_photo_only(),
+                drilldown: ui.get_catalog_category_drilldown(),
+            }
+        }
         "channels" => NavDestination::Channels,
         "settings" => NavDestination::Settings,
         "video-details" => NavDestination::VideoDetails {
@@ -1439,6 +1447,7 @@ pub fn restore_nav_destination(
         }
         NavDestination::Browse {
             category,
+            is_search,
             search_query,
             genre_query,
             studio_query,
@@ -1451,17 +1460,23 @@ pub fn restore_nav_destination(
             ui.set_active_screen("browse".into());
             ui.set_active_category(category.clone().into());
             ui.set_search_query(search_query.clone().into());
-            ui.set_catalog_genre_query(genre_query.into());
+            ui.set_catalog_genre_query(genre_query.clone().into());
             ui.set_catalog_studio_query(studio_query.into());
             ui.set_catalog_performer_query(performer_query.into());
             ui.set_performer_search_query(performer_search_query.into());
             ui.set_performer_letter(performer_letter.into());
             ui.set_performers_photo_only(performers_photo_only);
             ui.set_catalog_category_drilldown(drilldown);
-            if !search_query.is_empty() {
+            if is_search && !search_query.is_empty() {
+                ui.set_is_catalog_search_results(true);
                 ui.invoke_search_catalog(search_query.into());
             } else {
-                ui.invoke_filter_category(category.into());
+                ui.set_is_catalog_search_results(false);
+                if drilldown && !genre_query.is_empty() {
+                    ui.invoke_set_catalog_text_filter("genre".into(), genre_query.into());
+                } else {
+                    ui.invoke_filter_category(category.into());
+                }
             }
         }
         NavDestination::Channels => {
@@ -2528,6 +2543,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 let categories_for_ui = categories.clone();
                 let selected_categories_for_ui = selected_categories.clone();
                 let server_url = session.server_url.clone();
+                let has_overall_error = !overall_error.is_empty();
                 slint::invoke_from_event_loop(move || {
                     if home_generation.load(Ordering::SeqCst) != request_id {
                         return;
@@ -2542,7 +2558,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
 
                         // If background refresh failed with an error and returned no items,
                         // keep any already displayed items instead of overwriting with empty
-                        if !has_any_items && !overall_error.is_empty() && ui.get_has_home_content() {
+                        if !has_any_items && has_overall_error && ui.get_has_home_content() {
                             return;
                         }
                         let shelves = shelves

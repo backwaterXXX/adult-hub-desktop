@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering;
 fn refresh_content_after_filter_change(ui: &MainWindow) {
     match ui.get_last_content_screen().as_str() {
         "home" => ui.invoke_refresh_home(),
-        "browse" if ui.get_search_query().trim().is_empty() => {
+        "browse" if !ui.get_is_catalog_search_results() => {
             ui.invoke_filter_category(ui.get_active_category());
         }
         "browse" => ui.invoke_search_catalog(ui.get_search_query()),

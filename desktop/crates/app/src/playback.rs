@@ -138,6 +138,8 @@ pub fn load_media(ui: &MainWindow, player: &Player, input: &str, headers: &[Stri
     reset_playback_speed(ui, player);
     ui.set_player_controls_visible(true);
     ui.set_player_more_controls_visible(false);
+    ui.set_player_volume_flyout_open(false);
+    ui.set_download_panel_open(false);
     ui.set_player_has_quality_alternatives(false);
     ui.set_player_quality_panel_open(false);
     ui.set_player_quality_subpage_open(false);
@@ -240,6 +242,8 @@ pub fn stop_active_playback_for_navigation(
     ui.set_playing(false);
     ui.set_player_controls_visible(true);
     ui.set_player_more_controls_visible(false);
+    ui.set_player_volume_flyout_open(false);
+    ui.set_download_panel_open(false);
     ui.set_player_has_quality_alternatives(false);
     ui.set_player_quality_panel_open(false);
     ui.set_player_quality_subpage_open(false);
@@ -437,6 +441,8 @@ pub fn start_item_playback_with_resume(
     ui.set_player_error_message(String::new().into());
     ui.set_player_controls_visible(true);
     ui.set_player_more_controls_visible(false);
+    ui.set_player_volume_flyout_open(false);
+    ui.set_download_panel_open(false);
     ui.set_player_has_quality_alternatives(false);
     ui.set_player_quality_panel_open(false);
     ui.set_player_quality_subpage_open(false);
@@ -581,6 +587,8 @@ pub fn start_item_playback_with_resume_ctx(
     ui.set_toast_visible(false); // Clear any stale error toast
     ui.set_player_controls_visible(true);
     ui.set_player_more_controls_visible(false);
+    ui.set_player_volume_flyout_open(false);
+    ui.set_download_panel_open(false);
     ui.set_player_has_quality_alternatives(false);
     ui.set_player_quality_panel_open(false);
     ui.set_player_quality_subpage_open(false);
@@ -1067,6 +1075,9 @@ pub fn switch_video_quality(
 
     ui.set_player_quality_panel_open(false);
     ui.set_player_quality_subpage_open(false);
+    ui.set_player_more_controls_visible(false);
+    ui.set_player_volume_flyout_open(false);
+    ui.set_download_panel_open(false);
     ui.set_is_changing_quality(true);
     ui.set_player_loading_message("Changing quality…".into());
 
