@@ -1033,42 +1033,22 @@ pub fn install_fullscreen(ui: &MainWindow) {
                 // Entering fullscreen
                 let is_max = ui.window().is_maximized();
                 was_maximized.set(is_max);
-                saved_normal_size.set((ui.get_window_target_width(), ui.get_window_target_height()));
-
-                let norm_phys = ui.window().with_winit_window(|w| {
-                    let s = w.inner_size();
-                    (s.width, s.height)
-                });
-                saved_normal_phys.set(norm_phys);
-
-                let pos = ui.window().with_winit_window(|w| {
-                    w.outer_position().ok().map(|p| (p.x, p.y))
-                }).flatten();
-                saved_normal_pos.set(pos);
-
-                crate::log_debug(&format!(
-                    "fullscreen: entering fullscreen (was_maximized: {is_max}, normal target size: {:.0}x{:.0})",
-                    ui.get_window_target_width(),
-                    ui.get_window_target_height()
-                ));
-
-                fullscreen.set(true);
-                ui.set_is_fullscreen(true);
-                ui.window().set_fullscreen(true);
 
                 ui.window().with_winit_window(|window| {
-                    window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+                    let inner = window.inner_size();
+                    let scale = window.scale_factor();
+                    let (logical_w, logical_h) = if scale > 0.0 {
+                        ((inner.width as f64 / scale) as f32, (inner.height as f64 / scale) as f32)
+                    } else {
+                        (ui.get_window_target_width(), ui.get_window_target_height())
+                    };
+                    saved_normal_size.set((logical_w, logical_h));
+                    saved_normal_phys.set(Some((inner.width, inner.height)));
+                    saved_normal_pos.set(window.outer_position().ok().map(|p| (p.x, p.y)));
 
                     #[cfg(target_os = "windows")]
                     {
-                        use windows_sys::Win32::Graphics::Gdi::{
-                            GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-                        };
-                        use windows_sys::Win32::UI::WindowsAndMessaging::{
-                            GetWindowLongW, GetWindowPlacement, SetWindowLongW, SetWindowPos, GWL_STYLE,
-                            HWND_TOP, SWP_FRAMECHANGED, SWP_NOOWNERZORDER, SWP_SHOWWINDOW, WINDOWPLACEMENT,
-                            WS_MAXIMIZE, WS_OVERLAPPEDWINDOW,
-                        };
+                        use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindowPlacement, WINDOWPLACEMENT};
                         use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
                         if let Ok(handle) = window.window_handle() {
@@ -1079,7 +1059,46 @@ pub fn install_fullscreen(ui: &MainWindow) {
                                 if unsafe { GetWindowPlacement(hwnd, &mut wp) } != 0 {
                                     saved_win32_placement.set(Some(wp));
                                 }
+                            }
+                        }
+                    }
 
+                    // Query monitor dimensions and update window-target-width/height so Slint's preferred layout expands
+                    if let Some(mon) = window.current_monitor() {
+                        let msize = mon.size();
+                        let (mw, mh) = if scale > 0.0 {
+                            ((msize.width as f64 / scale) as f32, (msize.height as f64 / scale) as f32)
+                        } else {
+                            (msize.width as f32, msize.height as f32)
+                        };
+                        ui.set_window_target_width(mw);
+                        ui.set_window_target_height(mh);
+                    }
+
+                    crate::log_debug(&format!(
+                        "fullscreen: entering fullscreen (was_maximized: {is_max}, normal target size: {logical_w:.0}x{logical_h:.0})"
+                    ));
+
+                    fullscreen.set(true);
+                    ui.set_is_fullscreen(true);
+                    ui.window().set_fullscreen(true);
+                    window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+
+                    #[cfg(target_os = "windows")]
+                    {
+                        use windows_sys::Win32::Graphics::Gdi::{
+                            GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+                        };
+                        use windows_sys::Win32::UI::WindowsAndMessaging::{
+                            GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_STYLE,
+                            HWND_TOP, SWP_FRAMECHANGED, SWP_NOOWNERZORDER, SWP_SHOWWINDOW,
+                            WS_MAXIMIZE, WS_OVERLAPPEDWINDOW, WS_POPUP,
+                        };
+                        use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+                        if let Ok(handle) = window.window_handle() {
+                            if let RawWindowHandle::Win32(win32_handle) = handle.as_raw() {
+                                let hwnd = win32_handle.hwnd.get() as windows_sys::Win32::Foundation::HWND;
                                 let hmon = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
                                 let mut mi: MONITORINFO = unsafe { std::mem::zeroed() };
                                 mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
@@ -1094,7 +1113,7 @@ pub fn install_fullscreen(ui: &MainWindow) {
                                         SetWindowLongW(
                                             hwnd,
                                             GWL_STYLE,
-                                            (style & !(WS_OVERLAPPEDWINDOW | WS_MAXIMIZE)) as i32,
+                                            ((style & !(WS_OVERLAPPEDWINDOW | WS_MAXIMIZE)) | WS_POPUP) as i32,
                                         );
                                         SetWindowPos(
                                             hwnd,
@@ -1134,6 +1153,9 @@ pub fn install_fullscreen(ui: &MainWindow) {
                     );
                     crate::log_debug(&diag);
                 });
+
+                // Immediate frame redraw during pause or playing
+                ui.window().request_redraw();
             } else {
                 // Exiting fullscreen
                 crate::log_debug("fullscreen: exiting fullscreen mode");
@@ -1150,7 +1172,7 @@ pub fn install_fullscreen(ui: &MainWindow) {
                             GetWindowLongW, SetWindowLongW, SetWindowPlacement, SetWindowPos, GWL_STYLE,
                             SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER,
                             SWP_SHOWWINDOW,
-                            WS_OVERLAPPEDWINDOW,
+                            WS_OVERLAPPEDWINDOW, WS_POPUP,
                         };
                         use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -1159,7 +1181,7 @@ pub fn install_fullscreen(ui: &MainWindow) {
                                 let hwnd = win32_handle.hwnd.get() as windows_sys::Win32::Foundation::HWND;
                                 let style = unsafe { GetWindowLongW(hwnd, GWL_STYLE) } as u32;
                                 unsafe {
-                                    SetWindowLongW(hwnd, GWL_STYLE, (style | WS_OVERLAPPEDWINDOW) as i32);
+                                    SetWindowLongW(hwnd, GWL_STYLE, ((style & !WS_POPUP) | WS_OVERLAPPEDWINDOW) as i32);
                                 }
                                 if let Some(mut wp) = saved_win32_placement.take() {
                                     unsafe {
@@ -1243,6 +1265,9 @@ pub fn install_fullscreen(ui: &MainWindow) {
                     );
                     crate::log_debug(&diag);
                 });
+
+                // Immediate frame redraw during pause or playing
+                ui.window().request_redraw();
             }
         })
     };

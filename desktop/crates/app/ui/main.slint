@@ -920,6 +920,113 @@ component PerformerLetterChip inherits Rectangle {
     }
 }
 
+component QualityOptionRow inherits Rectangle {
+    in property <VideoQualityOption> option;
+    out property <bool> has-focus: focus-scope.has-focus;
+    callback clicked();
+    callback pointer-moved();
+    forward-focus: focus-scope;
+
+    height: 44px;
+    border-radius: 8px;
+    background: focus-scope.has-focus
+        ? (root.option.is-selected ? #BE185D33 : #FFFFFF18)
+        : (root.option.is-selected ? #BE185D22 : (touch.has-hover ? #FFFFFF10 : transparent));
+    border-width: focus-scope.has-focus ? 2px : 0px;
+    border-color: HubTheme.focus-ring;
+    accessible-role: button;
+    accessible-label: root.option.resolution + " " + root.option.codec + " " + root.option.size-text + (root.option.is-selected ? " selected" : "");
+
+    touch := TouchArea {
+        width: 100%;
+        height: 100%;
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.move) {
+                root.pointer-moved();
+            }
+        }
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    focus-scope := FocusScope {
+        width: 0px;
+        height: 0px;
+        key-pressed(event) => {
+            if (event.text == Key.Space || event.text == Key.Return) {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+
+    HorizontalLayout {
+        width: 100%;
+        height: 100%;
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 10px;
+
+        // Fixed selection column: 20 px, single checkmark only on active item
+        Rectangle {
+            width: 20px;
+            height: 20px;
+            if root.option.is-selected : Image {
+                source: @image-url("../../../assets/icons/check.svg");
+                width: 16px;
+                height: 16px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                image-fit: contain;
+                colorize: HubTheme.accent;
+            }
+        }
+
+        // Flexible resolution column, left-aligned, 14 px font
+        Text {
+            horizontal-stretch: 1;
+            text: root.option.resolution + (root.option.is-original ? " (Original)" : "");
+            color: root.option.is-selected ? #FFFFFF : HubTheme.text-primary;
+            font-size: 14px;
+            font-weight: root.option.is-selected ? 600 : 400;
+            vertical-alignment: center;
+            horizontal-alignment: left;
+            overflow: elide;
+        }
+
+        // Fixed codec column: ~48 px, 12-13 px font, readable secondary color
+        Rectangle {
+            width: 48px;
+            height: 22px;
+            border-radius: 4px;
+            background: root.option.codec != "" ? #FFFFFF12 : transparent;
+            if root.option.codec != "" : Text {
+                width: 100%;
+                height: 100%;
+                text: root.option.codec;
+                color: HubTheme.text-secondary;
+                font-size: 12px;
+                font-weight: 500;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        // Fixed size column: ~76 px, 12-13 px font, readable secondary color, right-aligned
+        Text {
+            width: 76px;
+            text: root.option.size-text;
+            color: HubTheme.text-secondary;
+            font-size: 12px;
+            font-weight: 400;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+        }
+    }
+}
+
 
 component PlayerTimeline inherits Rectangle {
     in property <float> value: 0;
@@ -945,7 +1052,7 @@ component PlayerTimeline inherits Rectangle {
 
     private property <float> effective-val: root.is-dragging ? root.drag-val : root.value;
     private property <float> progress: root.maximum > 0.001 ? Math.max(0.0, Math.min(1.0, root.effective-val / root.maximum)) : 0.0;
-    private property <length> track-height: (root.is-hovered || root.is-dragging || root.has-focus) ? 6px : 4px;
+    private property <length> track-height: (root.is-hovered || root.is-dragging || root.has-focus) ? 5px : 3px;
 
     animate track-height { duration: 100ms; }
 
@@ -4875,10 +4982,10 @@ export component MainWindow inherits Window {
                             }
                         }
 
-                        // Row 2: Unified Controls Row: Rewind -> Play/Pause -> Forward -> Favorite -> Shuffle -> Time -> Spacer -> Volume -> More -> Fullscreen
+                        // Row 2: Unified Controls Row: Rewind -> Play/Pause -> Forward -> Favorite -> Shuffle -> Time -> Spacer -> Quality -> Download -> Volume -> More -> Fullscreen
                         controls-row := HorizontalLayout {
-                            height: 56px;
-                            spacing: 12px;
+                            height: 52px;
+                            spacing: 8px;
                             alignment: center;
 
                             // Rewind (-15s) with vector icon centered on main axis and step label underneath
@@ -4899,7 +5006,7 @@ export component MainWindow inherits Window {
                                     width: 22px;
                                     height: 22px;
                                     x: (parent.width - self.width) / 2;
-                                    y: (parent.height - self.height) / 2;
+                                    y: 7px;
                                     image-fit: contain;
                                 }
 
@@ -4910,7 +5017,7 @@ export component MainWindow inherits Window {
                                     color: HubTheme.text-muted;
                                     horizontal-alignment: center;
                                     x: (parent.width - self.width) / 2;
-                                    y: 32px;
+                                    y: 30px;
                                 }
 
                                 rewind-touch := TouchArea {
@@ -4948,12 +5055,12 @@ export component MainWindow inherits Window {
                                 }
                             }
 
-                            // Prominent circular Play / Pause button (54px centered on same 28px vertical axis)
+                            // Prominent circular Play / Pause button (50px centered on same vertical axis)
                             play-btn := Rectangle {
-                                width: 54px;
-                                height: 54px;
+                                width: 50px;
+                                height: 50px;
                                 y: (parent.height - self.height) / 2;
-                                border-radius: 27px;
+                                border-radius: 25px;
                                 background: play-touch.pressed ? HubTheme.accent-pressed : (play-touch.has-hover ? HubTheme.accent-hover : HubTheme.accent);
                                 border-width: play-focus.has-focus ? 2px : 0px;
                                 border-color: HubTheme.focus-ring;
@@ -5024,7 +5131,7 @@ export component MainWindow inherits Window {
                                     width: 22px;
                                     height: 22px;
                                     x: (parent.width - self.width) / 2;
-                                    y: (parent.height - self.height) / 2;
+                                    y: 7px;
                                     image-fit: contain;
                                 }
 
@@ -5035,7 +5142,7 @@ export component MainWindow inherits Window {
                                     color: HubTheme.text-muted;
                                     horizontal-alignment: center;
                                     x: (parent.width - self.width) / 2;
-                                    y: 32px;
+                                    y: 30px;
                                 }
 
                                 fwd-touch := TouchArea {
@@ -5072,6 +5179,9 @@ export component MainWindow inherits Window {
                                     }
                                 }
                             }
+
+                            // Inter-group spacing between Transport and Media Meta groups (~22px)
+                            Rectangle { width: 14px; }
 
                             // Favorite Heart button
                             fav-btn := Rectangle {
@@ -5187,22 +5297,23 @@ export component MainWindow inherits Window {
                                 }
                             }
 
-                            // Current time and duration label (placed after Shuffle)
+                            // Inter-group spacing between Media Meta and Time label (~22px)
+                            Rectangle { width: 14px; }
+
+                            // Current time and duration label (clean 14px monospace/tabular digits)
                             HorizontalLayout {
-                                padding-left: 8px;
-                                padding-right: 8px;
                                 alignment: center;
                                 Text {
                                     text: (root.player-media-loaded ? root.position-text : "0:00") + " / " + (root.player-media-loaded ? root.duration-text : "0:00");
                                     color: HubTheme.text-primary;
-                                    font-size: 13px;
-                                    font-weight: 600;
+                                    font-size: 14px;
+                                    font-weight: 500;
                                     vertical-alignment: center;
                                 }
                             }
 
                             // Flexible space separating left playback controls from right utility tools
-                            Rectangle { horizontal-stretch: 1; }
+                            Rectangle { horizontal-stretch: 1; min-width: 12px; }
 
                             // Quality selector button (44x44) placed directly before download button
                             quality-btn := Rectangle {
@@ -6300,7 +6411,7 @@ export component MainWindow inherits Window {
                     property <length> anchor-btn-y: bottom-panel.y + controls-row.y + quality-btn.y;
                     property <length> anchor-bottom: min(bottom-panel.y - 8px, anchor-btn-y - 10px);
                     property <length> header-chrome-height: 65px;
-                    property <length> item-height: 42px;
+                    property <length> item-height: 44px;
                     property <length> item-gap: 4px;
                     property <length> list-desired-height: root.player-quality-options.length * item-height + max(0, root.player-quality-options.length - 1) * item-gap;
                     property <length> max-available-panel-height: max(160px, anchor-bottom - 16px);
@@ -6342,10 +6453,10 @@ export component MainWindow inherits Window {
                             height: 24px;
                             alignment: space-between;
                             Text {
-                                text: "QUALITY";
-                                font-size: 11px;
-                                font-weight: 700;
-                                color: HubTheme.text-muted;
+                                text: "Quality";
+                                font-size: 14px;
+                                font-weight: 600;
+                                color: HubTheme.text-primary;
                                 vertical-alignment: center;
                             }
                             Rectangle {
@@ -6382,84 +6493,17 @@ export component MainWindow inherits Window {
                             VerticalLayout {
                                 spacing: item-gap;
 
-                                for opt in root.player-quality-options : Rectangle {
-                                    height: item-height;
-                                    border-radius: 8px;
-                                    background: opt-touch.pressed ? #252836 : (opt.is-selected ? #BE185D26 : (opt-touch.has-hover ? #FFFFFF12 : transparent));
-                                    border-width: opt.is-selected ? 1px : 0px;
-                                    border-color: #BE185D88;
-
-                                    opt-touch := TouchArea {
-                                        pointer-event(event) => {
-                                            if (event.kind == PointerEventKind.move) {
-                                                root.player-controls-visible = true;
-                                                player-controls-hide-timer.restart();
-                                            }
-                                        }
-                                        clicked => {
-                                            root.player-controls-visible = true;
-                                            player-controls-hide-timer.restart();
-                                            root.player-quality-panel-open = false;
-                                            root.select-quality(opt.id);
-                                        }
+                                for opt in root.player-quality-options : QualityOptionRow {
+                                    option: opt;
+                                    pointer-moved => {
+                                        root.player-controls-visible = true;
+                                        player-controls-hide-timer.restart();
                                     }
-
-                                    HorizontalLayout {
-                                        padding-left: 10px;
-                                        padding-right: 10px;
-                                        spacing: 8px;
-                                        alignment: center;
-
-                                        Rectangle {
-                                            width: 16px;
-                                            height: 16px;
-                                            border-radius: 8px;
-                                            background: opt.is-selected ? #BE185D : #FFFFFF15;
-                                            border-width: 1px;
-                                            border-color: opt.is-selected ? #BE185D : #FFFFFF33;
-
-                                            if opt.is-selected : Image {
-                                                source: @image-url("../../../assets/icons/check-circle.svg");
-                                                width: 14px;
-                                                height: 14px;
-                                                x: (parent.width - self.width) / 2;
-                                                y: (parent.height - self.height) / 2;
-                                                image-fit: contain;
-                                            }
-                                        }
-
-                                        Text {
-                                            text: opt.resolution + (opt.is-original ? " (Original)" : "");
-                                            color: opt.is-selected ? #FFFFFF : HubTheme.text-primary;
-                                            font-size: 13px;
-                                            font-weight: opt.is-selected ? 700 : 500;
-                                            vertical-alignment: center;
-                                            horizontal-stretch: 1;
-                                        }
-
-                                        if opt.codec != "" : Rectangle {
-                                            height: 20px;
-                                            border-radius: 4px;
-                                            background: #FFFFFF15;
-                                            HorizontalLayout {
-                                                padding-left: 6px;
-                                                padding-right: 6px;
-                                                Text {
-                                                    text: opt.codec;
-                                                    color: HubTheme.text-secondary;
-                                                    font-size: 10px;
-                                                    font-weight: 600;
-                                                    vertical-alignment: center;
-                                                }
-                                            }
-                                        }
-
-                                        if opt.size-text != "" : Text {
-                                            text: opt.size-text;
-                                            color: HubTheme.text-muted;
-                                            font-size: 11px;
-                                            vertical-alignment: center;
-                                        }
+                                    clicked => {
+                                        root.player-controls-visible = true;
+                                        player-controls-hide-timer.restart();
+                                        root.player-quality-panel-open = false;
+                                        root.select-quality(opt.id);
                                     }
                                 }
                             }
