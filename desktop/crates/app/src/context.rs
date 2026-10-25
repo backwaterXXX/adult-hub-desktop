@@ -135,6 +135,14 @@ impl AppContext {
             return;
         }
         let mut history = self.nav_history.lock().unwrap();
+        Self::push_history(&mut history, dest);
+    }
+
+    /// Append a destination unless it repeats the screen already on top. The
+    /// stack (not a single "previous screen" field) is what keeps nested
+    /// transitions — list → film → performer → another film — unwinding in the
+    /// real visit order.
+    pub fn push_history(history: &mut Vec<NavDestination>, dest: NavDestination) {
         if history.last() != Some(&dest) {
             history.push(dest);
         }
@@ -243,5 +251,69 @@ mod tests {
         // Looping: from vid-3 -> vid-1
         let pos3 = list.iter().position(|it| it.id == "vid-3").unwrap();
         assert_eq!(list[(pos3 + 1) % list.len()].id, "vid-1");
+    }
+
+    #[test]
+    fn nav_history_unwinds_nested_transitions() {
+        use NavDestination::*;
+        let mut history = Vec::new();
+
+        // The audited flow: playback → "…" → Details → Back must return to the
+        // player with its item id, not to Home.
+        AppContext::push_history(
+            &mut history,
+            Browse {
+                category: "Latest".into(),
+                search_query: String::new(),
+                genre_query: String::new(),
+                studio_query: String::new(),
+                performer_query: String::new(),
+                performer_search_query: String::new(),
+                performer_letter: String::new(),
+                performers_photo_only: false,
+                drilldown: false,
+            },
+        );
+        AppContext::push_history(
+            &mut history,
+            Player {
+                id: "movie-1".into(),
+            },
+        );
+        assert_eq!(
+            history.pop(),
+            Some(Player {
+                id: "movie-1".into()
+            }),
+            "Back from Details must target the player"
+        );
+
+        // list → film → performer → another film unwinds in reverse visit order.
+        let mut history = Vec::new();
+        AppContext::push_history(&mut history, Home);
+        AppContext::push_history(&mut history, VideoDetails { id: "a".into() });
+        AppContext::push_history(
+            &mut history,
+            PerformerDetails {
+                name: "Jane".into(),
+            },
+        );
+        AppContext::push_history(&mut history, VideoDetails { id: "b".into() });
+        assert_eq!(history.pop(), Some(VideoDetails { id: "b".into() }));
+        assert_eq!(
+            history.pop(),
+            Some(PerformerDetails {
+                name: "Jane".into()
+            })
+        );
+        assert_eq!(history.pop(), Some(VideoDetails { id: "a".into() }));
+        assert_eq!(history.pop(), Some(Home));
+        assert!(history.pop().is_none());
+
+        // Re-entering the same screen from itself must not grow the stack.
+        let mut history = Vec::new();
+        AppContext::push_history(&mut history, Home);
+        AppContext::push_history(&mut history, Home);
+        assert_eq!(history.len(), 1);
     }
 }

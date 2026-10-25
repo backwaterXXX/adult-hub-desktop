@@ -297,7 +297,22 @@ struct SendHandle(*mut sys::mpv_handle);
 unsafe impl Send for SendHandle {}
 
 impl Player {
+    /// Creates a player whose video is rendered into an embedded OpenGL texture
+    /// via the libmpv render API.
     pub fn new() -> Result<Self> {
+        Self::with_video_output(Some("libmpv"), Some("opengl"))
+    }
+
+    /// Creates a player that opens its own top-level video window. Used when
+    /// the application UI cannot provide a shared OpenGL context, so video
+    /// rendering is fully independent of the UI renderer. Leaving `vo` at the
+    /// mpv default keeps its own fallback chain (GPU context -> legacy VOs)
+    /// intact; newer mpv releases no longer accept an explicit "auto" value.
+    pub fn new_native_video() -> Result<Self> {
+        Self::with_video_output(None, None)
+    }
+
+    fn with_video_output(vo: Option<&str>, gpu_api: Option<&str>) -> Result<Self> {
         let api = Arc::new(sys::MpvApi::load()?);
         let handle = unsafe { (api.mpv_create)() };
         if handle.is_null() {
@@ -309,15 +324,13 @@ impl Player {
         let hwdec_mode = std::env::var("ADULT_HUB_HWDEC").unwrap_or_else(|_| "auto-copy".into());
         let ao_mode = std::env::var("ADULT_HUB_AO").ok();
         let ao_pcm_file = std::env::var("ADULT_HUB_AO_PCM_FILE").ok();
-        for (name, value) in [
+        let mut options: Vec<(&str, &str)> = vec![
             ("config", "no"),
             ("load-scripts", "no"),
             ("input-default-bindings", "no"),
             ("osc", "no"),
             ("terminal", "no"),
             ("idle", "yes"),
-            ("vo", "libmpv"),
-            ("gpu-api", "opengl"),
             ("hwdec", hwdec_mode.as_str()),
             ("audio-fallback-to-null", "yes"),
             ("keep-open", "no"),
@@ -334,7 +347,14 @@ impl Player {
             ("vd-lavc-threads", "0"),
             ("hr-seek", "yes"),
             ("video-sync", "audio"),
-        ] {
+        ];
+        if let Some(vo) = vo {
+            options.push(("vo", vo));
+        }
+        if let Some(api_name) = gpu_api {
+            options.push(("gpu-api", api_name));
+        }
+        for (name, value) in options {
             if let Err(error) = unsafe { set_option_raw(&api, handle, name, value) } {
                 unsafe { (api.mpv_terminate_destroy)(handle) };
                 return Err(error);

@@ -71,10 +71,50 @@ fn main() {
             .unwrap_or_else(|| "2026-10-21".into())
     });
 
+    let dirty_output = Command::new("git")
+        .args(["status", "--porcelain"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| o.stdout)
+        .unwrap_or_default();
+    let dirty = !String::from_utf8_lossy(&dirty_output).trim().is_empty();
+
+    let dirty_suffix = if dirty {
+        let diff_output = Command::new("git")
+            .args(["diff", "HEAD"])
+            .output()
+            .ok()
+            .map(|o| o.stdout)
+            .unwrap_or_default();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        use std::hash::Hasher;
+        hasher.write(&diff_output);
+        hasher.write(&dirty_output);
+        let h = hasher.finish();
+        format!("-dirty.{:08x}", (h & 0xffff_ffff) as u32)
+    } else {
+        String::new()
+    };
+
     println!("cargo:rerun-if-env-changed=ADULT_HUB_COMMIT_HASH");
     println!("cargo:rerun-if-env-changed=ADULT_HUB_BUILD_DATE");
+    println!("cargo:rerun-if-env-changed=ADULT_HUB_BUILD_ID");
     println!("cargo:rustc-env=ADULT_HUB_COMMIT_HASH={commit_hash}");
     println!("cargo:rustc-env=ADULT_HUB_BUILD_DATE={build_date}");
+    println!(
+        "cargo:rustc-env=ADULT_HUB_DIRTY={}",
+        if dirty { "1" } else { "0" }
+    );
+    let build_id = std::env::var("ADULT_HUB_BUILD_ID").unwrap_or_else(|_| {
+        format!(
+            "{}-{}{}",
+            std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".into()),
+            commit_hash,
+            dirty_suffix
+        )
+    });
+    println!("cargo:rustc-env=ADULT_HUB_BUILD_ID={build_id}");
 
     println!("cargo:rerun-if-changed=ui");
     println!("cargo:rerun-if-changed=../../assets/adult-hub-desktop.ico");
@@ -129,6 +169,8 @@ BEGIN
             VALUE "OriginalFilename", "adult-hub-desktop.exe\0"
             VALUE "ProductName", "Adult Hub Desktop\0"
             VALUE "ProductVersion", "{pkg_version}\0"
+            VALUE "SpecialBuild", "{build_id}\0"
+            VALUE "Comments", "Build ID: {build_id}\0"
         END
     END
     BLOCK "VarFileInfo"

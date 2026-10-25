@@ -21,6 +21,7 @@ struct PlaybackRecovery {
     retry_in_flight: bool,
     loaded_at: Option<Instant>,
     source_generation: u64,
+    load_requested_at: Option<Instant>,
 }
 
 pub fn install_polling(ui: &MainWindow, ctx: &AppContext, frame_pending: Arc<AtomicBool>) -> Timer {
@@ -47,6 +48,39 @@ pub fn install_polling(ui: &MainWindow, ctx: &AppContext, frame_pending: Arc<Ato
 
         for event in player.events().try_iter() {
             handle_event(&ui, player, event, &ctx_handle, &mut recovery);
+        }
+
+        // Stall guard: mpv accepted the load request but never reported the
+        // file loaded (e.g. its video output failed to initialise). Surface a
+        // failure instead of spinning on "Opening media stream…" forever.
+        if ui.get_player_state() == "loading" && !ui.get_player_media_loaded() {
+            let stalled = match recovery.load_requested_at {
+                Some(since) => since.elapsed() >= Duration::from_secs(30),
+                None => {
+                    recovery.load_requested_at = Some(Instant::now());
+                    false
+                }
+            };
+            if stalled {
+                crate::log_debug(
+                    "playback: stalled 30s in loading without FileLoaded, stopping mpv",
+                );
+                recovery.load_requested_at = None;
+                recovery.retry_in_flight = false;
+                recovery.retry_at = None;
+                let _ = player.stop();
+                ui.set_player_state("failed".into());
+                crate::diagnostics::GLOBAL_LOG
+                    .e("Player", "Load stalled: mpv never reported the file loaded");
+                crate::playback::show_playback_error(
+                    &ui,
+                    "The player did not start playback within 30 seconds",
+                    "mpv accepted the file but never loaded it. Its video output may have \
+                     failed to initialise; try the other renderer in Settings.",
+                );
+            }
+        } else {
+            recovery.load_requested_at = None;
         }
 
         // Toast auto-dismissal after 4 seconds (40 ticks @ 100ms) for notifications without action button
@@ -357,6 +391,10 @@ fn handle_event(
             }
             recovery.loaded_at = Some(Instant::now());
             ui.set_player_media_loaded(true);
+            crate::log_debug(&format!(
+                "playback: FileLoaded {width:?}x{height:?}, retry_in_flight={}",
+                recovery.retry_in_flight
+            ));
             let user_paused_during_loading = ui.get_player_state() == "paused";
             if user_paused_during_loading {
                 let _ = player.set_pause(true);
@@ -438,6 +476,10 @@ fn handle_event(
             update_texture_size(ui, width, height);
         }
         PlayerEvent::EndFile { eof, error } => {
+            crate::log_debug(&format!(
+                "playback: EndFile eof={eof} error={}",
+                error.as_deref().unwrap_or("none")
+            ));
             ui.set_playing(false);
             if let Some(error) = error {
                 crate::diagnostics::GLOBAL_LOG.e("Player", &format!("Playback error: {error}"));
@@ -510,6 +552,10 @@ fn handle_event(
                         .unwrap_or(ui.get_position() as f64)
                         .max(0.0);
                     let delay_seconds = 1_u64 << (recovery.retries - 1);
+                    crate::log_debug(&format!(
+                        "playback: transient network error, retry {}/{} in {}s",
+                        recovery.retries, MAX_AUTOMATIC_RETRIES, delay_seconds
+                    ));
                     recovery.retry_at = Some(Instant::now() + Duration::from_secs(delay_seconds));
                     recovery.source_generation = player.load_generation();
                     recovery.loaded_at = None;
@@ -565,6 +611,21 @@ fn handle_event(
             } else {
                 recovery.retry_at = None;
                 recovery.retry_in_flight = false;
+                // Software UI mode plays into mpv's own window; closing that
+                // window is a clean non-EOF stop the main UI cannot see any
+                // other way. Bring the application to the same consistent
+                // stopped state as navigating away from the player.
+                if ui.get_software_ui_renderer() && ui.get_player_media_loaded() {
+                    crate::playback::stop_active_playback_for_navigation(
+                        ui,
+                        Some(player),
+                        reporter,
+                        session_ctrl,
+                        current_item,
+                    );
+                    ui.set_status("Video window closed".into());
+                    ui.set_status_color(slint::Color::from_rgb_u8(158, 158, 158));
+                }
             }
         }
         PlayerEvent::LogMessage {
@@ -574,12 +635,15 @@ fn handle_event(
         } => {
             let message = format!("{}: {}", prefix, text);
             if matches!(level.as_str(), "fatal" | "error") {
+                eprintln!("libmpv {level}: {message}");
                 crate::diagnostics::GLOBAL_LOG.e("libmpv", &message);
             } else {
                 crate::diagnostics::GLOBAL_LOG.w("libmpv", &message);
             }
         }
-        PlayerEvent::Shutdown => {}
+        PlayerEvent::Shutdown => {
+            crate::log_debug("playback: mpv sent Shutdown event");
+        }
     }
 }
 

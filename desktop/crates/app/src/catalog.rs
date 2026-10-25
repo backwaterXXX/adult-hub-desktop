@@ -8,6 +8,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 pub const THUMBNAIL_BATCH_SIZE: usize = 4;
+/// Bounded recovery attempts for transient artwork failures (timeouts, 429,
+/// 5xx). Runs on the thumbnail worker thread, never on the UI thread.
+const THUMBNAIL_RETRY_ROUNDS: usize = 2;
+const THUMBNAIL_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Clone)]
 pub struct ThumbnailRequest {
@@ -25,8 +29,17 @@ pub struct FetchedThumbnail {
     pub bytes: Vec<u8>,
 }
 
+/// A card artwork fetch result plus whether every attempt that failed did so
+/// transiently. Transient failures qualify for bounded background retries;
+/// permanent ones (missing data, 401/403/404, undecodable bodies) do not.
+#[derive(Clone)]
+pub struct CardFetchOutcome {
+    pub thumbnail: Option<FetchedThumbnail>,
+    pub transient: bool,
+}
+
 struct ThumbnailFlight {
-    result: Mutex<Option<Option<FetchedThumbnail>>>,
+    result: Mutex<Option<CardFetchOutcome>>,
     completed: Condvar,
 }
 
@@ -1234,31 +1247,58 @@ pub fn tv_item_to_card_for_server(item: &TvItem, server_url: &str) -> VideoCardD
     card
 }
 
-fn ensure_thumbnail_variant(url: &str, token: Option<&str>) -> Option<(String, Vec<u8>)> {
-    let ensure = |candidate: &str| {
-        crate::thumbnails::load_cached_image_bytes(candidate)
-            .map(|bytes| (candidate.to_owned(), bytes))
-            .or_else(|| {
-                crate::thumbnails::fetch_and_cache_image_bytes(candidate, token)
-                    .map(|bytes| (candidate.to_owned(), bytes))
-            })
-    };
-    ensure(url).or_else(|| {
-        let mut untagged = url::Url::parse(url).ok()?;
-        let params = untagged
-            .query_pairs()
-            .filter(|(key, _)| key != "tag")
-            .map(|(key, value)| (key.into_owned(), value.into_owned()))
-            .collect::<Vec<_>>();
-        if params.len() == untagged.query_pairs().count() {
-            return None;
-        }
-        untagged.set_query(None);
-        if !params.is_empty() {
-            untagged.query_pairs_mut().extend_pairs(params);
-        }
-        ensure(untagged.as_str())
-    })
+fn attempt_image_url(
+    candidate: &str,
+    token: Option<&str>,
+    transient: &mut bool,
+) -> Option<(String, Vec<u8>)> {
+    if let Some(bytes) = crate::thumbnails::load_cached_image_bytes(candidate) {
+        return Some((candidate.to_owned(), bytes));
+    }
+    let (bytes, failure) = crate::thumbnails::fetch_and_cache_image_bytes_checked(candidate, token);
+    if let Some(failure) = failure {
+        *transient = *transient || failure.is_transient();
+    }
+    bytes.map(|bytes| (candidate.to_owned(), bytes))
+}
+
+fn ensure_thumbnail_variant_detail(
+    url: &str,
+    token: Option<&str>,
+) -> (Option<(String, Vec<u8>)>, bool) {
+    let mut transient = false;
+    if let Some(found) = attempt_image_url(url, token, &mut transient) {
+        return (Some(found), transient);
+    }
+    let tagged_failed_transient = transient;
+    // An ImageTags entry that no longer matches the stored artwork 404s on the
+    // tagged URL but answers on the same URL without the tag.
+    transient = false;
+    let mut untagged_found = None;
+    if let Some(candidate) = untagged_image_url(url) {
+        untagged_found = attempt_image_url(&candidate, token, &mut transient);
+    }
+    match untagged_found {
+        Some(found) => (Some(found), transient),
+        None => (None, transient || tagged_failed_transient),
+    }
+}
+
+pub(crate) fn untagged_image_url(url: &str) -> Option<String> {
+    let mut untagged = url::Url::parse(url).ok()?;
+    let params = untagged
+        .query_pairs()
+        .filter(|(key, _)| key != "tag")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect::<Vec<_>>();
+    if params.len() == untagged.query_pairs().count() {
+        return None;
+    }
+    untagged.set_query(None);
+    if !params.is_empty() {
+        untagged.query_pairs_mut().extend_pairs(params);
+    }
+    Some(untagged.to_string())
 }
 
 fn indexed_backdrop_url(url: &str) -> Option<String> {
@@ -1282,14 +1322,26 @@ fn indexed_backdrop_url(url: &str) -> Option<String> {
     }
 }
 
-fn ensure_thumbnail(url: &str, token: Option<&str>) -> Option<(String, Vec<u8>)> {
+fn ensure_thumbnail_detail(url: &str, token: Option<&str>) -> (Option<(String, Vec<u8>)>, bool) {
     if url.is_empty() {
-        return None;
+        return (None, false);
     }
-    ensure_thumbnail_variant(url, token).or_else(|| {
-        let indexed = indexed_backdrop_url(url)?;
-        ensure_thumbnail_variant(&indexed, token)
-    })
+    let (found, transient) = ensure_thumbnail_variant_detail(url, token);
+    if found.is_some() {
+        return (found, false);
+    }
+    match indexed_backdrop_url(url) {
+        Some(indexed) => {
+            let (indexed_found, indexed_transient) =
+                ensure_thumbnail_variant_detail(&indexed, token);
+            if indexed_found.is_some() {
+                (indexed_found, false)
+            } else {
+                (None, indexed_transient || transient)
+            }
+        }
+        None => (None, transient),
+    }
 }
 
 /// Fetches and caches artwork on workers, returning only plain URLs. Slint
@@ -1299,10 +1351,23 @@ pub fn fetch_card_thumbnail(
     request: &ThumbnailRequest,
     token: Option<&str>,
 ) -> Option<FetchedThumbnail> {
+    fetch_card_thumbnail_outcome(request, token).thumbnail
+}
+
+pub fn fetch_card_thumbnail_outcome(
+    request: &ThumbnailRequest,
+    token: Option<&str>,
+) -> CardFetchOutcome {
+    let no_outcome = || CardFetchOutcome {
+        thumbnail: None,
+        transient: false,
+    };
     let key = thumbnail_flight_key(request, token);
     let flights = THUMBNAIL_FLIGHTS.get_or_init(|| Mutex::new(HashMap::new()));
     let (flight, is_leader) = {
-        let mut flights = flights.lock().ok()?;
+        let Ok(mut flights) = flights.lock() else {
+            return no_outcome();
+        };
         if let Some(flight) = flights.get(&key) {
             (flight.clone(), false)
         } else {
@@ -1316,77 +1381,105 @@ pub fn fetch_card_thumbnail(
     };
 
     if !is_leader {
-        let mut result = flight.result.lock().ok()?;
+        let Ok(mut result) = flight.result.lock() else {
+            return no_outcome();
+        };
         while result.is_none() {
-            result = flight.completed.wait(result).ok()?;
+            let Ok(waited) = flight.completed.wait(result) else {
+                return no_outcome();
+            };
+            result = waited;
         }
-        return result.clone().flatten();
+        return result.clone().unwrap_or_else(no_outcome);
     }
 
     // The permit caps concurrent network/decode work across all screens.
     // Catch panics at this worker boundary so every in-flight request still
     // resolves to a terminal Failed result and wakes deduplicated waiters.
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _permit = ThumbnailDownloadPermit::acquire()?;
-        fetch_card_thumbnail_inner(request, token)
+        Some(fetch_card_thumbnail_inner(request, token))
     }))
-    .unwrap_or(None);
+    .ok()
+    .flatten()
+    .unwrap_or_else(no_outcome);
 
     if let Ok(mut stored) = flight.result.lock() {
-        *stored = Some(result.clone());
+        *stored = Some(outcome.clone());
         flight.completed.notify_all();
     }
     if let Ok(mut flights) = flights.lock() {
         flights.remove(&key);
     }
-    result
+    outcome
 }
 
-fn fetch_card_thumbnail_inner(
-    request: &ThumbnailRequest,
-    token: Option<&str>,
-) -> Option<FetchedThumbnail> {
-    let fallback_first = request.provider == "telegram" && request.progress > 0.0;
-    let candidates = if fallback_first {
-        [
-            request.fallback_url.as_str(),
-            request.primary_url.as_str(),
-            request.alternate_url.as_str(),
-        ]
-    } else {
-        [
-            request.primary_url.as_str(),
-            request.fallback_url.as_str(),
-            request.alternate_url.as_str(),
-        ]
-    };
+fn fetch_card_thumbnail_inner(request: &ThumbnailRequest, token: Option<&str>) -> CardFetchOutcome {
+    // Library artwork always wins: the resolver poster (primary) is tried
+    // before the generated phash frame (fallback) even for resuming items.
+    // A mid-playback frame may be watch-progress flavour, but it must not
+    // replace a correct library image with an arbitrary frame.
+    let candidates = [
+        request.primary_url.as_str(),
+        request.fallback_url.as_str(),
+        request.alternate_url.as_str(),
+    ];
 
     let mut last_resort = None;
+    let mut transient = false;
     for candidate in candidates {
-        let Some((url, bytes)) = ensure_thumbnail(candidate, token) else {
+        let (fetched, candidate_transient) = ensure_thumbnail_detail(candidate, token);
+        if fetched.is_none() {
+            transient |= candidate_transient;
+        }
+        let Some((url, bytes)) = fetched else {
             continue;
         };
         let fetched = FetchedThumbnail { url, bytes };
         if !crate::thumbnails::is_poor_thumbnail_bytes(&fetched.bytes) {
-            return Some(fetched);
+            return CardFetchOutcome {
+                thumbnail: Some(fetched),
+                transient: false,
+            };
         }
         // Keep a decoded image as a last resort, but let later Jellyfin image
         // types replace blank/near-black placeholders when they are available.
         last_resort.get_or_insert(fetched);
     }
-    last_resort
+    let transient = last_resort.is_none() && transient;
+    if transient {
+        let short_id = request.id.chars().take(8).collect::<String>();
+        crate::diagnostics::GLOBAL_LOG.w(
+            "Thumbnail",
+            &format!("record {short_id}: transient artwork failure, background retry scheduled"),
+        );
+    }
+    CardFetchOutcome {
+        thumbnail: last_resort,
+        transient,
+    }
 }
 
 pub fn fetch_thumbnail_batch(
     requests: &[ThumbnailRequest],
     token: Option<&str>,
 ) -> Vec<(usize, FetchedThumbnail)> {
+    fetch_thumbnail_batch_outcomes(requests, token)
+        .into_iter()
+        .filter_map(|(index, outcome)| outcome.thumbnail.map(|thumbnail| (index, thumbnail)))
+        .collect()
+}
+
+pub fn fetch_thumbnail_batch_outcomes(
+    requests: &[ThumbnailRequest],
+    token: Option<&str>,
+) -> Vec<(usize, CardFetchOutcome)> {
     std::thread::scope(|scope| {
         let jobs = requests
             .iter()
             .enumerate()
             .map(|(index, request)| {
-                scope.spawn(move || fetch_card_thumbnail(request, token).map(|url| (index, url)))
+                scope.spawn(move || Some((index, fetch_card_thumbnail_outcome(request, token))))
             })
             .collect::<Vec<_>>();
         jobs.into_iter()
@@ -1396,15 +1489,41 @@ pub fn fetch_thumbnail_batch(
 }
 
 fn log_records_without_thumbnail_source(requests: &[ThumbnailRequest]) {
-    for request in requests.iter().filter(|request| {
-        request.primary_url.is_empty()
-            && request.fallback_url.is_empty()
-            && request.alternate_url.is_empty()
-    }) {
+    // Items without any artwork URL are expected when the source library does
+    // not have a thumbnail for that entry.  Log at info level (not warning) and
+    // cap the output to avoid flooding the diagnostic ring with identical lines.
+    const MAX_LOG_ENTRIES: usize = 10;
+    let missing: Vec<_> = requests
+        .iter()
+        .filter(|r| {
+            r.primary_url.is_empty() && r.fallback_url.is_empty() && r.alternate_url.is_empty()
+        })
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+    let logged = missing.len().min(MAX_LOG_ENTRIES);
+    for request in &missing[..logged] {
         let short_id = request.id.chars().take(8).collect::<String>();
-        crate::diagnostics::GLOBAL_LOG.w(
+        crate::diagnostics::GLOBAL_LOG.i(
             "Thumbnail",
-            &format!("record {short_id}: source response contained no usable artwork URL"),
+            &format!(
+                "record {short_id} ({provider}): no artwork URL in source data",
+                provider = if request.provider.is_empty() {
+                    "?"
+                } else {
+                    &request.provider
+                },
+            ),
+        );
+    }
+    if missing.len() > MAX_LOG_ENTRIES {
+        crate::diagnostics::GLOBAL_LOG.i(
+            "Thumbnail",
+            &format!(
+                "… {} more records have no artwork URL (suppressed)",
+                missing.len() - MAX_LOG_ENTRIES
+            ),
         );
     }
 }
@@ -1419,6 +1538,7 @@ pub fn refresh_catalog_thumbnails_async(
     let requests = cards.iter().map(ThumbnailRequest::from).collect::<Vec<_>>();
     log_records_without_thumbnail_source(&requests);
     std::thread::spawn(move || {
+        let mut retry_requests = Vec::new();
         for start in (0..requests.len()).step_by(THUMBNAIL_BATCH_SIZE) {
             if generation.as_ref().is_some_and(|(generation, request_id)| {
                 !thumbnail_generation_is_current(generation, *request_id)
@@ -1426,10 +1546,20 @@ pub fn refresh_catalog_thumbnails_async(
                 break;
             }
             let end = (start + THUMBNAIL_BATCH_SIZE).min(requests.len());
-            let thumbnails = fetch_thumbnail_batch(&requests[start..end], Some(&token));
-            let successful_offsets = thumbnails
+            let outcomes = fetch_thumbnail_batch_outcomes(&requests[start..end], Some(&token));
+            let successful_offsets = outcomes
                 .iter()
                 .map(|(offset, _)| *offset)
+                .collect::<Vec<_>>();
+            retry_requests.extend(
+                outcomes
+                    .iter()
+                    .filter(|(_, outcome)| outcome.thumbnail.is_none() && outcome.transient)
+                    .map(|(offset, _)| requests[start + *offset].clone()),
+            );
+            let thumbnails = outcomes
+                .into_iter()
+                .filter_map(|(offset, outcome)| outcome.thumbnail.map(|t| (offset, t)))
                 .collect::<Vec<_>>();
             let source_available = requests[start..end]
                 .iter()
@@ -1473,6 +1603,55 @@ pub fn refresh_catalog_thumbnails_async(
                     }
                 }
             });
+        }
+        // Bounded background recovery for transient outages (timeout, 429,
+        // 5xx): a few delayed rounds on this worker thread, never on the UI
+        // thread, and never persisted as a success when they keep failing.
+        for _round in 0..THUMBNAIL_RETRY_ROUNDS {
+            if retry_requests.is_empty() {
+                break;
+            }
+            std::thread::sleep(THUMBNAIL_RETRY_DELAY);
+            if generation.as_ref().is_some_and(|(generation, request_id)| {
+                !thumbnail_generation_is_current(generation, *request_id)
+            }) {
+                break;
+            }
+            let mut next_retry = Vec::new();
+            for start in (0..retry_requests.len()).step_by(THUMBNAIL_BATCH_SIZE) {
+                let end = (start + THUMBNAIL_BATCH_SIZE).min(retry_requests.len());
+                let outcomes =
+                    fetch_thumbnail_batch_outcomes(&retry_requests[start..end], Some(&token));
+                for (offset, outcome) in &outcomes {
+                    if outcome.thumbnail.is_none() && outcome.transient {
+                        next_retry.push(retry_requests[start + *offset].clone());
+                    }
+                }
+                let batch = retry_requests[start..end].to_vec();
+                let generation = generation.clone();
+                let ui = ui.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if generation.as_ref().is_some_and(|(generation, request_id)| {
+                        !thumbnail_generation_is_current(generation, *request_id)
+                    }) {
+                        return;
+                    }
+                    let Some(ui) = ui.upgrade() else { return };
+                    for (offset, outcome) in outcomes {
+                        let Some(request) = batch.get(offset) else {
+                            continue;
+                        };
+                        let Some(thumbnail) = outcome.thumbnail else {
+                            continue;
+                        };
+                        let items = ui.get_catalog_items();
+                        if let Some(index) = card_index_by_request(&items, request) {
+                            update_catalog_thumbnail(&ui, index, request, &thumbnail);
+                        }
+                    }
+                });
+            }
+            retry_requests = next_retry;
         }
     });
 }
@@ -1861,5 +2040,46 @@ mod tests {
         );
         assert_eq!(aggregated[1].title, "Active Duty Live");
         assert_eq!(aggregated[1].child_count, Some(3));
+    }
+
+    #[test]
+    fn performer_filmography_grid_columns_and_card_width() {
+        let gap = 16.0f32;
+        let base_card = 200.0f32;
+        let min_w = 160.0f32;
+        let zoom = 1.0f32;
+        let content_pad = 24.0f32;
+        let gutter = 16.0f32;
+
+        let calc_cols = |avail: f32| -> i32 {
+            let eff_min = min_w.max(base_card * zoom);
+            let n = ((avail + gap) / (eff_min + gap)).floor() as i32;
+            n.clamp(1, 8)
+        };
+        let calc_card_w = |avail: f32, cols: i32| -> f32 {
+            (avail - (cols - 1) as f32 * gap) / cols as f32
+        };
+
+        let visible_width = 1180.0f32;
+
+        // Without scrollbar gutter reservation (old bug):
+        let old_avail = visible_width - 2.0 * content_pad;
+        let old_cols = calc_cols(old_avail);
+        let old_card_w = calc_card_w(old_avail, old_cols);
+        assert!(5.0 * old_card_w + 4.0 * gap > visible_width - 2.0 * content_pad - gutter);
+
+        // With scrollbar gutter reservation (fixed):
+        let new_avail = (visible_width - 2.0 * content_pad - gutter).max(240.0);
+        let new_cols = calc_cols(new_avail);
+        let new_card_w = calc_card_w(new_avail, new_cols);
+        let total_row_w = new_cols as f32 * new_card_w + (new_cols - 1) as f32 * gap;
+        assert!((total_row_w - new_avail).abs() < 0.001);
+        assert!(total_row_w + 2.0 * content_pad + gutter <= visible_width);
+
+        let total_items = 39;
+        let full_rows = total_items / new_cols;
+        let last_row_items = total_items % new_cols;
+        assert_eq!(full_rows, 7);
+        assert_eq!(last_row_items, 4);
     }
 }

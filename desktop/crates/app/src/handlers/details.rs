@@ -66,8 +66,12 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
         ui.on_open_item_detail(move |id| {
             let Some(ui) = weak.upgrade() else { return };
             let id = id.to_string();
-            ctx_detail
-                .push_nav_destination(crate::handlers::browsing::current_nav_destination(&ui));
+            // Snapshot the screen being left (player, list, …) before any part
+            // of this handler mutates UI state, so Back really returns there.
+            ctx_detail.push_nav_destination(crate::handlers::browsing::current_nav_destination(
+                &ui,
+                &ctx_detail,
+            ));
             let target_item = ctx_detail.find_catalog_item(&id).or_else(|| {
                 if id == "sample" {
                     Some(sample_catalog_tv_items()[0].clone())
@@ -1043,7 +1047,11 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
             drop(list);
             set_catalog(&ui, cards);
 
-            let _ = local_store.save_progress("local", &id, 0, 0);
+            // Only marking an item as watched clears the saved position.
+            // Un-marking must not discard resume progress.
+            if new_played {
+                let _ = local_store.save_progress("local", &id, 0, 0);
+            }
             if id.starts_with("telegram:") {
                 let prov_id = id.strip_prefix("telegram:").unwrap_or(&id);
                 let _ = local_store.mark_telegram_played(prov_id, new_played, None, None, None);
@@ -1234,8 +1242,8 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
 }
 
 /// Sizes below this are error documents, playlists or `.strm` referral bodies,
-/// never the media itself.
-const MIN_PLAUSIBLE_MEDIA_BYTES: u64 = 1024;
+/// never the media itself. Same threshold the Details formatter uses.
+const MIN_PLAUSIBLE_MEDIA_BYTES: u64 = adult_hub_client::TvItem::MIN_PLAUSIBLE_MEDIA_BYTES;
 
 fn content_range_total_bytes(value: &str) -> Option<u64> {
     let total = value.rsplit('/').next()?.trim();
@@ -1256,8 +1264,9 @@ fn is_non_media_content_type(content_type: &str) -> bool {
 
 /// Ask a stream URL for its total size with a `bytes=0-0` range probe. Only
 /// the origin that issued the URL receives credentials; redirects are
-/// followed manually without auth headers.
-fn probe_remote_media_size(
+/// followed manually without auth headers. Also used by the connection
+/// diagnostics as a stream-access check.
+pub(crate) fn probe_remote_media_size(
     url: &str,
     token: Option<&str>,
     extra_headers: &[String],

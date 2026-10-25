@@ -180,7 +180,9 @@ impl DownloadManager {
             temp_path,
             bytes_downloaded: Arc::new(AtomicU64::new(0)),
             total_bytes: Arc::new(AtomicU64::new(
-                item.file_size_bytes.unwrap_or(0).max(0) as u64
+                // Placeholder/referral sizes (`.strm` pointers) must never seed
+                // the progress bar; the real total arrives from the server.
+                item.media_size_bytes().unwrap_or(0).max(0) as u64,
             )),
             cancel_flag: Arc::new(AtomicBool::new(false)),
             pause_flag: Arc::new(AtomicBool::new(false)),
@@ -684,9 +686,13 @@ fn run_download_task(
     task: Arc<DownloadTask>,
     manager: DownloadManager,
 ) {
+    let download_started = std::time::Instant::now();
+    crate::log_debug("download: task picked up from queue");
+
     // Step 1: Ensure target parent directory exists
     if let Some(parent) = task.target_path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
+            crate::log_debug(&format!("download: cannot create target directory: {e}"));
             *task.status.lock().unwrap() =
                 DownloadStatus::Error(format!("Cannot create directory: {e}"));
             manager.advance_queue_if_idle(ctx);
@@ -876,6 +882,7 @@ fn run_download_task(
             resp
         }
         Err(e) => {
+            crate::log_debug(&format!("download: connection error: {e}"));
             *task.status.lock().unwrap() = DownloadStatus::Error(format!("Connection error: {e}"));
             manager.advance_queue_if_idle(ctx);
             return;
@@ -883,6 +890,11 @@ fn run_download_task(
     };
 
     let is_partial = response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+    crate::log_debug(&format!(
+        "download: HTTP {} after {} ms, resume_from={existing_bytes} bytes, partial={is_partial}",
+        response.status().as_u16(),
+        download_started.elapsed().as_millis()
+    ));
     let accepts_ranges = response
         .headers()
         .get("accept-ranges")
@@ -1050,6 +1062,9 @@ fn run_download_task(
             Ok(0) => break, // EOF
             Ok(n) => {
                 if let Err(e) = out_file.write_all(&buffer[..n]) {
+                    crate::log_debug(&format!(
+                        "download: write error after {downloaded_accum} bytes: {e}"
+                    ));
                     drop(out_file);
                     let _ = std::fs::remove_file(&task.temp_path);
                     *task.status.lock().unwrap() =
@@ -1062,6 +1077,9 @@ fn run_download_task(
                     .store(downloaded_accum, Ordering::SeqCst);
             }
             Err(e) => {
+                crate::log_debug(&format!(
+                    "download: network read error after {downloaded_accum} bytes: {e}"
+                ));
                 drop(out_file);
                 let _ = std::fs::remove_file(&task.temp_path);
                 *task.status.lock().unwrap() =
@@ -1083,6 +1101,10 @@ fn run_download_task(
 
     if let Some(final_dest) = finalize_download(&task.temp_path, &task.target_path, &task.status) {
         let size = task.bytes_downloaded.load(Ordering::SeqCst);
+        crate::log_debug(&format!(
+            "download: completed {size} bytes in {} s",
+            download_started.elapsed().as_secs()
+        ));
         manager.add_history_item(CompletedDownloadItem {
             item_id: task.item_id.clone(),
             title: task.item_title.clone(),

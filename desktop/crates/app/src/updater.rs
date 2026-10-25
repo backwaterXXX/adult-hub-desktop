@@ -519,9 +519,9 @@ pub fn launch_installation(
                 .map_err(|e| UpdateError::Io(format!("failed to schedule EXE replacement: {e}")))?;
             std::process::exit(0);
         } else {
-            return Err(UpdateError::DownloadFailed(format!(
+            Err(UpdateError::DownloadFailed(format!(
                 "Windows updates require an EXE package, got package type '{package_type}'"
-            )));
+            )))
         }
     }
 

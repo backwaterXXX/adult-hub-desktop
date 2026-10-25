@@ -73,6 +73,26 @@ pub fn format_cache_bytes(bytes: u64) -> String {
     }
 }
 
+/// Render a configured cache limit exactly as it is stored.
+///
+/// The label used to integer-divide by 1024, so a custom 1536 MB limit read
+/// back as "1 GB" after a restart and looked like the value had been lost even
+/// though the setting was persisted correctly.
+pub fn format_cache_limit(megabytes: i32) -> String {
+    if megabytes <= 0 {
+        return "Off (RAM only)".to_string();
+    }
+    if megabytes < 1024 {
+        return format!("{megabytes} MB");
+    }
+    let gigabytes = megabytes as f64 / 1024.0;
+    if (gigabytes - gigabytes.round()).abs() < 0.05 {
+        format!("{} GB", gigabytes.round() as i32)
+    } else {
+        format!("{gigabytes:.1} GB")
+    }
+}
+
 /// Remove every persisted thumbnail while preserving the configured cache limit.
 pub fn clear_cache() {
     let Ok(_guard) = CACHE_WRITE_LOCK.lock() else {
@@ -401,6 +421,71 @@ enum ImageRequestError {
     RedirectLimit,
 }
 
+/// Classified reason an artwork fetch did not produce a usable image. The
+/// diagnostics surface reports the category and HTTP code (where one exists)
+/// plus the stage that failed, so "download failed" is no longer the only
+/// answer available to the user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThumbnailFailure {
+    InvalidUrl,
+    HttpStatus(u16),
+    NonImageContentType(String),
+    TooLarge,
+    EmptyBody,
+    ReadBody,
+    Timeout,
+    Connect,
+    Request,
+    InvalidRedirect,
+    RedirectLimit,
+    Decode,
+}
+
+impl ThumbnailFailure {
+    /// True for outages that a later background attempt can plausibly clear.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::Timeout
+            | Self::Connect
+            | Self::Request
+            | Self::EmptyBody
+            | Self::ReadBody
+            | Self::RedirectLimit => true,
+            Self::HttpStatus(status) => *status == 408 || *status == 429 || *status >= 500,
+            _ => false,
+        }
+    }
+
+    pub fn stage(&self) -> &'static str {
+        match self {
+            Self::InvalidUrl => "artwork selection",
+            Self::Decode => "decode",
+            _ => "download",
+        }
+    }
+
+    pub fn label(&self) -> String {
+        match self {
+            Self::InvalidUrl => "no usable artwork URL".into(),
+            Self::HttpStatus(status) => format!("HTTP {status}"),
+            Self::NonImageContentType(content_type) => {
+                format!("server answered {content_type} instead of an image")
+            }
+            Self::TooLarge => "image exceeded the 10 MB limit".into(),
+            Self::EmptyBody => "empty image response".into(),
+            Self::ReadBody => "failed to read image response".into(),
+            Self::Timeout => "request timed out".into(),
+            Self::Connect => "could not connect to image server".into(),
+            Self::Request => "request failed".into(),
+            Self::InvalidRedirect => "invalid or unsafe redirect".into(),
+            Self::RedirectLimit => "redirect limit exceeded".into(),
+            Self::Decode => {
+                "response could not be decoded (unsupported format or invalid data)".into()
+            }
+        }
+    }
+}
+
 fn send_image_request(
     url: &str,
     token: Option<&str>,
@@ -615,18 +700,23 @@ pub fn fetch_and_cache_image_bytes(url: &str, token: Option<&str>) -> Option<Vec
     fetch_and_cache_image_data(url, token, true).map(|(_, bytes)| bytes)
 }
 
-/// Fetch a thumbnail from its server even when a cached copy is available.
-/// Used by the connection diagnostic so it reports network image availability.
-pub fn fetch_fresh_image(url: &str, token: Option<&str>) -> Option<slint::Image> {
-    fetch_and_cache_image_impl(url, token, false)
-}
-
-fn fetch_and_cache_image_impl(
+/// Same fetch for card workers, but with the failure classification attached:
+/// callers use the transient flag to decide whether a background re-check is
+/// worthwhile instead of leaving a card permanently blank.
+pub fn fetch_and_cache_image_bytes_checked(
     url: &str,
     token: Option<&str>,
-    allow_cached_image: bool,
-) -> Option<slint::Image> {
-    fetch_and_cache_image_data(url, token, allow_cached_image).map(|(image, _)| image)
+) -> (Option<Vec<u8>>, Option<ThumbnailFailure>) {
+    match fetch_image_result(url, token, true) {
+        Ok((_, bytes)) => (Some(bytes), None),
+        Err(failure) => (None, Some(failure)),
+    }
+}
+
+/// Connection diagnostic fetch: fresh download, failure reported by category,
+/// HTTP code and stage instead of a bare success flag.
+pub fn probe_image(url: &str, token: Option<&str>) -> Result<(), ThumbnailFailure> {
+    fetch_image_result(url, token, false).map(|_| ())
 }
 
 fn fetch_and_cache_image_data(
@@ -634,19 +724,28 @@ fn fetch_and_cache_image_data(
     token: Option<&str>,
     allow_cached_image: bool,
 ) -> Option<(slint::Image, Vec<u8>)> {
+    fetch_image_result(url, token, allow_cached_image).ok()
+}
+
+fn fetch_image_result(
+    url: &str,
+    token: Option<&str>,
+    allow_cached_image: bool,
+) -> Result<(slint::Image, Vec<u8>), ThumbnailFailure> {
     let url = url.trim();
     if !(url.starts_with("http://") || url.starts_with("https://")) {
-        return None;
+        return Err(ThumbnailFailure::InvalidUrl);
     }
     let path = url_to_cache_path(url);
     if allow_cached_image
         && let Some(cached_bytes) = load_cached_image_bytes(url)
         && let Some((image, normalized_bytes)) = decode_image(&cached_bytes)
     {
-        return Some((image, normalized_bytes));
+        return Ok((image, normalized_bytes));
     }
 
     let mut downloaded_bytes = None;
+    let mut final_failure = ThumbnailFailure::Request;
     for attempt in 0..2 {
         match send_image_request(url, token) {
             Ok(resp) => {
@@ -658,28 +757,22 @@ fn fetch_and_cache_image_data(
                         .and_then(|value| value.to_str().ok())
                         .unwrap_or_default();
                     if is_non_image_content_type(content_type) {
-                        crate::diagnostics::GLOBAL_LOG.w(
-                            "Thumbnail",
-                            &format!(
-                                "{}: image endpoint returned non-image content type ({})",
-                                diagnostic_subject(url),
-                                content_type.split(';').next().unwrap_or("unknown").trim()
-                            ),
+                        final_failure = ThumbnailFailure::NonImageContentType(
+                            content_type
+                                .split(';')
+                                .next()
+                                .unwrap_or("unknown")
+                                .trim()
+                                .to_owned(),
                         );
-                        return None;
+                        break;
                     }
                     if resp
                         .content_length()
                         .is_some_and(|size| size > MAX_IMAGE_BYTES as u64)
                     {
-                        crate::diagnostics::GLOBAL_LOG.w(
-                            "Thumbnail",
-                            &format!(
-                                "{}: image exceeded the 10 MB limit",
-                                diagnostic_subject(url)
-                            ),
-                        );
-                        return None;
+                        final_failure = ThumbnailFailure::TooLarge;
+                        break;
                     }
                     let mut bytes = Vec::new();
                     let mut limited_response = resp.take(MAX_IMAGE_BYTES as u64 + 1);
@@ -689,39 +782,24 @@ fn fetch_and_cache_image_data(
                             break;
                         }
                         Ok(_) if bytes.len() > MAX_IMAGE_BYTES => {
-                            crate::diagnostics::GLOBAL_LOG.w(
-                                "Thumbnail",
-                                &format!(
-                                    "{}: image exceeded the 10 MB limit",
-                                    diagnostic_subject(url)
-                                ),
-                            );
-                            return None;
+                            final_failure = ThumbnailFailure::TooLarge;
+                            break;
                         }
                         Ok(_) if attempt < 1 => {
                             std::thread::sleep(Duration::from_millis(180 * (attempt + 1) as u64));
                             continue;
                         }
                         Ok(_) => {
-                            crate::diagnostics::GLOBAL_LOG.w(
-                                "Thumbnail",
-                                &format!("{}: image response was empty", diagnostic_subject(url)),
-                            );
-                            return None;
+                            final_failure = ThumbnailFailure::EmptyBody;
+                            break;
                         }
                         Err(_) if attempt < 1 => {
                             std::thread::sleep(Duration::from_millis(180 * (attempt + 1) as u64));
                             continue;
                         }
                         Err(_) => {
-                            crate::diagnostics::GLOBAL_LOG.w(
-                                "Thumbnail",
-                                &format!(
-                                    "{}: failed to read image response",
-                                    diagnostic_subject(url)
-                                ),
-                            );
-                            return None;
+                            final_failure = ThumbnailFailure::ReadBody;
+                            break;
                         }
                     }
                 }
@@ -730,15 +808,8 @@ fn fetch_and_cache_image_data(
                     std::thread::sleep(Duration::from_millis(180 * (attempt + 1) as u64));
                     continue;
                 }
-                crate::diagnostics::GLOBAL_LOG.w(
-                    "Thumbnail",
-                    &format!(
-                        "{}: image server returned HTTP {}",
-                        diagnostic_subject(url),
-                        status.as_u16()
-                    ),
-                );
-                return None;
+                final_failure = ThumbnailFailure::HttpStatus(status.as_u16());
+                break;
             }
             Err(ImageRequestError::Transport(error)) => {
                 let retryable = error.is_timeout() || error.is_connect() || error.is_request();
@@ -746,51 +817,72 @@ fn fetch_and_cache_image_data(
                     std::thread::sleep(Duration::from_millis(180 * (attempt + 1) as u64));
                     continue;
                 }
-                let reason = if error.is_timeout() {
-                    "request timed out"
+                final_failure = if error.is_timeout() {
+                    ThumbnailFailure::Timeout
                 } else if error.is_connect() {
-                    "could not connect to image server"
+                    ThumbnailFailure::Connect
                 } else {
-                    "request failed"
+                    ThumbnailFailure::Request
                 };
-                crate::diagnostics::GLOBAL_LOG.w(
-                    "Thumbnail",
-                    &format!("{}: {reason}", diagnostic_subject(url)),
-                );
-                return None;
+                break;
             }
             Err(ImageRequestError::InvalidRedirect) => {
-                crate::diagnostics::GLOBAL_LOG.w(
-                    "Thumbnail",
-                    &format!(
-                        "{}: image server returned an invalid or unsafe redirect",
-                        diagnostic_subject(url)
-                    ),
-                );
-                return None;
+                final_failure = ThumbnailFailure::InvalidRedirect;
+                break;
             }
             Err(ImageRequestError::RedirectLimit) => {
-                crate::diagnostics::GLOBAL_LOG.w(
-                    "Thumbnail",
-                    &format!(
-                        "{}: image server exceeded the redirect limit",
-                        diagnostic_subject(url)
-                    ),
-                );
-                return None;
+                final_failure = ThumbnailFailure::RedirectLimit;
+                break;
             }
         }
     }
-    let bytes = downloaded_bytes?;
-    let (image, cache_bytes) = decode_image(&bytes).or_else(|| {
+    let Some(bytes) = downloaded_bytes else {
+        let subject = diagnostic_subject(url);
+        if let ThumbnailFailure::HttpStatus(404) = final_failure {
+            static SEEN_404: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(None);
+            let is_new = {
+                let mut guard = SEEN_404.lock().unwrap();
+                let set = guard.get_or_insert_with(std::collections::HashSet::new);
+                if set.len() > 200 {
+                    set.clear();
+                }
+                set.insert(subject.clone())
+            };
+            if is_new {
+                crate::log_debug(&format!("artwork not found (HTTP 404): {subject}"));
+                crate::diagnostics::GLOBAL_LOG.w(
+                    "Thumbnail",
+                    &format!("{subject}: HTTP 404 not found"),
+                );
+            }
+        } else {
+            crate::log_debug(&format!(
+                "thumbnail fetch failed: {stage} - {detail}",
+                stage = final_failure.stage(),
+                detail = final_failure.label()
+            ));
+            crate::diagnostics::GLOBAL_LOG.w(
+                "Thumbnail",
+                &format!(
+                    "{subject}: {stage} failed: {detail}",
+                    stage = final_failure.stage(),
+                    detail = final_failure.label()
+                ),
+            );
+        }
+        return Err(final_failure);
+    };
+    let (image, cache_bytes) = decode_image(&bytes).ok_or_else(|| {
+        crate::log_debug("thumbnail decode failed");
         crate::diagnostics::GLOBAL_LOG.w(
             "Thumbnail",
             &format!(
-                "{}: image response could not be decoded (unsupported format or invalid data)",
-                diagnostic_subject(url)
+                "{}: decode failed: {detail}",
+                diagnostic_subject(url),
+                detail = ThumbnailFailure::Decode.label()
             ),
         );
-        None
+        ThumbnailFailure::Decode
     })?;
 
     crate::diagnostics::GLOBAL_LOG.i(
@@ -802,23 +894,52 @@ fn fetch_and_cache_image_data(
         ),
     );
 
-    let _guard = CACHE_WRITE_LOCK.lock().ok()?;
+    let Ok(_guard) = CACHE_WRITE_LOCK.lock() else {
+        return Ok((image, cache_bytes));
+    };
     let limit_mb = CACHE_LIMIT_MB.load(Ordering::Relaxed);
     if limit_mb == 0 {
-        return Some((image, cache_bytes));
+        return Ok((image, cache_bytes));
     }
 
     let limit_bytes = limit_mb.saturating_mul(1024 * 1024);
     if cache_bytes.len() > limit_bytes {
-        return Some((image, cache_bytes));
+        return Ok((image, cache_bytes));
     }
 
     prune_cache(limit_bytes.saturating_sub(cache_bytes.len()), Some(&path));
-    if std::fs::write(&path, &cache_bytes).is_err() {
-        return Some((image, cache_bytes));
+    if write_cache_atomically(&path, &cache_bytes) {
+        prune_cache(limit_bytes, Some(&path));
     }
-    prune_cache(limit_bytes, Some(&path));
-    Some((image, cache_bytes))
+    Ok((image, cache_bytes))
+}
+
+/// Persist a cache entry via a temporary file and a rename. A direct
+/// `fs::write` that is interrupted (disk full, crash) leaves a half-written
+/// PNG that still decodes into a damaged picture — the "corrupt thumbnail"
+/// reports — and that entry then survives every later load instead of being
+/// re-fetched.
+fn write_cache_atomically(path: &std::path::Path, bytes: &[u8]) -> bool {
+    let temp_path = cache_temp_path(path);
+    if std::fs::write(&temp_path, bytes).is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+        return false;
+    }
+    if std::fs::rename(&temp_path, path).is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+        return false;
+    }
+    true
+}
+
+fn cache_temp_path(path: &std::path::Path) -> PathBuf {
+    static TEMP_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "image".into());
+    let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    path.with_file_name(format!("{name}.{}.{sequence}.tmp", std::process::id()))
 }
 
 fn is_jellyfin_item_image_url(url: &str) -> bool {
@@ -1154,6 +1275,44 @@ mod tests {
 
         assert!(!corrupt.exists());
         assert!(neighbor.exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn cache_limit_label_keeps_the_stored_megabytes() {
+        assert_eq!(super::format_cache_limit(0), "Off (RAM only)");
+        assert_eq!(super::format_cache_limit(-1), "Off (RAM only)");
+        assert_eq!(super::format_cache_limit(512), "512 MB");
+        assert_eq!(super::format_cache_limit(1024), "1 GB");
+        assert_eq!(super::format_cache_limit(1536), "1.5 GB");
+        assert_eq!(super::format_cache_limit(20480), "20 GB");
+    }
+
+    #[test]
+    fn atomic_cache_write_leaves_no_partial_entry_behind() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "adult-hub-thumbnail-atomic-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("thumbnail.png");
+
+        assert!(super::write_cache_atomically(
+            &path,
+            b"complete image bytes"
+        ));
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"complete image bytes");
+        let leftovers = std::fs::read_dir(&directory)
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.path() != path)
+            .count();
+        assert_eq!(leftovers, 0);
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

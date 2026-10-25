@@ -89,7 +89,31 @@ pub struct TvItem {
     pub community_rating: Option<f32>,
 }
 
+/// Shared binary-unit file size formatter. Details, the player stats and the
+/// download surfaces all render sizes the same way so one number is described
+/// identically everywhere.
+pub fn format_media_size(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let b = bytes as f64;
+    if b >= GB {
+        format!("{:.2} GB", b / GB)
+    } else if b >= MB {
+        format!("{:.1} MB", b / MB)
+    } else if b >= KB {
+        format!("{:.0} KB", b / KB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 impl TvItem {
+    /// Sizes below this are error documents, playlists or `.strm` referral
+    /// bodies, never the media itself. Shared by every surface that reports a
+    /// file size so Details, the player HUD and downloads agree.
+    pub const MIN_PLAUSIBLE_MEDIA_BYTES: u64 = 1024;
+
     pub fn new(id: impl Into<String>, title: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -98,6 +122,11 @@ impl TvItem {
         }
     }
 
+    /// True when the material is delivered by the Telegram resolver. That is
+    /// either a resolver row (`telegram:` id / `telegram` source provider) or a
+    /// Jellyfin library entry whose `telegram` ProviderId identifies the media
+    /// the `.strm` pointer refers to — such items stream through the resolver,
+    /// while their library metadata and watched state stay on Jellyfin.
     pub fn is_telegram(&self) -> bool {
         self.id.starts_with("telegram:")
             || match self.source_provider.as_deref() {
@@ -119,24 +148,21 @@ impl TvItem {
 
     /// Size of the actual media material. A placeholder entry (e.g. `.strm`)
     /// reports its own tiny document size, which must never be shown as the
-    /// video's size.
+    /// video's size. Anything below `MIN_PLAUSIBLE_MEDIA_BYTES` is an error
+    /// document, a playlist or a referral body — not media — even when the
+    /// server omitted the placeholder flag.
     pub fn media_size_bytes(&self) -> Option<i64> {
         if self.is_placeholder_source {
             None
         } else {
-            self.file_size_bytes.filter(|size| *size > 0)
+            let min = Self::MIN_PLAUSIBLE_MEDIA_BYTES as i64;
+            self.file_size_bytes.filter(|size| *size >= min)
         }
     }
 
     pub fn format_media_size(&self) -> String {
         match self.media_size_bytes() {
-            Some(bytes) if bytes >= 1_073_741_824 => {
-                format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
-            }
-            Some(bytes) if bytes >= 1_048_576 => {
-                format!("{:.1} MB", bytes as f64 / 1_048_576.0)
-            }
-            Some(bytes) => format!("{bytes} B"),
+            Some(bytes) => format_media_size(bytes.max(0) as u64),
             None => "Unavailable".to_string(),
         }
     }
@@ -573,5 +599,24 @@ mod tests {
         assert_eq!(item.source_provider.as_deref(), Some("telegram"));
         assert_eq!(item.primary_image_tag, None);
         assert!(item.is_telegram());
+    }
+
+    #[test]
+    fn tiny_referral_size_is_never_shown_as_media_size() {
+        // Regression: "Doctors…" showed "102 B" in Details while the player and
+        // download reported ~109 MB — the `.strm` pointer size passed the old
+        // `> 0` guard when the server omitted IsPlaceHolder.
+        let mut item = TvItem::new("jf-guid", "Doctors");
+        item.file_size_bytes = Some(102);
+        item.is_placeholder_source = false;
+        assert_eq!(item.media_size_bytes(), None);
+        assert_eq!(item.format_media_size(), "Unavailable");
+
+        item.file_size_bytes = Some(114_169_800);
+        assert_eq!(item.format_media_size(), "108.9 MB");
+        item.file_size_bytes = Some(1_073_741_824);
+        assert_eq!(item.format_media_size(), "1.00 GB");
+        item.file_size_bytes = Some(0);
+        assert_eq!(item.format_media_size(), "Unavailable");
     }
 }

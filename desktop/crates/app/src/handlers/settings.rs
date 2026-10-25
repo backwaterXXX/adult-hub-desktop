@@ -5,6 +5,7 @@ use crate::{LibraryOptionData, MainWindow};
 use adult_hub_client::{GetItemsQuery, JellyfinClient, ServiceUrlPolicy, ServiceUrlValidation};
 use slint::ComponentHandle;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 fn refresh_content_after_filter_change(ui: &MainWindow) {
@@ -14,15 +15,141 @@ fn refresh_content_after_filter_change(ui: &MainWindow) {
             ui.invoke_filter_category(ui.get_active_category());
         }
         "browse" => ui.invoke_search_catalog(ui.get_search_query()),
-        "channels" => ui.invoke_select_channel_category(ui.get_active_channel_category()),
+        "channels" => {
+            let cat = ui.get_active_channel_category();
+            if !cat.is_empty() {
+                ui.invoke_select_channel_category(cat);
+            } else {
+                ui.invoke_refresh_channel_categories();
+            }
+        }
         _ => {}
     }
+}
+
+/// Connection diagnostics shown in Settings → Integrations. Every probe
+/// reports one of these states plus a short explanation, so the UI can never
+/// imply success for a check that was skipped, timed out or never ran.
+const CHECK_NOT_CHECKED: &str = "not-checked";
+const CHECK_CHECKING: &str = "checking";
+const CHECK_CONNECTED: &str = "connected";
+const CHECK_PARTIAL: &str = "partial";
+const CHECK_ERROR: &str = "error";
+const CHECK_SKIPPED: &str = "not-configured";
+
+struct Check {
+    state: &'static str,
+    detail: String,
+}
+
+impl Check {
+    fn connected(detail: impl Into<String>) -> Self {
+        Self {
+            state: CHECK_CONNECTED,
+            detail: detail.into(),
+        }
+    }
+
+    fn error(detail: impl Into<String>) -> Self {
+        Self {
+            state: CHECK_ERROR,
+            detail: redact_diagnostics(&detail.into()),
+        }
+    }
+
+    fn skipped(detail: impl Into<String>) -> Self {
+        Self {
+            state: CHECK_SKIPPED,
+            detail: detail.into(),
+        }
+    }
+}
+
+/// Diagnostic text must never carry credentials: image and stream URLs embed
+/// `api_key=`, and transport errors echo the full request URL and auth headers.
+fn redact_diagnostics(text: &str) -> String {
+    const SECRETS: [&str; 6] = [
+        "api_key",
+        "apikey",
+        "x-emby-token",
+        "x-emby-authorization",
+        "authorization",
+        "token",
+    ];
+    let lowered = text.to_ascii_lowercase();
+    let lowered_bytes = lowered.as_bytes();
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let key = SECRETS
+            .iter()
+            .find(|key| lowered_bytes[index..].starts_with(key.as_bytes()));
+        let Some(key) = key else {
+            out.push(bytes[index]);
+            index += 1;
+            continue;
+        };
+        out.extend_from_slice(&bytes[index..index + key.len()]);
+        index += key.len();
+        while index < bytes.len() && matches!(bytes[index], b' ' | b'\t') {
+            out.push(bytes[index]);
+            index += 1;
+        }
+        let value_form = index < bytes.len() && (bytes[index] == b'=' || bytes[index] == b':');
+        if !value_form {
+            continue;
+        }
+        out.push(bytes[index]);
+        index += 1;
+        while index < bytes.len() && matches!(bytes[index], b' ' | b'\t') {
+            out.push(bytes[index]);
+            index += 1;
+        }
+        if index >= bytes.len() {
+            continue;
+        }
+        if matches!(bytes[index], b'"' | b'\'') {
+            let quote = bytes[index];
+            out.push(quote);
+            index += 1;
+            out.extend_from_slice(b"[redacted]");
+            while index < bytes.len() && bytes[index] != quote {
+                index += 1;
+            }
+            continue;
+        }
+        out.extend_from_slice(b"[redacted]");
+        while index < bytes.len()
+            && !matches!(
+                bytes[index],
+                b' ' | b'\t' | b'&' | b'"' | b'\'' | b',' | b';' | b')' | b'\n' | b'\r'
+            )
+        {
+            index += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Run a probe on its own thread and give up after `secs`, so a stalled socket
+/// can never leave Settings hanging on "Checking…".
+fn timed<T: Send + 'static>(
+    secs: u64,
+    probe: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(probe());
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(secs))
+        .map_err(|_| format!("no response within {secs}s"))
 }
 
 fn jellyfin_thumbnail_probe(
     jellyfin: &JellyfinClient,
     session: &adult_hub_storage::Session,
-) -> String {
+) -> Check {
     let page = match jellyfin.get_items(
         &session.server_url,
         &session.user_id,
@@ -37,7 +164,7 @@ fn jellyfin_thumbnail_probe(
         },
     ) {
         Ok(page) => page,
-        Err(_) => return "Jellyfin image sample: failed to fetch movies".into(),
+        Err(_) => return Check::error("Jellyfin image sample: failed to fetch movies"),
     };
     let cards = page
         .items
@@ -46,11 +173,12 @@ fn jellyfin_thumbnail_probe(
         .map(|item| crate::catalog::tv_item_to_card_for_server(item, &session.server_url))
         .collect::<Vec<_>>();
     if cards.is_empty() {
-        return "Jellyfin image sample: no movies in response".into();
+        return Check::skipped("Jellyfin image sample: no movies in response");
     }
 
     let mut loaded = 0;
     let mut without_url = 0;
+    let mut failures: Vec<String> = Vec::new();
     for card in &cards {
         let candidates = [
             card.thumbnail_url.to_string(),
@@ -65,81 +193,133 @@ fn jellyfin_thumbnail_probe(
             without_url += 1;
             continue;
         }
-        if candidates
-            .iter()
-            .any(|url| fetch_fresh_jellyfin_image(url, &session.access_token))
-        {
-            loaded += 1;
+        match fetch_any_fresh_jellyfin_image(&candidates, &session.access_token) {
+            Ok(()) => loaded += 1,
+            Err(failure) => failures.push(format!(
+                "{label} ({stage})",
+                label = failure.label(),
+                stage = failure.stage()
+            )),
         }
     }
 
+    let failure_note = if failures.is_empty() {
+        String::new()
+    } else {
+        let mut unique = failures
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        // Keep the one-line check detail readable: the full per-item trace is
+        // in the log, the check shows the distinct categories.
+        let shown = unique
+            .drain(..2.min(unique.len()))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let more = if !unique.is_empty() {
+            format!("; +{} more", unique.len())
+        } else {
+            String::new()
+        };
+        format!(" — failures: {shown}{more}")
+    };
+
     if loaded == cards.len() {
-        format!(
+        Check::connected(format!(
             "Jellyfin image sample: loaded {loaded}/{} posters",
             cards.len()
-        )
+        ))
     } else if loaded > 0 {
-        format!(
-            "Jellyfin image sample: partial failure, loaded {loaded}/{} posters; {without_url} without URL",
-            cards.len()
-        )
+        Check {
+            state: CHECK_PARTIAL,
+            detail: format!(
+                "Jellyfin image sample: partial failure, loaded {loaded}/{} posters; {without_url} without URL{failure_note}",
+                cards.len()
+            ),
+        }
     } else {
-        format!(
-            "Jellyfin image sample: failed for 0/{} posters; {without_url} without URL (check Export Diagnostics)",
+        Check::error(format!(
+            "Jellyfin image sample: failed for 0/{} posters; {without_url} without URL{failure_note}",
             cards.len()
-        )
+        ))
     }
 }
 
-fn fetch_fresh_jellyfin_image(url: &str, token: &str) -> bool {
-    if crate::thumbnails::fetch_fresh_image(url, Some(token)).is_some() {
-        return true;
+fn fetch_any_fresh_jellyfin_image(
+    urls: &[String],
+    token: &str,
+) -> Result<(), crate::thumbnails::ThumbnailFailure> {
+    let mut last = crate::thumbnails::ThumbnailFailure::Request;
+    for url in urls {
+        match fetch_fresh_jellyfin_image(url, token) {
+            Ok(()) => return Ok(()),
+            Err(failure) => last = failure,
+        }
     }
-    let Ok(mut untagged) = url::Url::parse(url) else {
-        return false;
-    };
-    let had_tag = untagged.query_pairs().any(|(key, _)| key == "tag");
-    if !had_tag {
-        return false;
-    }
-    let params = untagged
-        .query_pairs()
-        .filter(|(key, _)| key != "tag")
-        .map(|(key, value)| (key.into_owned(), value.into_owned()))
-        .collect::<Vec<_>>();
-    untagged.set_query(None);
-    if !params.is_empty() {
-        untagged.query_pairs_mut().extend_pairs(params);
-    }
-    crate::thumbnails::fetch_fresh_image(untagged.as_str(), Some(token)).is_some()
+    Err(last)
 }
 
-fn resolver_thumbnail_probe(
-    resolver: &adult_hub_client::ResolverClient,
-    base_url: &str,
-) -> (String, String) {
+fn fetch_fresh_jellyfin_image(
+    url: &str,
+    token: &str,
+) -> Result<(), crate::thumbnails::ThumbnailFailure> {
+    match crate::thumbnails::probe_image(url, Some(token)) {
+        Ok(()) => Ok(()),
+        Err(failure) => {
+            // An item whose ImageTags no longer match the stored artwork fails
+            // with 404 on the tagged URL but succeeds untagged; retry that
+            // variant before reporting the tagged failure.
+            let Ok(mut untagged) = url::Url::parse(url) else {
+                return Err(failure);
+            };
+            let had_tag = untagged.query_pairs().any(|(key, _)| key == "tag");
+            if !had_tag {
+                return Err(failure);
+            }
+            let params = untagged
+                .query_pairs()
+                .filter(|(key, _)| key != "tag")
+                .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                .collect::<Vec<_>>();
+            untagged.set_query(None);
+            if !params.is_empty() {
+                untagged.query_pairs_mut().extend_pairs(params);
+            }
+            match crate::thumbnails::probe_image(untagged.as_str(), Some(token)) {
+                Ok(()) => Ok(()),
+                // Report the original tagged failure: it is what the cards use.
+                Err(_) => Err(failure),
+            }
+        }
+    }
+}
+
+/// Probe the video service: reachability, one channel listing and one artwork
+/// download. Returns the service check and the artwork check separately.
+fn resolver_probe(resolver: &adult_hub_client::ResolverClient, base_url: &str) -> (Check, Check) {
     let categories = match resolver.get_categories(base_url) {
         Ok(categories) => categories,
         Err(error) => {
             return (
-                format!("Unavailable: {error}"),
-                "Resolver image sample: failed to fetch categories".into(),
+                Check::error(format!("Unavailable: {error}")),
+                Check::skipped("Resolver image sample: skipped (no category listing)"),
             );
         }
     };
-    let connection_status = format!("Connected (categories: {})", categories.len());
+    let connection = Check::connected(format!("Connected (categories: {})", categories.len()));
     let Some(category) = categories.first() else {
         return (
-            connection_status,
-            "Resolver image sample: no categories available".into(),
+            connection,
+            Check::skipped("Resolver image sample: no categories available"),
         );
     };
     let videos = match resolver.get_category_videos(base_url, &category.id, 0, "latest", None) {
         Ok(videos) => videos,
-        Err(_) => {
+        Err(error) => {
             return (
-                connection_status,
-                "Resolver image sample: failed to fetch channel item".into(),
+                connection,
+                Check::error(format!("Resolver image sample: {error}")),
             );
         }
     };
@@ -149,18 +329,303 @@ fn resolver_thumbnail_probe(
         .find_map(crate::thumbnails::resolve_resolver_thumbnail_url)
     else {
         return (
-            connection_status,
-            "Resolver image sample: no thumbnail in sample".into(),
+            connection,
+            Check::skipped("Resolver image sample: no thumbnail in sample"),
         );
     };
-    if crate::thumbnails::fetch_fresh_image(&image_url, None).is_some() {
-        (connection_status, "Resolver image sample: OK".into())
-    } else {
-        (
-            connection_status,
-            "Resolver image sample: error (check Export Diagnostics)".into(),
-        )
+    match crate::thumbnails::probe_image(&image_url, None) {
+        Ok(()) => (connection, Check::connected("Resolver image sample: OK")),
+        Err(failure) => (
+            connection,
+            Check::error(format!(
+                "Resolver image sample: {stage} failed — {detail}",
+                stage = failure.stage(),
+                detail = failure.label()
+            )),
+        ),
     }
+}
+
+/// Ask the service for one real stream and range-probe it without downloading
+/// the media. Kept separate from the availability checks: a server can answer
+/// API requests while the actual video bytes are unreachable.
+fn stream_access_probe(
+    jellyfin: &JellyfinClient,
+    session: Option<&adult_hub_storage::Session>,
+    resolver_url: &str,
+) -> Check {
+    let Some(session) = session else {
+        return Check::skipped("Stream probe skipped: no media server session");
+    };
+    let page = match jellyfin.get_latest_items(
+        &session.server_url,
+        &session.user_id,
+        &session.access_token,
+        None,
+        1,
+    ) {
+        Ok(items) => items,
+        Err(error) => return Check::error(format!("Stream probe skipped: {error}")),
+    };
+    let Some(item) = page.first() else {
+        return Check::skipped("Stream probe skipped: no library item to probe");
+    };
+    let sampled = item.title.clone();
+    let request = if uuid::Uuid::parse_str(&item.id).is_ok() {
+        jellyfin
+            .resolve_playback(
+                &session.server_url,
+                &session.user_id,
+                &session.access_token,
+                &item.id,
+            )
+            .map(|resolution| {
+                (
+                    resolution.stream_url,
+                    Some(session.access_token.as_str()),
+                    resolution.required_headers,
+                )
+            })
+            .map_err(|error| error.to_string())
+    } else if let Ok((url, _method)) = crate::session::PlaybackSessionController::resolve_stream_url(
+        item,
+        Some(&session.server_url),
+        (!resolver_url.is_empty()).then_some(resolver_url),
+        Some(&session.access_token),
+    ) {
+        Ok((url, None, Vec::new()))
+    } else {
+        Err(format!(
+            "no stream source could be built for the sampled title \"{sampled}\""
+        ))
+    };
+    let (url, token, headers) = match request {
+        Ok(request) => request,
+        Err(error) => return Check::error(redact_diagnostics(&error)),
+    };
+    match super::details::probe_remote_media_size(&url, token, &headers) {
+        Some(bytes) => Check::connected(format!(
+            "Stream reachable: {} ({})",
+            adult_hub_client::format_media_size(bytes),
+            sampled
+        )),
+        None => Check::error(format!(
+            "Stream probe failed: no byte range for \"{sampled}\""
+        )),
+    }
+}
+
+/// Fold per-source checks into one surfaced state: an error dominates, a mix of
+/// working and failing sources is partial, and nothing but skipped sources can
+/// never report success.
+fn merge_checks(parts: Vec<Check>) -> Check {
+    let detail = parts
+        .iter()
+        .map(|part| part.detail.as_str())
+        .filter(|detail| !detail.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let states = parts
+        .iter()
+        .map(|part| part.state)
+        .collect::<Vec<&'static str>>();
+    let any = |want: &str| states.contains(&want);
+    let state = if states.is_empty() || any(CHECK_NOT_CHECKED) {
+        CHECK_NOT_CHECKED
+    } else if any(CHECK_SKIPPED) && states.iter().all(|state| *state == CHECK_SKIPPED) {
+        CHECK_SKIPPED
+    } else if any(CHECK_ERROR) && any(CHECK_CONNECTED) {
+        CHECK_PARTIAL
+    } else if any(CHECK_ERROR) {
+        CHECK_ERROR
+    } else if any(CHECK_PARTIAL) {
+        CHECK_PARTIAL
+    } else if any(CHECK_CONNECTED) {
+        CHECK_CONNECTED
+    } else {
+        CHECK_NOT_CHECKED
+    };
+    Check { state, detail }
+}
+
+/// Run the whole diagnostic set on a background thread and publish one state
+/// plus one explanation per check. Shared by the Settings "Test Connection"
+/// button and the automatic check after saving a server address, so both
+/// surfaces describe the same four checks: media server, video service, stream
+/// access and artwork.
+fn spawn_connection_diagnostics(
+    weak: slint::Weak<MainWindow>,
+    jellyfin: Arc<JellyfinClient>,
+    resolver: Arc<adult_hub_client::ResolverClient>,
+    session: Option<adult_hub_storage::Session>,
+    resolver_url: String,
+) {
+    let Some(ui) = weak.upgrade() else { return };
+    if ui.get_checking_connections() {
+        return;
+    }
+    let (jellyfin_state, jellyfin_detail) = if session.is_some() {
+        (CHECK_CHECKING, "Checking…".to_string())
+    } else {
+        (CHECK_SKIPPED, "Not signed in".to_string())
+    };
+    let (resolver_state, resolver_detail) = if resolver_url.is_empty() {
+        (CHECK_SKIPPED, "No video service configured".to_string())
+    } else {
+        (CHECK_CHECKING, "Checking…".to_string())
+    };
+    ui.set_checking_connections(true);
+    ui.set_jellyfin_connection_state(jellyfin_state.into());
+    ui.set_jellyfin_connection_status(jellyfin_detail.into());
+    ui.set_resolver_connection_state(resolver_state.into());
+    ui.set_resolver_connection_status(resolver_detail.into());
+    ui.set_artwork_connection_state(CHECK_CHECKING.into());
+    ui.set_stream_connection_state(CHECK_CHECKING.into());
+    ui.set_thumbnail_check_status("Checking artwork samples…".into());
+    ui.set_stream_check_status("Checking stream access…".into());
+    ui.set_thumbnail_check_failed(false);
+    ui.set_connection_diagnostics(String::new().into());
+
+    std::thread::spawn(move || {
+        let server_check = match session.clone() {
+            None => Check::skipped("Media server: not signed in"),
+            Some(session) => {
+                let probe_jellyfin = jellyfin.clone();
+                match timed(20, move || {
+                    probe_jellyfin
+                        .get_user_views(
+                            &session.server_url,
+                            &session.user_id,
+                            &session.access_token,
+                        )
+                        .map(|views| views.len())
+                        .map_err(|error| error.to_string())
+                }) {
+                    Err(elapsed) => Check::error(format!("Media server: timed out ({elapsed})")),
+                    Ok(Err(error)) => Check::error(format!("Media server: {error}")),
+                    Ok(Ok(count)) => {
+                        Check::connected(format!("Media server: connected ({count} libraries)"))
+                    }
+                }
+            }
+        };
+
+        let service_check = if resolver_url.is_empty() {
+            Check::skipped("Video service: not configured")
+        } else {
+            let probe_resolver = resolver.clone();
+            let url = resolver_url.clone();
+            match timed(20, move || {
+                let resolver = probe_resolver;
+                let url = url;
+                resolver
+                    .get_categories(&url)
+                    .map(|categories| categories.len())
+                    .map_err(|error| error.to_string())
+            }) {
+                Err(elapsed) => Check::error(format!("Video service: timed out ({elapsed})")),
+                Ok(Err(error)) => Check::error(format!("Video service: {error}")),
+                Ok(Ok(count)) => {
+                    Check::connected(format!("Video service: connected ({count} categories)"))
+                }
+            }
+        };
+
+        let artwork_check = {
+            let jellyfin_art = session.as_ref().map_or_else(
+                || Check::skipped("Jellyfin artwork: not signed in"),
+                |session| {
+                    let probe_jellyfin = jellyfin.clone();
+                    let session = session.clone();
+                    match timed(25, move || {
+                        jellyfin_thumbnail_probe(&probe_jellyfin, &session)
+                    }) {
+                        Err(elapsed) => {
+                            Check::error(format!("Jellyfin artwork: timed out ({elapsed})"))
+                        }
+                        Ok(check) => check,
+                    }
+                },
+            );
+            let resolver_art = if resolver_url.is_empty() {
+                Check::skipped("Video service artwork: not configured")
+            } else {
+                let probe_resolver = resolver.clone();
+                let url = resolver_url.clone();
+                match timed(25, move || resolver_probe(&probe_resolver, &url).1) {
+                    Err(elapsed) => {
+                        Check::error(format!("Video service artwork: timed out ({elapsed})"))
+                    }
+                    Ok(check) => check,
+                }
+            };
+            merge_checks(vec![jellyfin_art, resolver_art])
+        };
+
+        let stream_check = match session.as_ref() {
+            None => Check::skipped("Stream access: not signed in"),
+            Some(session) => {
+                let probe_jellyfin = jellyfin.clone();
+                let session = session.clone();
+                let url_for_probe = resolver_url.clone();
+                match timed(30, move || {
+                    stream_access_probe(&probe_jellyfin, Some(&session), &url_for_probe)
+                }) {
+                    Err(elapsed) => Check::error(format!("Stream access: timed out ({elapsed})")),
+                    Ok(check) => check,
+                }
+            }
+        };
+
+        let checks = [server_check, service_check, stream_check, artwork_check];
+        let diagnostics = checks
+            .iter()
+            .map(|check| format!("[{}] {}", check.state, redact_diagnostics(&check.detail)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let overall_failed = checks.iter().any(|check| check.state == CHECK_ERROR);
+        let overall_partial = checks.iter().any(|check| check.state == CHECK_PARTIAL);
+
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut iter = checks.into_iter();
+            let (server_check, service_check, stream_check, artwork_check) = (
+                iter.next().unwrap(),
+                iter.next().unwrap(),
+                iter.next().unwrap(),
+                iter.next().unwrap(),
+            );
+            ui.set_jellyfin_connection_state(server_check.state.into());
+            ui.set_jellyfin_connection_status(server_check.detail.into());
+            ui.set_resolver_connection_state(service_check.state.into());
+            ui.set_resolver_connection_status(service_check.detail.into());
+            ui.set_stream_connection_state(stream_check.state.into());
+            ui.set_stream_check_status(stream_check.detail.into());
+            ui.set_artwork_connection_state(artwork_check.state.into());
+            ui.set_thumbnail_check_status(artwork_check.detail.into());
+            ui.set_thumbnail_check_failed(matches!(
+                artwork_check.state,
+                CHECK_ERROR | CHECK_PARTIAL
+            ));
+            ui.set_connection_diagnostics(diagnostics.into());
+            ui.set_checking_connections(false);
+            ui.set_status(
+                if overall_failed {
+                    "Connection check finished with failures"
+                } else if overall_partial {
+                    "Connection check finished: some sources incomplete"
+                } else {
+                    "Connection check passed"
+                }
+                .into(),
+            );
+            ui.set_status_color(if overall_failed {
+                slint::Color::from_rgb_u8(224, 108, 117)
+            } else {
+                slint::Color::from_rgb_u8(140, 200, 160)
+            });
+        });
+    });
 }
 
 pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
@@ -237,11 +702,18 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
         let local_store = local_store.clone();
         ui.on_clear_search_history(move || {
             let Some(ui) = weak.upgrade() else { return };
-            let _ = local_store.clear_search_history();
-            ui.set_recent_searches(
-                Rc::new(slint::VecModel::from(Vec::<slint::SharedString>::new())).into(),
-            );
-            ui.set_status("Search history cleared".into());
+            if ui.get_active_screen() == "settings" {
+                let _ = local_store.clear_search_history();
+                ui.set_recent_searches(
+                    Rc::new(slint::VecModel::from(Vec::<slint::SharedString>::new())).into(),
+                );
+                ui.set_status("All search history cleared".into());
+            } else {
+                let ctx = super::browsing::active_search_context(&ui);
+                let _ = local_store.clear_search_history_context(ctx);
+                super::browsing::refresh_recent_searches_for_context(&ui, &local_store);
+                ui.set_status(format!("Search history cleared for {ctx}").into());
+            }
             ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
         });
     }
@@ -331,71 +803,61 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
         });
     }
 
-    // 5. Test Resolver Connection
+    // 5. Test Connection (media server, video service, stream access, artwork)
     {
         let weak = ui.as_weak();
+        let jellyfin = jellyfin.clone();
         let resolver = resolver.clone();
         let credential_store = credential_store.clone();
         let local_store = local_store.clone();
         ui.on_test_resolver_connection(move || {
             let Some(ui) = weak.upgrade() else { return };
+            if ui.get_checking_connections() {
+                return;
+            }
+            // Only a configured video service is probed as such. Falling back to
+            // the Jellyfin address here asked the media server for resolver
+            // endpoints, which always failed and left "Status: Not checked"
+            // even while playback worked.
             let mut url = ui
                 .get_resolver_url_input()
                 .trim()
                 .trim_end_matches('/')
                 .to_string();
             if url.is_empty() {
-                if let Some(session) = credential_store.get().ok().flatten() {
-                    url = session.server_url.trim_end_matches('/').to_string();
-                }
+                url = local_store
+                    .get_setting("resolver_base_url")
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
             }
-            if url.is_empty() {
-                show_error(&ui, "Nie podano adresu serwera wideo ani resolvera");
-                return;
-            }
-            match ServiceUrlPolicy::inspect(&url, false) {
-                ServiceUrlValidation::Valid(service_url) => {
-                    if !super::request_cleartext_consent(
-                        &ui,
-                        &local_store,
-                        &service_url.normalized,
-                        "resolver-test",
-                    ) {
+            if !url.is_empty() {
+                match ServiceUrlPolicy::inspect(&url, false) {
+                    ServiceUrlValidation::Valid(service_url) => {
+                        if !super::request_cleartext_consent(
+                            &ui,
+                            &local_store,
+                            &service_url.normalized,
+                            "resolver-test",
+                        ) {
+                            return;
+                        }
+                        url = service_url.normalized;
+                    }
+                    ServiceUrlValidation::Invalid(error) => {
+                        show_error(&ui, error);
                         return;
                     }
-                    url = service_url.normalized;
-                }
-                ServiceUrlValidation::Invalid(error) => {
-                    show_error(&ui, error);
-                    return;
                 }
             }
-            ui.set_status(format!("Testing video server connection {url}…").into());
-            ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
-            let weak = weak.clone();
-            let resolver = resolver.clone();
-            std::thread::spawn(move || match resolver.get_categories(&url) {
-                Ok(cats) => {
-                    slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = weak.upgrade() {
-                            ui.set_status(
-                                format!("Connection OK: {} categories available", cats.len())
-                                    .into(),
-                            );
-                            ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
-                        }
-                    })
-                    .ok();
-                }
-                Err(err) => {
-                    slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = weak.upgrade() {
-                            show_error(&ui, format!("Connection test failed: {err}"));
-                        }
-                    })
-                    .ok();
-                }
-            });
+            let session = credential_store.get().ok().flatten();
+            spawn_connection_diagnostics(
+                weak.clone(),
+                jellyfin.clone(),
+                resolver.clone(),
+                session,
+                url,
+            );
         });
     }
 
@@ -408,6 +870,9 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
         let local_store = local_store.clone();
         ui.on_check_connections(move || {
             let Some(ui) = weak.upgrade() else { return };
+            if ui.get_checking_connections() {
+                return;
+            }
             let session = credential_store.get().ok().flatten();
             if let Some(session) = session.as_ref()
                 && !super::request_cleartext_consent(
@@ -426,9 +891,10 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
                 .trim_end_matches('/')
                 .to_string();
             if resolver_url.is_empty() {
-                resolver_url = session
-                    .as_ref()
-                    .map(|session| session.server_url.clone())
+                resolver_url = local_store
+                    .get_setting("resolver_base_url")
+                    .ok()
+                    .flatten()
                     .unwrap_or_default();
             }
             if !resolver_url.is_empty() {
@@ -451,103 +917,13 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
                 }
             }
 
-            ui.set_checking_connections(true);
-            ui.set_jellyfin_connection_status(if session.is_some() {
-                "Checking…".into()
-            } else {
-                "Not connected".into()
-            });
-            ui.set_resolver_connection_status(if resolver_url.is_empty() {
-                "Not configured".into()
-            } else {
-                "Checking…".into()
-            });
-            ui.set_thumbnail_check_status("Checking artwork samples…".into());
-            ui.set_thumbnail_check_failed(false);
-
-            let weak = weak.clone();
-            let jellyfin = jellyfin.clone();
-            let resolver = resolver.clone();
-            std::thread::spawn(move || {
-                let (
-                    jellyfin_status,
-                    jellyfin_thumbnail_status,
-                    resolver_status,
-                    resolver_thumbnail_status,
-                ) = std::thread::scope(|scope| {
-                    let jellyfin_worker = scope.spawn(|| {
-                        let connection_status = match session.as_ref() {
-                            Some(session) => match jellyfin.get_user_views(
-                                &session.server_url,
-                                &session.user_id,
-                                &session.access_token,
-                            ) {
-                                Ok(libraries) => {
-                                    format!("Connected ({} libraries)", libraries.len())
-                                }
-                                Err(error) => format!("Unavailable: {error}"),
-                            },
-                            None => "Not connected".to_string(),
-                        };
-                        let thumbnail_status = session.as_ref().map_or_else(
-                            || "Jellyfin: not connected".to_string(),
-                            |session| jellyfin_thumbnail_probe(&jellyfin, session),
-                        );
-                        (connection_status, thumbnail_status)
-                    });
-                    let resolver_worker = scope.spawn(|| {
-                        if resolver_url.is_empty() {
-                            (
-                                "Not configured".to_string(),
-                                "Resolver: not configured".to_string(),
-                            )
-                        } else {
-                            resolver_thumbnail_probe(&resolver, &resolver_url)
-                        }
-                    });
-                    let jellyfin_result = jellyfin_worker.join().unwrap_or_else(|_| {
-                        (
-                            "Unavailable: diagnostic worker error".to_string(),
-                            "Jellyfin image sample: error".to_string(),
-                        )
-                    });
-                    let resolver_result = resolver_worker.join().unwrap_or_else(|_| {
-                        (
-                            "Unavailable: diagnostic worker error".to_string(),
-                            "Resolver image sample: error".to_string(),
-                        )
-                    });
-                    (
-                        jellyfin_result.0,
-                        jellyfin_result.1,
-                        resolver_result.0,
-                        resolver_result.1,
-                    )
-                });
-                let thumbnail_status =
-                    format!("{jellyfin_thumbnail_status} · {resolver_thumbnail_status}");
-                let thumbnail_failed = thumbnail_status.contains("failed")
-                    || thumbnail_status.contains("error")
-                    || thumbnail_status.contains("failure")
-                    || thumbnail_status.contains("unavailable")
-                    || thumbnail_status.contains("couldn't")
-                    || thumbnail_status.contains("no images")
-                    || thumbnail_status.contains("no movies")
-                    || thumbnail_status.contains("no thumbnail")
-                    || thumbnail_status.contains("no categories")
-                    || thumbnail_status.contains("not connected")
-                    || thumbnail_status.contains("not configured");
-
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = weak.upgrade() {
-                        ui.set_jellyfin_connection_status(jellyfin_status.into());
-                        ui.set_resolver_connection_status(resolver_status.into());
-                        ui.set_thumbnail_check_status(thumbnail_status.into());
-                        ui.set_thumbnail_check_failed(thumbnail_failed);
-                        ui.set_checking_connections(false);
-                    }
-                });
-            });
+            spawn_connection_diagnostics(
+                weak.clone(),
+                jellyfin.clone(),
+                resolver.clone(),
+                session,
+                resolver_url,
+            );
         });
     }
 
@@ -658,13 +1034,7 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
             };
             let _ = local_store.set_setting("cache_limit_mb", &next.to_string());
             crate::thumbnails::set_cache_limit_mb_async(next as usize);
-            let limit_str = if next == 0 {
-                "Off (RAM only)".to_string()
-            } else if next >= 1024 {
-                format!("{} GB", next / 1024)
-            } else {
-                format!("{next} MB")
-            };
+            let limit_str = crate::thumbnails::format_cache_limit(next);
             ui.set_cache_limit_label(format!("Cache Limit: {limit_str}").into());
             ui.set_cache_limit_mb(next);
             let ui_weak = ui.as_weak();
@@ -690,13 +1060,7 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
             let mb = mb.max(0);
             let _ = local_store.set_setting("cache_limit_mb", &mb.to_string());
             crate::thumbnails::set_cache_limit_mb_async(mb as usize);
-            let limit_str = if mb == 0 {
-                "Off (RAM only)".to_string()
-            } else if mb >= 1024 {
-                format!("{} GB", mb / 1024)
-            } else {
-                format!("{mb} MB")
-            };
+            let limit_str = crate::thumbnails::format_cache_limit(mb);
             ui.set_cache_limit_label(format!("Cache Limit: {limit_str}").into());
             ui.set_cache_limit_mb(mb);
             let ui_weak = ui.as_weak();
@@ -725,13 +1089,7 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
                 .flatten()
                 .and_then(|s| s.parse::<i32>().ok())
                 .unwrap_or(1024);
-            let limit_str = if current == 0 {
-                "Off (RAM only)".to_string()
-            } else if current >= 1024 {
-                format!("{} GB", current / 1024)
-            } else {
-                format!("{current} MB")
-            };
+            let limit_str = crate::thumbnails::format_cache_limit(current);
             let ui_weak = ui.as_weak();
             std::thread::spawn(move || {
                 let used_bytes = crate::thumbnails::current_cache_size_bytes();
@@ -891,7 +1249,14 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
                         ui.invoke_filter_category(ui.get_active_category());
                     }
                 }
-                "channels" => ui.invoke_select_channel_category(ui.get_active_channel_category()),
+                "channels" => {
+            let cat = ui.get_active_channel_category();
+            if !cat.is_empty() {
+                ui.invoke_select_channel_category(cat);
+            } else {
+                ui.invoke_refresh_channel_categories();
+            }
+        }
                 _ => ui.invoke_refresh_home(),
             }
             ui.set_status("Image cache cleared; reloading artwork…".into());
@@ -945,11 +1310,13 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
                             ui.set_seek_step_label(
                                 format!("Step: {}s", config.seek_step_sec).into(),
                             );
-                            ui.set_cache_limit_label(if config.cache_limit_mb == 0 {
-                                "Off (RAM only)".into()
-                            } else {
-                                format!("Cache Limit: {} MB", config.cache_limit_mb).into()
-                            });
+                            ui.set_cache_limit_label(
+                                format!(
+                                    "Cache Limit: {}",
+                                    crate::thumbnails::format_cache_limit(config.cache_limit_mb)
+                                )
+                                .into(),
+                            );
                             ui.set_phash_active(config.phash_on_playback);
                             autoplay_active.store(config.autoplay_next, Ordering::SeqCst);
                             ui.set_autoplay_active(config.autoplay_next);
@@ -1081,16 +1448,56 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
                 ("Vulkan loader", vulkan_loader.as_str()),
                 ("libmpv decoder support", decoder_support.as_str()),
             ];
-            match crate::diagnostics::GLOBAL_LOG.export_to_file(
-                &target_path,
-                env!("CARGO_PKG_VERSION"),
-                &extra,
-            ) {
+            let mut text =
+                crate::diagnostics::GLOBAL_LOG.export_text(env!("CARGO_PKG_VERSION"), &extra);
+            text.push_str("\n--- Startup log tail (redacted) ---\n");
+            text.push_str(&crate::diagnostics::redacted_startup_log_tail(
+                &crate::startup_log_path(),
+                64 * 1024,
+            ));
+            let parent = std::path::Path::new(&target_path)
+                .parent()
+                .map(std::fs::create_dir_all);
+            let result = match parent {
+                Some(Err(e)) => Err(e),
+                _ => std::fs::write(&target_path, text),
+            };
+            match result {
                 Ok(()) => {
                     ui.set_status(format!("Redacted diagnostics exported to {target_path}").into());
                     ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
                 }
                 Err(e) => show_error(&ui, format!("Diagnostics export failed: {e}")),
+            }
+        });
+    }
+
+    // 15b. Open the folder holding startup.log and store.db.
+    {
+        let weak = ui.as_weak();
+        ui.on_open_logs_folder(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let dir = crate::startup_log_path()
+                .parent()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let opened = if cfg!(windows) {
+                std::process::Command::new("explorer.exe")
+                    .arg(&dir)
+                    .spawn()
+                    .is_ok()
+            } else {
+                std::process::Command::new("xdg-open")
+                    .arg(&dir)
+                    .spawn()
+                    .is_ok()
+            };
+            if opened {
+                crate::log_debug(&format!("logs folder opened: {dir}"));
+                ui.set_status(format!("Logs folder opened: {dir}").into());
+                ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
+            } else {
+                show_error(&ui, format!("Could not open the logs folder. Path: {dir}"));
             }
         });
     }
@@ -1206,5 +1613,64 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
                 .ok();
             });
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn diagnostics_never_reveal_credentials() {
+        // Regression: diagnostics strings are copied into the exported log and
+        // shown in the expandable Settings section, so every credential form
+        // Jellyfin uses has to be masked at the source.
+        let text = "GET https://jf.local:8096/Items/1/Images/Primary?tag=abc&api_key=SECRET1 failed, headers Authorization: MediaBrowser Token=\"SECRET2\", X-Emby-Token: SECRET3";
+        let redacted = redact_diagnostics(text);
+        assert!(!redacted.contains("SECRET1"), "{redacted}");
+        assert!(!redacted.contains("SECRET2"), "{redacted}");
+        assert!(!redacted.contains("SECRET3"), "{redacted}");
+        // The non-secret part of the diagnosis survives.
+        assert!(redacted.contains("https://jf.local:8096/Items/1/Images/Primary"));
+        assert!(redacted.contains("failed"), "{redacted}");
+    }
+
+    #[test]
+    fn diagnostics_leave_plain_words_untouched() {
+        let text = "Media server: connected (3 libraries), no token required";
+        assert_eq!(redact_diagnostics(text), text);
+    }
+
+    #[test]
+    fn diagnostics_redact_credentials_after_multibyte_text() {
+        let text = "Błąd: stream failed · api_key=SECRET4";
+        let redacted = redact_diagnostics(text);
+        assert!(!redacted.contains("SECRET4"), "{redacted}");
+        assert!(redacted.contains("Błąd: stream failed"), "{redacted}");
+    }
+
+    #[test]
+    fn merged_checks_never_report_success_for_skipped_work() {
+        let only_skips = merge_checks(vec![
+            Check::skipped("Video service: not configured"),
+            Check::skipped("Stream probe skipped: no session"),
+        ]);
+        assert_eq!(only_skips.state, CHECK_SKIPPED);
+
+        let mixed = merge_checks(vec![
+            Check::connected("Jellyfin image sample: loaded 5/5 posters"),
+            Check::error("Resolver image sample: download failed"),
+        ]);
+        assert_eq!(mixed.state, CHECK_PARTIAL);
+        assert!(mixed.detail.contains("loaded 5/5"));
+
+        let all_fail = merge_checks(vec![
+            Check::error("unreachable"),
+            Check::skipped("not configured"),
+        ]);
+        assert_eq!(all_fail.state, CHECK_ERROR);
+
+        let nothing_ran = merge_checks(Vec::new());
+        assert_eq!(nothing_ran.state, CHECK_NOT_CHECKED);
     }
 }

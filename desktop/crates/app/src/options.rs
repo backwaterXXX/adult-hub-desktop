@@ -6,6 +6,8 @@ pub struct Options {
     pub url: Option<String>,
     pub headers: Vec<String>,
     pub demo_shuffle: bool,
+    pub debug: bool,
+    pub renderer: Option<String>,
 }
 
 impl Options {
@@ -17,6 +19,15 @@ impl Options {
                 "--demo-shuffle" => {
                     options.demo_shuffle = true;
                 }
+                "--debug" => {
+                    options.debug = true;
+                }
+                "--renderer" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| "--renderer requires gl or software".to_owned())?;
+                    options.renderer = Some(Self::normalize_renderer(&value)?);
+                }
                 "--header" => {
                     let value = args
                         .next()
@@ -26,20 +37,53 @@ impl Options {
                         .push(parse_header(&value).map_err(|error| error.to_string())?);
                 }
                 "--help" | "-h" => {
-                    println!("Adult Hub Desktop {}", env!("CARGO_PKG_VERSION"));
+                    println!(
+                        "Adult Hub Desktop v{} (build {})",
+                        env!("CARGO_PKG_VERSION"),
+                        env!("ADULT_HUB_BUILD_ID")
+                    );
                     println!("Usage: adult-hub-desktop [OPTIONS] [MEDIA_URL]");
                     println!();
                     println!("Options:");
-                    println!("  -h, --help            Show this help message and exit");
-                    println!("  -v, --version         Show application version");
-                    println!("      --header <HEADER> HTTP header to pass to libmpv");
+                    println!("  -h, --help                Show this help message and exit");
+                    println!("  -v, --version             Show application version and exit");
+                    println!(
+                        "      --debug               Write detailed diagnostics to the log file"
+                    );
+                    println!(
+                        "      --renderer <MODE>     Force the UI renderer for this run: gl | software"
+                    );
+                    println!("      --header <HEADER>     HTTP header to pass to libmpv");
+                    println!("      --demo-shuffle        Run the built-in shuffle demo and exit");
+                    println!();
+                    println!(
+                        "Renderer priority: --renderer > AH_RENDERER > saved preference > automatic."
+                    );
+                    println!(
+                        "A one-off --renderer or AH_RENDERER choice never changes the saved preference."
+                    );
                     std::process::exit(0);
                 }
                 "--version" | "-v" => {
-                    println!("adult-hub-desktop {}", env!("CARGO_PKG_VERSION"));
+                    let pkg_ver = env!("CARGO_PKG_VERSION");
+                    let commit = env!("ADULT_HUB_COMMIT_HASH");
+                    let dirty = if env!("ADULT_HUB_DIRTY") == "1" {
+                        "-dirty"
+                    } else {
+                        ""
+                    };
+                    let build_id = env!("ADULT_HUB_BUILD_ID");
+                    let build_date = env!("ADULT_HUB_BUILD_DATE");
+                    println!(
+                        "adult-hub-desktop v{pkg_ver} ({commit}{dirty}) build={build_id} built={build_date}"
+                    );
                     std::process::exit(0);
                 }
                 "--" => continue,
+                _ if argument.starts_with("--renderer=") => {
+                    let value = argument.trim_start_matches("--renderer=");
+                    options.renderer = Some(Self::normalize_renderer(value)?);
+                }
                 _ if argument.starts_with("--header=") => {
                     let value = argument.trim_start_matches("--header=");
                     options
@@ -58,6 +102,14 @@ impl Options {
             }
         }
         Ok(options)
+    }
+
+    fn normalize_renderer(value: &str) -> Result<String, String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "gl" | "opengl" => Ok("gl".to_owned()),
+            "software" | "sw" => Ok("software".to_owned()),
+            other => Err(format!("--renderer must be gl or software, got '{other}'")),
+        }
     }
 }
 
@@ -98,4 +150,69 @@ pub fn media_beside_executable(name: &str) -> Option<String> {
     candidate
         .is_file()
         .then(|| candidate.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Options;
+
+    fn parse(args: &[&str]) -> Result<Options, String> {
+        Options::parse(args.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn debug_flag_and_renderer_combinations() {
+        let options = parse(&["--debug"]).unwrap();
+        assert!(options.debug);
+        assert_eq!(options.renderer, None);
+
+        let options = parse(&["--debug", "--renderer", "software"]).unwrap();
+        assert!(options.debug);
+        assert_eq!(options.renderer.as_deref(), Some("software"));
+
+        let options = parse(&["--debug", "--renderer=gl"]).unwrap();
+        assert!(options.debug);
+        assert_eq!(options.renderer.as_deref(), Some("gl"));
+    }
+
+    #[test]
+    fn renderer_values_are_normalized() {
+        assert_eq!(
+            parse(&["--renderer", "OpenGL"])
+                .unwrap()
+                .renderer
+                .as_deref(),
+            Some("gl")
+        );
+        assert_eq!(
+            parse(&["--renderer=SW"]).unwrap().renderer.as_deref(),
+            Some("software")
+        );
+    }
+
+    #[test]
+    fn invalid_renderer_arguments_error() {
+        assert!(parse(&["--renderer", "vulkan"]).is_err());
+        assert!(parse(&["--renderer=vk"]).is_err());
+        assert!(parse(&["--renderer"]).is_err());
+    }
+
+    #[test]
+    fn debug_does_not_disturb_other_arguments() {
+        let options = parse(&["--debug", "--header", "X-Test: 1", "file.mp4"]).unwrap();
+        assert!(options.debug);
+        assert_eq!(options.url.as_deref(), Some("file.mp4"));
+        assert_eq!(options.headers.len(), 1);
+    }
+
+    #[test]
+    fn version_and_build_id_metadata() {
+        let pkg_ver = env!("CARGO_PKG_VERSION");
+        assert_eq!(pkg_ver, "0.2.23");
+        let build_id = env!("ADULT_HUB_BUILD_ID");
+        assert!(build_id.starts_with("0.2.23-"), "build_id was: {build_id}");
+        assert!(!build_id.is_empty());
+        let build_date = env!("ADULT_HUB_BUILD_DATE");
+        assert!(!build_date.is_empty());
+    }
 }

@@ -72,45 +72,75 @@ impl PlaybackSessionController {
 
     /// Resolve the most accurate resume position for any TvItem, ensuring consistency
     /// between Home screen indicators, Jellyfin user data, and local storage.
+    ///
+    /// Every path to the same material (Home, Continue Watching, search, details,
+    /// shuffle) must yield the same position, so ALL known sources are consulted
+    /// and the most advanced one wins: server-reported ticks, server-reported
+    /// percentage (`.strm` items often carry only a percentage), the local
+    /// progress row keyed by `item.id`, and the Telegram progress row keyed by
+    /// the provider id.
     pub fn resolve_item_resume_position(
         local_store: &LocalStore,
         session_ctrl: &PlaybackSessionController,
         item: &TvItem,
     ) -> Option<u64> {
         let duration_ms = item.runtime_ticks.map(|t| (t / 10_000) as u64).unwrap_or(0);
-        if item.is_telegram() {
-            let prov_id = item
-                .provider_video_id
-                .as_deref()
-                .or_else(|| item.id.strip_prefix("telegram:"))
-                .unwrap_or(&item.id);
-            session_ctrl.get_telegram_resume_position(prov_id)
-        } else {
-            let ticks_pos = (item.playback_position_ticks > 0)
-                .then_some((item.playback_position_ticks / 10_000) as u64);
 
-            let pct_pos = item.played_percentage.and_then(|pct| {
-                if pct > 0.0 && pct < 95.0 && duration_ms > 0 {
-                    Some(((pct / 100.0) * duration_ms as f64) as u64)
+        let mut candidates: Vec<u64> = Vec::new();
+
+        if item.playback_position_ticks > 0 {
+            candidates.push((item.playback_position_ticks / 10_000) as u64);
+        }
+        if let Some(pct) = item.played_percentage {
+            if pct > 0.0 && pct < 95.0 {
+                // The server usually reports ticks as well, which take priority
+                // when the duration is known. Derive from the percentage only
+                // when no absolute position came back, and use the local
+                // duration row as fallback for items missing RunTimeTicks.
+                let basis_ms = if duration_ms > 0 {
+                    duration_ms
                 } else {
-                    None
+                    local_store
+                        .get_progress("local", &item.id)
+                        .ok()
+                        .flatten()
+                        .map(|(_, dur)| dur)
+                        .unwrap_or(0)
+                };
+                if basis_ms > 0 {
+                    candidates.push(((pct / 100.0) * basis_ms as f64) as u64);
                 }
-            });
-
-            let local_pos = local_store
-                .get_progress("local", &item.id)
-                .ok()
-                .flatten()
-                .filter(|(pos, _)| *pos > 0)
-                .map(|(pos, _)| pos);
-
-            match (ticks_pos.or(pct_pos), local_pos) {
-                (Some(srv), Some(loc)) => Some(srv.max(loc)),
-                (Some(srv), None) => Some(srv),
-                (None, Some(loc)) => Some(loc),
-                (None, None) => None,
             }
         }
+        if let Some(pos) = local_store
+            .get_progress("local", &item.id)
+            .ok()
+            .flatten()
+            .map(|(pos, _)| pos)
+            .filter(|pos| *pos > 0)
+        {
+            candidates.push(pos);
+        }
+        // Telegram rows are keyed by provider id; consult them whenever a
+        // provider id exists, regardless of which surface the item came from.
+        if let Some(pos) = item.provider_video_id.as_deref().and_then(|prov_id| {
+            session_ctrl
+                .get_telegram_resume_position(prov_id)
+                .or_else(|| session_ctrl.get_telegram_resume_position(&item.id))
+        }) {
+            if pos > 0 {
+                candidates.push(pos);
+            }
+        }
+        if item.is_telegram() {
+            if let Some(pos) = session_ctrl.get_telegram_resume_position(&item.id) {
+                if pos > 0 {
+                    candidates.push(pos);
+                }
+            }
+        }
+
+        candidates.into_iter().max()
     }
 
     pub fn checkpoint_progress(
@@ -120,20 +150,22 @@ impl PlaybackSessionController {
         duration_ms: u64,
         is_ended: bool,
     ) {
+        // The local row keyed by item.id is written for EVERY item, so a
+        // position saved on one surface is found by every other surface even
+        // before the server reports progress back.
         let _ = self
             .local_store
             .save_progress("local", &item.id, position_ms, duration_ms);
 
-        if !item.is_telegram() {
-            // Jellyfin progress is also reported to server via PlaybackReporter
-            return;
-        }
-
         let prov_id = item
             .provider_video_id
             .as_deref()
-            .or_else(|| item.id.strip_prefix("telegram:"))
-            .unwrap_or(&item.id);
+            .or_else(|| item.id.strip_prefix("telegram:"));
+        if !item.is_telegram() || prov_id.is_none() {
+            // Jellyfin progress is also reported to server via PlaybackReporter
+            return;
+        }
+        let prov_id = prov_id.unwrap();
 
         if Self::is_playback_completed(position_ms, duration_ms, is_ended) {
             let _ = self.local_store.mark_telegram_played(
@@ -290,6 +322,110 @@ mod tests {
         let id2 = controller.next_request_id();
         assert!(!controller.is_request_current(id1));
         assert!(controller.is_request_current(id2));
+    }
+
+    fn base_item(id: &str) -> TvItem {
+        TvItem {
+            id: id.into(),
+            title: "Test".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn jellyfin_mapped_telegram_item_resumes_from_server_ticks() {
+        // Regression: "[Tim Tales] …" showed 59% on Home but plain Play on
+        // Details, because a Jellyfin item carrying a `telegram` ProviderId was
+        // classified as Telegram and its resume position was read only from the
+        // provider-keyed table, which the 15s checkpoint threshold left empty.
+        let store = Arc::new(LocalStore::open_in_memory().unwrap());
+        let ctrl = PlaybackSessionController::new(store.clone());
+        let duration_ms: u64 = 1_418_000; // 1418s
+        let duration_ticks = (duration_ms * 10_000) as i64;
+        let resume_ms: u64 = 836_620; // ~59%
+
+        let item = TvItem {
+            provider_video_id: Some("tg-999".into()),
+            runtime_ticks: Some(duration_ticks),
+            playback_position_ticks: (resume_ms * 10_000) as i64,
+            ..base_item("jf-guid-0001")
+        };
+
+        let resume = PlaybackSessionController::resolve_item_resume_position(&store, &ctrl, &item);
+        assert!(resume.is_some(), "server ticks must be visible to Details");
+        assert_eq!(resume, Some(resume_ms));
+        let fraction = resume_ms as f64 / duration_ms as f64;
+        assert!((fraction - 0.59).abs() < 0.02, "fraction was {fraction}");
+        assert!(PlaybackSessionController::should_prompt_resume(
+            resume.unwrap(),
+            duration_ms
+        ));
+    }
+
+    #[test]
+    fn early_checkpoint_is_visible_on_every_entry_path() {
+        // Regression: a 19s checkpoint used to reach the provider table only
+        // past the 15s-plus threshold and never the row Details reads, so the
+        // position was visible on one surface and lost on another. The row
+        // keyed by item.id is now written for every item and read on every path.
+        let store = Arc::new(LocalStore::open_in_memory().unwrap());
+        let ctrl = PlaybackSessionController::new(store.clone());
+
+        let mut jf_item = base_item("jf-guid-0002");
+        jf_item.runtime_ticks = Some(600_000_000_000); // 600s
+        let mut tg_item = base_item("telegram:chan:457");
+        tg_item.provider_video_id = Some("chan:457".into());
+        tg_item.source_provider = Some("telegram".into());
+        tg_item.runtime_ticks = Some(600_000_000_000);
+
+        for item in [&mut jf_item, &mut tg_item] {
+            ctrl.checkpoint_progress(item, 19_000, 600_000, false);
+            let resume =
+                PlaybackSessionController::resolve_item_resume_position(&store, &ctrl, item);
+            assert_eq!(resume, Some(19_000), "resume lost for {}", item.id);
+
+            // Same material re-fetched from the server with no progress fields
+            // yet (metadata race) must still resolve the local position.
+            item.playback_position_ticks = 0;
+            item.played_percentage = None;
+            let resume =
+                PlaybackSessionController::resolve_item_resume_position(&store, &ctrl, item);
+            assert_eq!(resume, Some(19_000), "missing metadata zeroed progress");
+        }
+    }
+
+    #[test]
+    fn resume_uses_latest_across_sources_and_percentage_without_duration() {
+        let store = Arc::new(LocalStore::open_in_memory().unwrap());
+        let ctrl = PlaybackSessionController::new(store.clone());
+
+        // Percentage-only item (.strm without RunTimeTicks): fall back to the
+        // locally recorded duration instead of dropping resume entirely.
+        store
+            .save_progress("local", "strm-item", 20_000, 100_000)
+            .unwrap();
+        let item = TvItem {
+            played_percentage: Some(60.0),
+            ..base_item("strm-item")
+        };
+        assert_eq!(
+            PlaybackSessionController::resolve_item_resume_position(&store, &ctrl, &item),
+            Some(60_000)
+        );
+
+        // Newest position wins between server ticks and local rows.
+        let item = TvItem {
+            runtime_ticks: Some(1_000_000_000),
+            playback_position_ticks: 250_000_000, // 25s
+            ..base_item("jf-guid-0003")
+        };
+        store
+            .save_progress("local", "jf-guid-0003", 40_000, 100_000)
+            .unwrap();
+        assert_eq!(
+            PlaybackSessionController::resolve_item_resume_position(&store, &ctrl, &item),
+            Some(40_000)
+        );
     }
 
     #[test]

@@ -1,7 +1,5 @@
 use regex::Regex;
 use std::collections::VecDeque;
-use std::fs::File;
-use std::io::Write;
 use std::path::Path;
 use std::sync::{LazyLock, Mutex};
 use std::time::SystemTime;
@@ -47,6 +45,31 @@ pub fn redact(message: &str) -> String {
     let s5 = IDENTIFIER_REGEX.replace_all(&s4, "${1}=[REDACTED]");
     let s6 = TITLE_REGEX.replace_all(&s5, "${1}=[REDACTED]");
     UUID_REGEX.replace_all(&s6, "[ID]").into_owned()
+}
+
+/// Tail of the on-disk startup log, redacted line by line, for the
+/// diagnostics export. Reading only the last `max_bytes` keeps the export
+/// bounded even if rotation ever fails.
+pub fn redacted_startup_log_tail(path: &Path, max_bytes: u64) -> String {
+    let Ok(data) = std::fs::read(path) else {
+        return "Startup log not available.\n".to_owned();
+    };
+    let start = data.len().saturating_sub(max_bytes as usize);
+    // Drop a leading partial line so every emitted line is complete.
+    let tail = if start > 0 {
+        match data[start..].iter().position(|&b| b == b'\n') {
+            Some(offset) => &data[start + offset + 1..],
+            None => &data[start..],
+        }
+    } else {
+        &data[..]
+    };
+    let mut out = String::new();
+    for line in String::from_utf8_lossy(tail).lines() {
+        out.push_str(&redact(line));
+        out.push('\n');
+    }
+    out
 }
 
 pub struct AppLog {
@@ -120,6 +143,15 @@ impl AppLog {
         let mut out = String::new();
         out.push_str("Adult Hub diagnostics\n");
         out.push_str(&format!("App version: {app_version}\n"));
+        let commit = env!("ADULT_HUB_COMMIT_HASH");
+        let dirty = if env!("ADULT_HUB_DIRTY") == "1" {
+            "-dirty"
+        } else {
+            ""
+        };
+        out.push_str(&format!("Git commit: {commit}{dirty}\n"));
+        out.push_str(&format!("Build ID: {}\n", env!("ADULT_HUB_BUILD_ID")));
+        out.push_str(&format!("Build date: {}\n", env!("ADULT_HUB_BUILD_DATE")));
         out.push_str(&format!(
             "Platform: {} ({})\n",
             std::env::consts::OS,
@@ -152,21 +184,6 @@ impl AppLog {
         }
 
         out
-    }
-
-    pub fn export_to_file<P: AsRef<Path>>(
-        &self,
-        path: P,
-        app_version: &str,
-        extra_info: &[(&str, &str)],
-    ) -> std::io::Result<()> {
-        let text = self.export_text(app_version, extra_info);
-        if let Some(parent) = path.as_ref().parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let mut file = File::create(path)?;
-        file.write_all(text.as_bytes())?;
-        Ok(())
     }
 }
 
@@ -221,6 +238,8 @@ mod tests {
         let exported = log.export_text("0.1.0", &[("Decoder", "hwdec auto")]);
         assert!(exported.contains("Adult Hub diagnostics"));
         assert!(exported.contains("App version: 0.1.0"));
+        assert!(exported.contains("Git commit:"));
+        assert!(exported.contains("Build ID:"));
         assert!(exported.contains("Decoder: hwdec auto"));
         assert!(exported.contains("Event number 599"));
     }

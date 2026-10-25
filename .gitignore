@@ -7,6 +7,8 @@ bin/*
 !bin/.gitkeep
 dist/
 build/
+artifacts/
+.coverage
 *.AppImage
 *.deb
 *.msi

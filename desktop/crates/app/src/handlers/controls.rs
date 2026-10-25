@@ -547,8 +547,9 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
             ui.set_playback_ended_visible(false);
             ui.set_autoplay_countdown_sec(0);
             if ui.get_active_screen() != "player" {
-                ctx_shuffle
-                    .push_nav_destination(crate::handlers::browsing::current_nav_destination(&ui));
+                ctx_shuffle.push_nav_destination(
+                    crate::handlers::browsing::current_nav_destination(&ui, &ctx_shuffle),
+                );
             }
             ui.set_active_screen("player".into());
             ui.set_status("Selecting a random title…".into());
@@ -901,24 +902,229 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
     }
 }
 
+use slint::winit_030::{WinitWindowAccessor, winit};
+
 pub fn install_fullscreen(ui: &MainWindow) {
     let fullscreen = Rc::new(Cell::new(false));
+    let was_maximized = Rc::new(Cell::new(false));
+    let saved_normal_size = Rc::new(Cell::new((1180.0_f32, 760.0_f32)));
+    let saved_normal_pos = Rc::new(Cell::new(Option::<(i32, i32)>::None));
+    #[cfg(target_os = "windows")]
+    let saved_win32_placement = Rc::new(Cell::new(Option::<windows_sys::Win32::UI::WindowsAndMessaging::WINDOWPLACEMENT>::None));
 
-    {
+    let toggle_fullscreen = {
         let ui_weak = ui.as_weak();
         let fullscreen = fullscreen.clone();
-        ui.on_toggle_fullscreen(move || {
+        let was_maximized = was_maximized.clone();
+        let saved_normal_size = saved_normal_size.clone();
+        let saved_normal_pos = saved_normal_pos.clone();
+        #[cfg(target_os = "windows")]
+        let saved_win32_placement = saved_win32_placement.clone();
+
+        Rc::new(move || {
             let Some(ui) = ui_weak.upgrade() else { return };
-            let next = !fullscreen.get();
-            ui.window().set_fullscreen(next);
-            fullscreen.set(next);
-            ui.set_is_fullscreen(next);
+            let current_fs = fullscreen.get();
+            let next_fs = !current_fs;
+
+            if next_fs {
+                // Entering fullscreen
+                let is_max = ui.window().is_maximized();
+                was_maximized.set(is_max);
+                saved_normal_size.set((ui.get_window_target_width(), ui.get_window_target_height()));
+
+                let pos = ui.window().with_winit_window(|w| {
+                    w.outer_position().ok().map(|p| (p.x, p.y))
+                }).flatten();
+                saved_normal_pos.set(pos);
+
+                crate::log_debug(&format!(
+                    "fullscreen: entering fullscreen (was_maximized: {is_max}, normal target size: {:.0}x{:.0})",
+                    ui.get_window_target_width(),
+                    ui.get_window_target_height()
+                ));
+
+                fullscreen.set(true);
+                ui.set_is_fullscreen(true);
+                ui.window().set_fullscreen(true);
+
+                ui.window().with_winit_window(|window| {
+                    window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+
+                    #[cfg(target_os = "windows")]
+                    {
+                        use windows_sys::Win32::Graphics::Gdi::{
+                            GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+                        };
+                        use windows_sys::Win32::UI::WindowsAndMessaging::{
+                            GetWindowLongW, GetWindowPlacement, SetWindowLongW, SetWindowPos, GWL_STYLE,
+                            HWND_TOP, SWP_FRAMECHANGED, SWP_NOOWNERZORDER, SWP_SHOWWINDOW, WINDOWPLACEMENT,
+                            WS_MAXIMIZE, WS_OVERLAPPEDWINDOW,
+                        };
+                        use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+                        if let Ok(handle) = window.window_handle() {
+                            if let RawWindowHandle::Win32(win32_handle) = handle.as_raw() {
+                                let hwnd = win32_handle.hwnd.get() as windows_sys::Win32::Foundation::HWND;
+                                let mut wp: WINDOWPLACEMENT = unsafe { std::mem::zeroed() };
+                                wp.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
+                                if unsafe { GetWindowPlacement(hwnd, &mut wp) } != 0 {
+                                    saved_win32_placement.set(Some(wp));
+                                }
+
+                                let hmon = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+                                let mut mi: MONITORINFO = unsafe { std::mem::zeroed() };
+                                mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+                                if unsafe { GetMonitorInfoW(hmon, &mut mi) } != 0 {
+                                    let x = mi.rcMonitor.left;
+                                    let y = mi.rcMonitor.top;
+                                    let w = mi.rcMonitor.right - mi.rcMonitor.left;
+                                    let h = mi.rcMonitor.bottom - mi.rcMonitor.top;
+
+                                    let style = unsafe { GetWindowLongW(hwnd, GWL_STYLE) } as u32;
+                                    unsafe {
+                                        SetWindowLongW(
+                                            hwnd,
+                                            GWL_STYLE,
+                                            (style & !(WS_OVERLAPPEDWINDOW | WS_MAXIMIZE)) as i32,
+                                        );
+                                        SetWindowPos(
+                                            hwnd,
+                                            HWND_TOP,
+                                            x,
+                                            y,
+                                            w,
+                                            h,
+                                            SWP_FRAMECHANGED | SWP_NOOWNERZORDER | SWP_SHOWWINDOW,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Diagnostic logging immediately after applying state change
+                    let actual_winit = window.fullscreen().is_some();
+                    let actual_slint = ui.window().is_fullscreen();
+                    let inner = window.inner_size();
+                    let outer = window.outer_position().ok();
+                    let surface = ui.window().size();
+                    let scale = window.scale_factor();
+                    let monitor_info = window.current_monitor().map(|m| (m.position(), m.size()));
+
+                    let diag = format_fullscreen_diagnostics(
+                        true,
+                        actual_winit,
+                        actual_slint,
+                        inner.width,
+                        inner.height,
+                        outer.map(|p| (p.x, p.y)),
+                        surface.width,
+                        surface.height,
+                        scale,
+                        monitor_info.map(|(p, s)| ((p.x, p.y), (s.width, s.height))),
+                    );
+                    crate::log_debug(&diag);
+                });
+            } else {
+                // Exiting fullscreen
+                crate::log_debug("fullscreen: exiting fullscreen mode");
+                fullscreen.set(false);
+                ui.set_is_fullscreen(false);
+                ui.window().set_fullscreen(false);
+
+                ui.window().with_winit_window(|window| {
+                    window.set_fullscreen(None);
+
+                    #[cfg(target_os = "windows")]
+                    {
+                        use windows_sys::Win32::UI::WindowsAndMessaging::{
+                            GetWindowLongW, SetWindowLongW, SetWindowPlacement, SetWindowPos, GWL_STYLE,
+                            SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER,
+                            WS_OVERLAPPEDWINDOW,
+                        };
+                        use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+                        if let Ok(handle) = window.window_handle() {
+                            if let RawWindowHandle::Win32(win32_handle) = handle.as_raw() {
+                                let hwnd = win32_handle.hwnd.get() as windows_sys::Win32::Foundation::HWND;
+                                let style = unsafe { GetWindowLongW(hwnd, GWL_STYLE) } as u32;
+                                unsafe {
+                                    SetWindowLongW(hwnd, GWL_STYLE, (style | WS_OVERLAPPEDWINDOW) as i32);
+                                }
+                                if let Some(wp) = saved_win32_placement.take() {
+                                    unsafe {
+                                        SetWindowPlacement(hwnd, &wp);
+                                        SetWindowPos(
+                                            hwnd,
+                                            0 as _,
+                                            0,
+                                            0,
+                                            0,
+                                            0,
+                                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if was_maximized.get() {
+                        crate::log_debug("fullscreen: restoring previous maximized state");
+                        ui.window().set_maximized(true);
+                        window.set_maximized(true);
+                    } else {
+                        let (w, h) = saved_normal_size.get();
+                        crate::log_debug(&format!("fullscreen: restoring previous normal rect: {w:.0}x{h:.0}"));
+                        ui.set_window_target_width(w);
+                        ui.set_window_target_height(h);
+                        if let Some((x, y)) = saved_normal_pos.get() {
+                            ui.window().set_position(slint::WindowPosition::Physical(
+                                slint::PhysicalPosition::new(x, y),
+                            ));
+                        }
+                        ui.window().set_maximized(false);
+                        window.set_maximized(false);
+                    }
+
+                    // Diagnostic logging immediately after exiting
+                    let actual_winit = window.fullscreen().is_some();
+                    let actual_slint = ui.window().is_fullscreen();
+                    let inner = window.inner_size();
+                    let outer = window.outer_position().ok();
+                    let surface = ui.window().size();
+                    let scale = window.scale_factor();
+                    let monitor_info = window.current_monitor().map(|m| (m.position(), m.size()));
+
+                    let diag = format_fullscreen_diagnostics(
+                        false,
+                        actual_winit,
+                        actual_slint,
+                        inner.width,
+                        inner.height,
+                        outer.map(|p| (p.x, p.y)),
+                        surface.width,
+                        surface.height,
+                        scale,
+                        monitor_info.map(|(p, s)| ((p.x, p.y), (s.width, s.height))),
+                    );
+                    crate::log_debug(&diag);
+                });
+            }
+        })
+    };
+
+    {
+        let toggle = toggle_fullscreen.clone();
+        ui.on_toggle_fullscreen(move || {
+            toggle();
         });
     }
 
     {
         let ui_weak = ui.as_weak();
         let fullscreen = fullscreen.clone();
+        let toggle = toggle_fullscreen.clone();
         ui.on_escape_pressed(move || {
             let Some(ui) = ui_weak.upgrade() else { return };
             if ui.get_player_volume_flyout_open() {
@@ -930,12 +1136,79 @@ pub fn install_fullscreen(ui: &MainWindow) {
                 return;
             }
             if fullscreen.get() {
-                ui.window().set_fullscreen(false);
-                fullscreen.set(false);
-                ui.set_is_fullscreen(false);
+                toggle();
             } else {
                 ui.invoke_navigate_back();
             }
         });
+    }
+}
+
+pub fn format_fullscreen_diagnostics(
+    requested: bool,
+    actual_winit: bool,
+    actual_slint: bool,
+    inner_w: u32,
+    inner_h: u32,
+    outer_pos: Option<(i32, i32)>,
+    surface_w: u32,
+    surface_h: u32,
+    scale: f64,
+    monitor: Option<((i32, i32), (u32, u32))>,
+) -> String {
+    format!(
+        "fullscreen diagnostics: requested={requested}, actual_winit={actual_winit}, actual_slint={actual_slint}, inner_size=({inner_w},{inner_h}), outer_pos={outer_pos:?}, surface_size=({surface_w},{surface_h}), scale={scale:.2}, monitor={monitor:?}"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fullscreen_diagnostics_formatting_contains_all_required_fields() {
+        let text = format_fullscreen_diagnostics(
+            true,
+            true,
+            true,
+            1920,
+            1080,
+            Some((0, 0)),
+            1920,
+            1080,
+            1.25,
+            Some(((0, 0), (1920, 1080))),
+        );
+        assert!(text.contains("requested=true"));
+        assert!(text.contains("actual_winit=true"));
+        assert!(text.contains("actual_slint=true"));
+        assert!(text.contains("inner_size=(1920,1080)"));
+        assert!(text.contains("outer_pos=Some((0, 0))"));
+        assert!(text.contains("surface_size=(1920,1080)"));
+        assert!(text.contains("scale=1.25"));
+        assert!(text.contains("monitor=Some(((0, 0), (1920, 1080)))"));
+    }
+
+    #[test]
+    fn fullscreen_exit_diagnostics_preserves_unfullscreen_values() {
+        let text = format_fullscreen_diagnostics(
+            false,
+            false,
+            false,
+            1180,
+            790,
+            Some((100, 100)),
+            1180,
+            790,
+            1.0,
+            None,
+        );
+        assert!(text.contains("requested=false"));
+        assert!(text.contains("actual_winit=false"));
+        assert!(text.contains("actual_slint=false"));
+        assert!(text.contains("inner_size=(1180,790)"));
+        assert!(text.contains("outer_pos=Some((100, 100))"));
+        assert!(text.contains("scale=1.00"));
+        assert!(text.contains("monitor=None"));
     }
 }

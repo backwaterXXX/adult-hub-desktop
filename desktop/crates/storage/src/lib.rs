@@ -292,6 +292,29 @@ impl LocalStore {
             )?;
         }
 
+        if current_version < 6 {
+            conn.execute_batch(
+                "
+                BEGIN;
+                ALTER TABLE search_history RENAME TO search_history_v5;
+                CREATE TABLE search_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    context TEXT NOT NULL DEFAULT 'movies',
+                    query TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    UNIQUE(context, query)
+                );
+                INSERT INTO search_history (context, query, created_at)
+                    SELECT 'movies', query, created_at FROM search_history_v5;
+                DROP TABLE search_history_v5;
+                CREATE INDEX IF NOT EXISTS idx_search_history_ctx_date
+                    ON search_history (context, created_at DESC);
+                INSERT INTO schema_version (version) VALUES (6);
+                COMMIT;
+                ",
+            )?;
+        }
+
         Ok(())
     }
 
@@ -359,6 +382,10 @@ impl LocalStore {
 
     // Search history helpers
     pub fn add_search_query(&self, query: &str) -> Result<()> {
+        self.add_search_query_context("movies", query)
+    }
+
+    pub fn add_search_query_context(&self, context: &str, query: &str) -> Result<()> {
         let trimmed = query.trim();
         if trimmed.is_empty() {
             return Ok(());
@@ -367,21 +394,36 @@ impl LocalStore {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
+        let context = if context.trim().is_empty() {
+            "movies"
+        } else {
+            context.trim()
+        };
 
         let conn = self.conn()?;
         conn.execute(
-            "INSERT INTO search_history (query, created_at) VALUES (?1, ?2)
-             ON CONFLICT(query) DO UPDATE SET created_at = ?2",
-            params![trimmed, now],
+            "INSERT INTO search_history (context, query, created_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(context, query) DO UPDATE SET created_at = ?3",
+            params![context, trimmed, now],
         )?;
         Ok(())
     }
 
     pub fn get_search_history(&self, limit: usize) -> Result<Vec<String>> {
+        self.get_search_history_context("movies", limit)
+    }
+
+    pub fn get_search_history_context(&self, context: &str, limit: usize) -> Result<Vec<String>> {
+        let context = if context.trim().is_empty() {
+            "movies"
+        } else {
+            context.trim()
+        };
         let conn = self.conn()?;
-        let mut stmt =
-            conn.prepare("SELECT query FROM search_history ORDER BY created_at DESC LIMIT ?1")?;
-        let rows = stmt.query_map(params![limit as i64], |row| row.get(0))?;
+        let mut stmt = conn.prepare(
+            "SELECT query FROM search_history WHERE context = ?1 ORDER BY created_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![context, limit as i64], |row| row.get(0))?;
         let mut results = Vec::new();
         for r in rows {
             results.push(r?);
@@ -392,6 +434,20 @@ impl LocalStore {
     pub fn clear_search_history(&self) -> Result<()> {
         let conn = self.conn()?;
         conn.execute("DELETE FROM search_history", [])?;
+        Ok(())
+    }
+
+    pub fn clear_search_history_context(&self, context: &str) -> Result<()> {
+        let context = if context.trim().is_empty() {
+            "movies"
+        } else {
+            context.trim()
+        };
+        let conn = self.conn()?;
+        conn.execute(
+            "DELETE FROM search_history WHERE context = ?1",
+            params![context],
+        )?;
         Ok(())
     }
 
@@ -1045,6 +1101,24 @@ impl LocalStore {
         Ok(())
     }
 
+    // Selected channel persistence (only for single channels, never "All Channels")
+    pub fn get_selected_channel(&self) -> Result<Option<String>> {
+        let val = self.get_setting("selected_single_channel")?;
+        Ok(val.filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("all channels")))
+    }
+
+    pub fn set_selected_channel(&self, channel: Option<&str>) -> Result<()> {
+        match channel {
+            Some(c) if !c.trim().is_empty() && !c.eq_ignore_ascii_case("all channels") => {
+                self.set_setting("selected_single_channel", c.trim())?;
+            }
+            _ => {
+                self.remove_setting("selected_single_channel")?;
+            }
+        }
+        Ok(())
+    }
+
     // Excluded tags
     pub fn get_excluded_tags(&self) -> Result<Vec<String>> {
         if let Some(val) = self.get_setting("excluded_tags")? {
@@ -1335,6 +1409,58 @@ mod tests {
 
         store.clear_search_history().unwrap();
         assert!(store.get_search_history(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn search_history_context_segregation() {
+        let store = LocalStore::open_in_memory().unwrap();
+        store
+            .add_search_query_context("movies", "anal blonde")
+            .unwrap();
+        store
+            .add_search_query_context("performers", "Eva Elfie")
+            .unwrap();
+        store
+            .add_search_query_context("studios", "Brazzers")
+            .unwrap();
+        store
+            .add_search_query_context("channels", "Private TG")
+            .unwrap();
+
+        // Each context has only its own query
+        assert_eq!(
+            store.get_search_history_context("movies", 5).unwrap(),
+            vec!["anal blonde"]
+        );
+        assert_eq!(
+            store.get_search_history_context("performers", 5).unwrap(),
+            vec!["Eva Elfie"]
+        );
+        assert_eq!(
+            store.get_search_history_context("studios", 5).unwrap(),
+            vec!["Brazzers"]
+        );
+        assert_eq!(
+            store.get_search_history_context("channels", 5).unwrap(),
+            vec!["Private TG"]
+        );
+
+        // Clearing one context leaves the others intact
+        store.clear_search_history_context("performers").unwrap();
+        assert!(
+            store
+                .get_search_history_context("performers", 5)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store.get_search_history_context("studios", 5).unwrap(),
+            vec!["Brazzers"]
+        );
+        assert_eq!(
+            store.get_search_history_context("movies", 5).unwrap(),
+            vec!["anal blonde"]
+        );
     }
 
     #[test]
@@ -1710,5 +1836,17 @@ mod tests {
 
         store.remove_excluded_tag("bdsm").unwrap();
         assert_eq!(store.get_excluded_tags().unwrap(), vec!["Anal"]);
+
+        // Selected channel persistence
+        assert_eq!(store.get_selected_channel().unwrap(), None);
+        store.set_selected_channel(Some("THE G BUNKER")).unwrap();
+        assert_eq!(store.get_selected_channel().unwrap(), Some("THE G BUNKER".into()));
+        // "All Channels" must never be saved as selected single channel
+        store.set_selected_channel(Some("All Channels")).unwrap();
+        assert_eq!(store.get_selected_channel().unwrap(), None);
+        store.set_selected_channel(Some("Channel A")).unwrap();
+        assert_eq!(store.get_selected_channel().unwrap(), Some("Channel A".into()));
+        store.set_selected_channel(None).unwrap();
+        assert_eq!(store.get_selected_channel().unwrap(), None);
     }
 }

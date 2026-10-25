@@ -1,3 +1,7 @@
+[build]
+# Keep local Rust builds within the shared agent memory budget.
+jobs = 1
+
 # Cargo configuration for Adult Hub Desktop repository root.
 # Matches desktop/.cargo/config.toml so commands run from either /work or /work/desktop share settings.
 

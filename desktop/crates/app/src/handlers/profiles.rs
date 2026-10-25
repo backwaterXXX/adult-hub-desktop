@@ -17,6 +17,61 @@ fn profile_cards(items: &[TvItem], server_url: Option<&str>) -> Vec<crate::Video
         .collect()
 }
 
+const PROFILE_PAGE_SIZE: usize = 200;
+
+/// Page a Jellyfin item query until the server runs out of rows.
+///
+/// Profile queries used to ask for exactly one page, so a studio or performer
+/// with more titles than the page size silently showed a partial filmography
+/// that never grew when the user scrolled to the end.
+fn fetch_profile_items(
+    jellyfin: &JellyfinClient,
+    session: &adult_hub_storage::Session,
+    query: &GetItemsQuery<'_>,
+) -> Result<Vec<TvItem>, String> {
+    let mut items = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut start_index = query.start_index;
+    loop {
+        let page = match jellyfin.get_items(
+            &session.server_url,
+            &session.user_id,
+            &session.access_token,
+            &GetItemsQuery {
+                start_index,
+                limit: PROFILE_PAGE_SIZE,
+                ..query.clone()
+            },
+        ) {
+            Ok(page) => page,
+            Err(error) => {
+                if items.is_empty() {
+                    return Err(error.to_string());
+                }
+                // Earlier pages are still useful; the list is simply incomplete.
+                break;
+            }
+        };
+        let page_len = page.items.len();
+        let total_rows = page.total_record_count;
+        let mut added = 0usize;
+        for item in page.items {
+            if seen.insert(item.id.clone()) {
+                items.push(item);
+                added += 1;
+            }
+        }
+        start_index += PROFILE_PAGE_SIZE;
+        if page_len < PROFILE_PAGE_SIZE || added == 0 {
+            break;
+        }
+        if total_rows > 0 && start_index >= total_rows {
+            break;
+        }
+    }
+    Ok(items)
+}
+
 fn fetch_cards_thumbnails(
     weak: slint::Weak<MainWindow>,
     target_kind: &'static str,
@@ -173,25 +228,18 @@ fn load_performer_profile_data(ui: &MainWindow, ctx: &AppContext, p_name: String
         let remote_result = if let Some(session) = session.as_ref() {
             let q = GetItemsQuery {
                 person: Some(&p_name),
-                limit: 100,
+                limit: PROFILE_PAGE_SIZE,
                 include_item_types: Some("Movie,Video"),
                 sort_by: "SortName",
                 ..Default::default()
             };
-            jellyfin
-                .get_items(
-                    &session.server_url,
-                    &session.user_id,
-                    &session.access_token,
-                    &q,
-                )
-                .map(|page| page.items)
+            fetch_profile_items(&jellyfin, session, &q)
         } else {
             Ok(Vec::new())
         };
 
         let is_remote_err = remote_result.is_err();
-        let remote_err_msg = remote_result.as_ref().err().map(|e| e.to_string());
+        let remote_err_msg = remote_result.as_ref().err().cloned();
         let remote_items = remote_result.unwrap_or_default();
 
         // Merge remote + local items deduplicating by id
@@ -311,25 +359,18 @@ fn load_studio_profile_data(ui: &MainWindow, ctx: &AppContext, s_name: String) {
         let remote_result = if let Some(session) = session.as_ref() {
             let q = GetItemsQuery {
                 studio: Some(&s_name),
-                limit: 100,
+                limit: PROFILE_PAGE_SIZE,
                 include_item_types: Some("Movie,Video"),
                 sort_by: "SortName",
                 ..Default::default()
             };
-            jellyfin
-                .get_items(
-                    &session.server_url,
-                    &session.user_id,
-                    &session.access_token,
-                    &q,
-                )
-                .map(|page| page.items)
+            fetch_profile_items(&jellyfin, session, &q)
         } else {
             Ok(Vec::new())
         };
 
         let is_remote_err = remote_result.is_err();
-        let remote_err_msg = remote_result.as_ref().err().map(|e| e.to_string());
+        let remote_err_msg = remote_result.as_ref().err().cloned();
         let remote_items = remote_result.unwrap_or_default();
 
         let mut merged = Vec::new();
@@ -377,7 +418,9 @@ pub fn install_stage7_handlers(ui: &MainWindow, ctx: &AppContext) {
         ui.on_open_performer_profile(move |name| {
             let Some(ui) = weak.upgrade() else { return };
             ui.invoke_cache_catalog_view();
-            ctx_prof.push_nav_destination(crate::handlers::browsing::current_nav_destination(&ui));
+            ctx_prof.push_nav_destination(crate::handlers::browsing::current_nav_destination(
+                &ui, &ctx_prof,
+            ));
             let name_str = name.to_string();
             ui.set_performer_name(name);
             ui.set_performer_scroll_y(0.0);
@@ -435,7 +478,9 @@ pub fn install_stage7_handlers(ui: &MainWindow, ctx: &AppContext) {
         ui.on_open_studio_profile(move |name| {
             let Some(ui) = weak.upgrade() else { return };
             ui.invoke_cache_catalog_view();
-            ctx_prof.push_nav_destination(crate::handlers::browsing::current_nav_destination(&ui));
+            ctx_prof.push_nav_destination(crate::handlers::browsing::current_nav_destination(
+                &ui, &ctx_prof,
+            ));
             let studio_str = name.to_string();
             ui.set_studio_name(name);
             ui.set_studio_scroll_y(0.0);
@@ -475,5 +520,93 @@ pub fn install_stage7_handlers(ui: &MainWindow, ctx: &AppContext) {
                 ui.invoke_navigate_back();
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use adult_hub_storage::Session;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    fn page_json(start: usize, count: usize, total: usize) -> String {
+        let items = (start..start + count)
+            .map(|index| {
+                format!(r#"{{"Id":"film-{index}","Name":"Film {index}","RunTimeTicks":600000000}}"#)
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(r#"{{"Items":[{items}],"TotalRecordCount":{total}}}"#)
+    }
+
+    /// Regression: a profile used to request a single page, so a studio with
+    /// more titles than the page size showed a truncated filmography that never
+    /// grew when the user scrolled to the end.
+    #[test]
+    fn profile_items_page_through_the_whole_collection() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut served = 0;
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                while let Ok(count) = stream.read(&mut buffer) {
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..count]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let request = String::from_utf8_lossy(&request).into_owned();
+                let start = request
+                    .split("StartIndex=")
+                    .nth(1)
+                    .and_then(|tail| tail.split('&').next())
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(0);
+                let body = match start {
+                    0 => page_json(0, PROFILE_PAGE_SIZE, 450),
+                    PROFILE_PAGE_SIZE => page_json(PROFILE_PAGE_SIZE, PROFILE_PAGE_SIZE, 450),
+                    _ => page_json(2 * PROFILE_PAGE_SIZE, 50, 450),
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+                served += 1;
+                if served >= 3 {
+                    break;
+                }
+            }
+        });
+
+        let session = Session {
+            server_url: format!("http://{address}"),
+            user_id: "user-1".into(),
+            username: "tester".into(),
+            access_token: "token".into(),
+            server_name: "Mock".into(),
+        };
+        let jellyfin = JellyfinClient::new("test-device");
+        let query = GetItemsQuery {
+            studio: Some("Mock Studio"),
+            limit: PROFILE_PAGE_SIZE,
+            sort_by: "SortName",
+            ..Default::default()
+        };
+
+        let items = fetch_profile_items(&jellyfin, &session, &query).expect("paged query succeeds");
+
+        assert_eq!(items.len(), 450, "every server page is collected");
+        assert_eq!(items.first().map(|item| item.id.as_str()), Some("film-0"));
+        assert_eq!(items.last().map(|item| item.id.as_str()), Some("film-449"));
+        let _ = server.join();
     }
 }

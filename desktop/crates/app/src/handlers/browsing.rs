@@ -24,6 +24,69 @@ use std::time::Duration;
 
 const CATALOG_PAGE_SIZE: usize = 50;
 
+/// Every piece of catalog-search state that must change together when the user
+/// leaves a search (the central "Clear search" action). The edited field text,
+/// the applied query and the results state are tracked separately on purpose:
+/// clearing one without the others desynchronizes the field, the counter and
+/// the list. History (`search_history` rows) is deliberately not part of this
+/// state — clearing the current query must not erase remembered searches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CatalogSearchState {
+    typed_query: String,
+    applied_query: String,
+    in_results: bool,
+    error_message: String,
+    all_has_more: bool,
+    all_total_count: i32,
+    results_filter: String,
+}
+
+impl CatalogSearchState {
+    fn cleared() -> Self {
+        Self {
+            typed_query: String::new(),
+            applied_query: String::new(),
+            in_results: false,
+            error_message: String::new(),
+            all_has_more: false,
+            all_total_count: 0,
+            results_filter: "all".into(),
+        }
+    }
+
+    fn apply(&self, ui: &MainWindow) {
+        ui.set_search_query(self.typed_query.as_str().into());
+        ui.set_search_applied_query(self.applied_query.as_str().into());
+        ui.set_is_catalog_search_results(self.in_results);
+        ui.set_search_error_message(self.error_message.as_str().into());
+        ui.set_search_all_has_more(self.all_has_more);
+        ui.set_search_all_total_count(self.all_total_count);
+        ui.set_search_results_filter(self.results_filter.as_str().into());
+    }
+}
+
+fn catalog_generation_is_current(generation: &AtomicU64, request_id: u64) -> bool {
+    generation.load(Ordering::SeqCst) == request_id
+}
+
+pub fn active_search_context(ui: &MainWindow) -> &'static str {
+    if ui.get_active_screen() == "channels" {
+        "channels"
+    } else {
+        match ui.get_active_category().as_str() {
+            "Performers" => "performers",
+            "Studios" => "studios",
+            _ => "movies",
+        }
+    }
+}
+
+pub fn refresh_recent_searches_for_context(ui: &MainWindow, store: &LocalStore) {
+    let ctx = active_search_context(ui);
+    let items = store.get_search_history_context(ctx, 8).unwrap_or_default();
+    set_recent_searches(ui, items);
+}
+
 fn set_recent_searches(ui: &MainWindow, searches: Vec<String>) {
     let items: Vec<slint::SharedString> = searches.into_iter().map(Into::into).collect();
     ui.set_recent_searches(Rc::new(slint::VecModel::from(items)).into());
@@ -488,6 +551,21 @@ fn catalog_view_key(page: &CatalogPageState) -> String {
     )
 }
 
+/// Drop the remembered field text from every stored view of `category`.
+/// Snapshots keep the typed query so navigating away and back restores it, but
+/// after an explicit "Clear search" the old text must not resurface when the
+/// category listing is restored from its snapshot.
+fn clear_saved_view_queries(
+    views: &Rc<RefCell<std::collections::HashMap<String, CatalogViewSnapshot>>>,
+    category: &str,
+) {
+    for snapshot in views.borrow_mut().values_mut() {
+        if snapshot.page.category == category {
+            snapshot.search_query.clear();
+        }
+    }
+}
+
 fn save_catalog_view(
     ui: &MainWindow,
     paging: &Arc<Mutex<CatalogPageState>>,
@@ -589,6 +667,34 @@ fn sync_catalog_filters_to_ui(ui: &MainWindow, category: &str, filters: &Catalog
     ui.set_catalog_studio_query(filters.studio.clone().into());
     ui.set_catalog_performer_query(filters.performer.clone().into());
     ui.set_catalog_active_filter_count(filters.active_filter_count(category));
+}
+
+/// Filters that actually drive the visible list. Search results are always
+/// video lists, so they use the "Latest" filter set — the same set the badge
+/// and the chips show. Outside search, each category owns its filters. Keeping
+/// one scope for display and application is what makes query, filters, the
+/// active-filter counter and the rendered results describe one state.
+fn catalog_filter_scope(ui: &MainWindow) -> String {
+    if ui.get_is_catalog_search_results() {
+        "Latest".to_string()
+    } else {
+        ui.get_active_category().to_string()
+    }
+}
+
+/// Re-run whichever list the user is looking at, from page one. Search must
+/// stay a search (refetching the *applied* query, not the field text) and a
+/// plain browse must stay a category listing, so the rendered results always
+/// match the query, filters and counter that are on screen.
+fn refresh_active_catalog(ui: &MainWindow) {
+    if ui.get_is_catalog_search_results() {
+        let applied = ui.get_search_applied_query().to_string();
+        if !applied.trim().is_empty() {
+            ui.invoke_search_catalog(applied.into());
+            return;
+        }
+    }
+    ui.invoke_filter_category(ui.get_active_category());
 }
 
 fn catalog_filter_labels(filters: &CatalogFilters) -> (String, String) {
@@ -1028,6 +1134,13 @@ fn get_catalog_page(
                 },
             )?,
             "Performers" | "Studios" | "Categories" => {
+                // Studios expose a sort control, so the request must honour it
+                // instead of always asking the server for SortName.
+                let (sort_by, sort_descending) = if category == "Studios" {
+                    (filters.sort_by(), filters.descending)
+                } else {
+                    ("SortName", false)
+                };
                 let mut page = jellyfin.get_items(
                     &session.server_url,
                     &session.user_id,
@@ -1036,8 +1149,8 @@ fn get_catalog_page(
                         parent_id: None,
                         start_index,
                         limit: CATALOG_PAGE_SIZE,
-                        sort_by: "SortName",
-                        sort_descending: false,
+                        sort_by,
+                        sort_descending,
                         include_item_types: Some(match category {
                             "Performers" => "Person",
                             "Studios" => "Studio",
@@ -1211,7 +1324,10 @@ fn get_catalog_page_with_empty_page_fetch(
     Ok(page)
 }
 
-pub fn current_nav_destination(ui: &MainWindow) -> crate::context::NavDestination {
+pub fn current_nav_destination(
+    ui: &MainWindow,
+    ctx: &crate::context::AppContext,
+) -> crate::context::NavDestination {
     use crate::context::NavDestination;
     let active = ui.get_active_screen();
     match active.as_str() {
@@ -1239,7 +1355,16 @@ pub fn current_nav_destination(ui: &MainWindow) -> crate::context::NavDestinatio
             name: ui.get_studio_name().to_string(),
         },
         "player" => NavDestination::Player {
-            id: ui.get_detail_id().to_string(),
+            // The player's own item, not the details screen's id: playback can
+            // be started from a card without ever populating `detail_id`, and
+            // a stale id here sent Back to Home instead of the real screen.
+            id: ctx
+                .current_playing_item
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|item| item.id.clone())
+                .unwrap_or_else(|| ui.get_detail_id().to_string()),
         },
         _ => NavDestination::Home,
     }
@@ -1299,7 +1424,17 @@ pub fn restore_nav_destination(
             ui.invoke_open_studio_profile(name.into());
         }
         NavDestination::Player { id } => {
-            if let Some(item) = ctx.find_catalog_item(&id) {
+            // Returning to the player must keep material, position and pause
+            // state; only re-open media when the player no longer holds it.
+            let matches_loaded = ctx
+                .current_playing_item
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|playing| playing.id == id);
+            if matches_loaded && ui.get_has_active_media() {
+                ui.set_active_screen("player".into());
+            } else if let Some(item) = ctx.find_catalog_item(&id) {
                 crate::playback::start_item_playback_ctx(ui, ctx, item);
             } else {
                 ui.invoke_switch_screen("home".into());
@@ -1321,12 +1456,13 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
     let cached_catalog = ctx.cached_catalog.clone();
     let phash_coord = ctx.phash_coord.clone();
     let qc_generation = Arc::new(AtomicU64::new(0));
-    set_recent_searches(ui, local_store.get_search_history(8).unwrap_or_default());
+    refresh_recent_searches_for_context(ui, &local_store);
 
     // 1. Screen switching
     {
         let weak = ui.as_weak();
         let player = player.clone();
+        let local_store = local_store.clone();
         let reporter = reporter.clone();
         let session_ctrl = session_ctrl.clone();
         let current_item = current_item.clone();
@@ -1336,7 +1472,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             let Some(ui) = weak.upgrade() else { return };
             let current_screen = ui.get_active_screen();
             if current_screen != screen {
-                ctx_switch.push_nav_destination(current_nav_destination(&ui));
+                ctx_switch.push_nav_destination(current_nav_destination(&ui, &ctx_switch));
             }
             if matches!(current_screen.as_str(), "home" | "browse" | "channels") {
                 ui.set_last_content_screen(current_screen);
@@ -1379,8 +1515,16 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 ui.set_player_controls_visible(true);
             }
             ui.set_active_screen(target_screen);
+            refresh_recent_searches_for_context(&ui, &local_store);
             if is_channels {
-                ui.invoke_select_channel_category(ui.get_active_channel_category());
+                let current_cat = ui.get_active_channel_category();
+                if !current_cat.is_empty() {
+                    ui.invoke_select_channel_category(current_cat);
+                } else if let Ok(Some(saved)) = local_store.get_selected_channel() {
+                    ui.invoke_select_channel_category(saved.into());
+                } else {
+                    ui.invoke_refresh_channel_categories();
+                }
             } else if is_home {
                 ui.invoke_refresh_home();
             } else if is_browse {
@@ -2366,10 +2510,18 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
         let filters = catalog_filters.clone();
         ui.on_update_catalog_filter(move |action| {
             let Some(ui) = weak.upgrade() else { return };
-            let cat = ui.get_active_category().to_string();
+            let cat = catalog_filter_scope(&ui);
             let mut value = get_category_filters(&filters, &cat);
             match action.as_str() {
-                "sort" => value.sort = (value.sort + 1) % 4,
+                "sort" => {
+                    if cat == "Studios" {
+                        // Studio entries have no runtime or rating; the control
+                        // only ever cycles the orders the list actually honours.
+                        value.sort = if value.sort == 0 { 1 } else { 0 };
+                    } else {
+                        value.sort = (value.sort + 1) % 4;
+                    }
+                }
                 "direction" => value.descending = !value.descending,
                 "unwatched" => value.unwatched = !value.unwatched,
                 "favorites" => value.favorites_only = !value.favorites_only,
@@ -2379,11 +2531,9 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             }
             set_category_filters(&filters, &cat, value.clone());
             sync_catalog_filters_to_ui(&ui, &cat, &value);
-            if ui.get_search_query().trim().is_empty() {
-                ui.invoke_filter_category(ui.get_active_category());
-            } else {
-                ui.invoke_search_catalog(ui.get_search_query());
-            }
+            // Any filter change restarts the list from page one; keeping a
+            // mid-pagination cursor would mix two different result sets.
+            refresh_active_catalog(&ui);
         });
     }
     {
@@ -2637,7 +2787,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 slint::invoke_from_event_loop(move || {
                     let Some(ui) = weak.upgrade() else { return };
                     ui.set_catalog_surprise_loading(false);
-                    if catalog_generation.load(Ordering::SeqCst) != request_id
+                    if !catalog_generation_is_current(&catalog_generation, request_id)
                         || ui.get_active_screen().as_str() != "browse"
                         || ui.get_active_category().as_str() != requested_category.as_str()
                     {
@@ -2661,7 +2811,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
         let filters = catalog_filters.clone();
         ui.on_reset_catalog_text_filters(move || {
             if let Some(ui) = weak.upgrade() {
-                let cat = ui.get_active_category().to_string();
+                let cat = catalog_filter_scope(&ui);
                 let mut current = get_category_filters(&filters, &cat);
                 current.genre.clear();
                 current.genre_id.clear();
@@ -2671,6 +2821,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 current.performer_id.clear();
                 set_category_filters(&filters, &cat, current.clone());
                 sync_catalog_filters_to_ui(&ui, &cat, &current);
+                refresh_active_catalog(&ui);
             }
         });
     }
@@ -2679,7 +2830,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
         let filters = catalog_filters.clone();
         ui.on_set_catalog_text_filter(move |key, value| {
             let Some(ui) = weak.upgrade() else { return };
-            let cat = ui.get_active_category().to_string();
+            let cat = catalog_filter_scope(&ui);
             let mut current = get_category_filters(&filters, &cat);
             let text = value.trim().to_string();
             match key.as_str() {
@@ -2705,11 +2856,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             }
             set_category_filters(&filters, &cat, current.clone());
             sync_catalog_filters_to_ui(&ui, &cat, &current);
-            if ui.get_search_query().trim().is_empty() {
-                ui.invoke_filter_category(ui.get_active_category());
-            } else {
-                ui.invoke_search_catalog(ui.get_search_query());
-            }
+            refresh_active_catalog(&ui);
         });
     }
     {
@@ -2717,15 +2864,28 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
         let filters = catalog_filters.clone();
         ui.on_clear_catalog_filters(move || {
             let Some(ui) = weak.upgrade() else { return };
-            let cat = ui.get_active_category().to_string();
+            // "Reset filters" is exactly that: the query and the fact that the
+            // user is looking at search results stay untouched, so the field,
+            // the counter and the results keep describing one state.
+            let cat = catalog_filter_scope(&ui);
             let default_filters = CatalogFilters::default();
             set_category_filters(&filters, &cat, default_filters.clone());
             sync_catalog_filters_to_ui(&ui, &cat, &default_filters);
-            if ui.get_search_query().trim().is_empty() {
-                ui.invoke_filter_category(ui.get_active_category());
-            } else {
-                ui.invoke_search_catalog(ui.get_search_query());
-            }
+            refresh_active_catalog(&ui);
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let catalog_views = catalog_views.clone();
+        ui.on_clear_catalog_search(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            // Separate action from "Reset filters": drops the query and leaves
+            // search mode, returning to the current category listing. The
+            // field text participates through the two-way binding on
+            // DarkLineEdit, so clearing the property clears the visible field.
+            CatalogSearchState::cleared().apply(&ui);
+            clear_saved_view_queries(&catalog_views, &ui.get_active_category());
+            ui.invoke_filter_category(ui.get_active_category());
         });
     }
     {
@@ -2744,7 +2904,10 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             let Some(ui) = weak.upgrade() else { return };
             save_catalog_view(&ui, &catalog_paging, &cached_catalog, &catalog_views);
             let query = query.trim().to_string();
-            let filters = get_category_filters(&catalog_filters, "Search");
+            // Search lists videos, so it applies the video ("Latest") filter
+            // set — the same one the chips edit and the badge counts.
+            let filters = get_category_filters(&catalog_filters, "Latest");
+            sync_catalog_filters_to_ui(&ui, "Latest", &filters);
             let library_id = local_store
                 .get_setting("selected_library_id")
                 .ok()
@@ -2791,6 +2954,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             ui.set_search_performer_count(0);
             ui.set_search_channel_count(0);
             ui.set_focused_card_index(0);
+            let search_context = active_search_context(&ui);
             let debounce_id = search_debounce_generation.fetch_add(1, Ordering::SeqCst) + 1;
             let weak = weak.clone();
             let jellyfin = jellyfin.clone();
@@ -2814,9 +2978,11 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     return;
                 }
                 if !query.is_empty() {
-                    let _ = local_store.add_search_query(&query);
+                    let _ = local_store.add_search_query_context(search_context, &query);
                 }
-                let recent_queries = local_store.get_search_history(8).unwrap_or_default();
+                let recent_queries = local_store
+                    .get_search_history_context(search_context, 8)
+                    .unwrap_or_default();
 
                 let mut is_unauth = false;
                 let mut search_error_message = String::new();
@@ -2867,7 +3033,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
 
                 slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
-                        if catalog_generation.load(Ordering::SeqCst) != request_id {
+                        if !catalog_generation_is_current(&catalog_generation, request_id) {
                             return;
                         }
                         *catalog_paging.lock().unwrap() = CatalogPageState {
@@ -3061,10 +3227,18 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             save_catalog_view(&ui, &catalog_paging, &cached_catalog, &catalog_views);
             performer_search_generation.fetch_add(1, Ordering::SeqCst);
             search_debounce_generation.fetch_add(1, Ordering::SeqCst);
+            refresh_recent_searches_for_context(&ui, &local_store);
             if cat == "Channels" {
                 catalog_generation.fetch_add(1, Ordering::SeqCst);
                 ui.set_active_screen("channels".into());
-                ui.invoke_select_channel_category("All Channels".into());
+                let current_cat = ui.get_active_channel_category();
+                if !current_cat.is_empty() {
+                    ui.invoke_select_channel_category(current_cat);
+                } else if let Ok(Some(saved)) = local_store.get_selected_channel() {
+                    ui.invoke_select_channel_category(saved.into());
+                } else {
+                    ui.invoke_refresh_channel_categories();
+                }
                 return;
             }
             let performer_letter = ui.get_performer_letter().to_string();
@@ -3194,9 +3368,10 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 };
                 let image_server = image_auth.as_ref().map(|(server, _)| server.clone());
                 let token_for_refresh = image_auth.map(|(_, token)| token);
+                let is_studios = cat == "Studios";
                 slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
-                        if catalog_generation.load(Ordering::SeqCst) != request_id {
+                        if !catalog_generation_is_current(&catalog_generation, request_id) {
                             return;
                         }
                         *cached_catalog.lock().unwrap() = raw_items;
@@ -3221,7 +3396,17 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                             .collect::<Vec<_>>();
                         set_catalog(&ui, cards.clone());
                         ui.set_catalog_has_more(has_more);
-                        let reported_total = if !has_more { cards.len() } else { total_count };
+                        let reported_total = if !has_more {
+                            cards.len()
+                        } else if is_studios {
+                            // Studio records are aggregated client-side, so the
+                            // raw server total is not comparable with the cards
+                            // on screen. Show the honest loaded count instead of
+                            // an "N of M" range against a different universe.
+                            cards.len()
+                        } else {
+                            total_count
+                        };
                         ui.set_catalog_total_count(reported_total as i32);
                         ui.set_is_loading_more(false);
                         ui.set_is_loading_catalog(false);
@@ -3309,6 +3494,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
     {
         let weak = ui.as_weak();
         let performer_search_generation = performer_search_generation.clone();
+        let local_store = local_store.clone();
         ui.on_request_performer_search(move || {
             let Some(ui) = weak.upgrade() else { return };
             if ui.get_active_category() != "Performers" {
@@ -3317,6 +3503,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             let scheduled_query = ui.get_performer_search_query().to_string();
             let request_id = performer_search_generation.fetch_add(1, Ordering::SeqCst) + 1;
             let generation = performer_search_generation.clone();
+            let local_store = local_store.clone();
             let weak = weak.clone();
             std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(300));
@@ -3331,6 +3518,11 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                         && ui.get_active_category() == "Performers"
                         && ui.get_performer_search_query().as_str() == scheduled_query
                     {
+                        let trimmed = scheduled_query.trim();
+                        if !trimmed.is_empty() {
+                            let _ = local_store.add_search_query_context("performers", trimmed);
+                            refresh_recent_searches_for_context(&ui, &local_store);
+                        }
                         ui.invoke_filter_category("Performers".into());
                     }
                 });
@@ -3348,12 +3540,33 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
         let cached_catalog = cached_catalog.clone();
         let catalog_generation = catalog_generation.clone();
         let catalog_paging = catalog_paging.clone();
+        let force_retry = Rc::<std::cell::Cell<bool>>::new(std::cell::Cell::new(false));
+        let retry_weak = weak.clone();
+        let retry_flag = force_retry.clone();
+        ui.on_retry_load_more_catalog(move || {
+            if let Some(ui) = retry_weak.upgrade() {
+                ui.set_catalog_more_error("".into());
+                retry_flag.set(true);
+                ui.invoke_load_more_catalog();
+            }
+        });
+        let force_retry = force_retry.clone();
         ui.on_load_more_catalog(move || {
             let Some(ui) = weak.upgrade() else { return };
-            let mut page_state = catalog_paging.lock().unwrap();
-            if !page_state.has_more || page_state.loading_more {
+            // An explicit Retry click clears the failure banner; scroll-driven
+            // calls must not slip past the "stop until retried" gate below.
+            let force_retry = force_retry.replace(false);
+            if ui.get_catalog_more_error() != "" && !force_retry {
                 return;
             }
+            let mut page_state = catalog_paging.lock().unwrap();
+            if page_state.loading_more {
+                return;
+            }
+            if !page_state.has_more && !force_retry {
+                return;
+            }
+            page_state.has_more = true;
             page_state.loading_more = true;
             let requested_page = page_state.clone();
             drop(page_state);
@@ -3393,7 +3606,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
 
                 slint::invoke_from_event_loop(move || {
                     let Some(ui) = weak.upgrade() else { return };
-                    if catalog_generation.load(Ordering::SeqCst) != request_id {
+                    if !catalog_generation_is_current(&catalog_generation, request_id) {
                         return;
                     }
 
@@ -3474,10 +3687,12 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                             }
                             ui.set_catalog_has_more(page.has_more);
                             ui.set_catalog_more_error("".into());
-                            let reported_total = if !page.has_more {
+                            let reported_total = if !page.has_more || is_studios {
+                                // Studios are aggregated client-side; the raw
+                                // server total is not comparable with the cards
+                                // (see first-page counter), so report the
+                                // honest loaded count while paging continues.
                                 cards.len()
-                            } else if is_studios {
-                                cards.len().max(page.total_count + supplemental_total)
                             } else {
                                 page.total_count + supplemental_total
                             };
@@ -3492,7 +3707,14 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                             );
                         }
                         Err(error) => {
-                            catalog_paging.lock().unwrap().loading_more = false;
+                            let mut paging = catalog_paging.lock().unwrap();
+                            paging.loading_more = false;
+                            // Stop the scroll-driven prefetch from hammering a
+                            // failing endpoint: the banner's Retry is the only
+                            // way back until the state changes.
+                            paging.has_more = false;
+                            drop(paging);
+                            ui.set_catalog_has_more(false);
                             ui.set_is_loading_more(false);
                             // Keep the loaded cards; surface the failure at the
                             // end of the list with its own retry affordance.
@@ -3619,6 +3841,116 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clear_catalog_search_resets_field_applied_query_and_results_together() {
+        // Regression for the audited scenario: search "qa-no-results-982731",
+        // wait for the empty screen, click the central "Clear search". The
+        // visible field text, the applied query and the results state must all
+        // return to the catalog state in one action — previously the handler
+        // reset the state but the field kept rendering the query.
+        let in_search = CatalogSearchState {
+            typed_query: "qa-no-results-982731".into(),
+            applied_query: "qa-no-results-982731".into(),
+            in_results: true,
+            error_message: String::new(),
+            all_has_more: false,
+            all_total_count: 0,
+            results_filter: "all".into(),
+        };
+        let cleared = CatalogSearchState::cleared();
+        assert_eq!(cleared.typed_query, "");
+        assert_eq!(cleared.applied_query, "");
+        assert!(!cleared.in_results);
+        assert_eq!(cleared.results_filter, "all");
+        assert_ne!(cleared, in_search);
+        // A cleared state describes plain catalog browsing: field, counter and
+        // list can never disagree because all fields move together.
+        assert_eq!(cleared.typed_query, cleared.applied_query);
+    }
+
+    #[test]
+    fn clear_catalog_search_keeps_search_history() {
+        // "Clear search" only moves UI state; it must not erase remembered
+        // searches. The transition touches no storage, and an in-memory store
+        // proves the history rows survive the reset.
+        let store = LocalStore::open_in_memory().unwrap();
+        store.add_search_query_context("movies", "qa-no-results-982731").unwrap();
+        store.add_search_query_context("movies", "dragon").unwrap();
+        let _cleared = CatalogSearchState::cleared();
+        let history = store.get_search_history_context("movies", 10).unwrap();
+        assert!(
+            history
+                .iter()
+                .any(|entry| entry == "qa-no-results-982731" || entry == "dragon"),
+            "clearing the current query must not wipe search history"
+        );
+    }
+
+    #[test]
+    fn late_catalog_response_is_rejected_after_a_newer_request_starts() {
+        let generation = AtomicU64::new(0);
+        let first_request = generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let second_request = generation.fetch_add(1, Ordering::SeqCst) + 1;
+
+        assert!(!catalog_generation_is_current(&generation, first_request));
+        assert!(catalog_generation_is_current(&generation, second_request));
+    }
+
+    #[test]
+    fn clear_catalog_search_blanks_the_restored_field_text() {
+        // The category listing is restored from a view snapshot that remembers
+        // the field text for navigation retention. A "Clear search" must also
+        // blank the snapshot of the category it was cleared in, or the old
+        // query reappears in the field as soon as the listing is restored.
+        let snapshot = |category: &str, query: &str| {
+            let page = CatalogPageState {
+                category: category.into(),
+                ..Default::default()
+            };
+            CatalogViewSnapshot {
+                cards: Vec::new(),
+                items: Vec::new(),
+                page,
+                total_count: 0,
+                has_more: false,
+                scroll_y: 0.0,
+                anchor_index: 0,
+                anchor_screen_y: 0.0,
+                more_error: String::new(),
+                is_search: false,
+                search_query: query.into(),
+                search_applied_query: String::new(),
+                search_error: String::new(),
+                search_results_filter: "all".into(),
+                search_movie_count: 0,
+                search_performer_count: 0,
+                search_studio_count: 0,
+                search_tag_count: 0,
+                search_channel_count: 0,
+                search_all_has_more: false,
+                search_all_total_count: 0,
+            }
+        };
+        let views = Rc::new(RefCell::new(std::collections::HashMap::new()));
+        views.borrow_mut().insert(
+            "latest-key".into(),
+            snapshot("Latest", "qa-no-results-982731"),
+        );
+        views.borrow_mut().insert(
+            "favorites-key".into(),
+            snapshot("Favorites", "typed-elsewhere"),
+        );
+
+        clear_saved_view_queries(&views, "Latest");
+
+        assert_eq!(views.borrow()["latest-key"].search_query, "");
+        assert_eq!(
+            views.borrow()["favorites-key"].search_query,
+            "typed-elsewhere",
+            "clearing one category's search must not disturb retention elsewhere"
+        );
+    }
 
     #[test]
     fn test_search_result_counts() {

@@ -149,6 +149,10 @@ pub fn load_media(ui: &MainWindow, player: &Player, input: &str, headers: &[Stri
     ui.set_status(format!("Loading: {path}").into());
     ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
     if let Err(error) = player.load_with_start(&path, headers, None) {
+        // mpv never accepted the file: do not leave the UI claiming playback.
+        ui.set_playing(false);
+        ui.set_has_active_media(false);
+        ui.set_player_state("failed".into());
         show_error(ui, error.to_string());
     }
 }
@@ -434,6 +438,11 @@ pub fn start_item_playback_with_resume(
     let path = resolve_media_input(&stream_url);
     reset_playback_speed(ui, player);
     if let Err(e) = player.load_with_start(&path, &stream_headers, start_pos_opt) {
+        // mpv never accepted the file: drop the optimistic playback flags but
+        // keep the item so the error screen's retry can start it again.
+        ui.set_playing(false);
+        ui.set_has_active_media(false);
+        ui.set_player_state("failed".into());
         show_playback_error(
             ui,
             if start_pos_secs > 0.0 {
@@ -514,6 +523,11 @@ pub fn start_item_playback_with_resume_ctx(
     }
 
     let request_id = ctx.session_ctrl.next_request_id();
+    crate::log_debug(&format!(
+        "playback req={request_id}: dispatch direct={} telegram={}",
+        item.is_direct_media(),
+        item.is_telegram()
+    ));
 
     // 1. Immediately stop previous playback (audio AND video)
     let _ = player.stop();
@@ -546,7 +560,7 @@ pub fn start_item_playback_with_resume_ctx(
     ui.set_status(format!("Preparing: {}", item.title).into());
     ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
     if ui.get_active_screen() != "player" {
-        ctx.push_nav_destination(crate::handlers::browsing::current_nav_destination(ui));
+        ctx.push_nav_destination(crate::handlers::browsing::current_nav_destination(ui, ctx));
     }
     ui.set_active_screen("player".into());
 
@@ -556,6 +570,7 @@ pub fn start_item_playback_with_resume_ctx(
     let headers = ctx.headers.clone();
 
     std::thread::spawn(move || {
+        let resolve_started = std::time::Instant::now();
         let session = ctx_clone.credential_store.get().ok().flatten();
         let resolver_url = ctx_clone.get_resolver_url();
 
@@ -602,8 +617,20 @@ pub fn start_item_playback_with_resume_ctx(
         };
 
         let (stream_url, play_method, required_headers) = match resolution_result {
-            Ok(res) => res,
+            Ok(res) => {
+                crate::log_debug(&format!(
+                    "playback req={request_id}: resolved in {} ms, method={:?}, headers={}",
+                    resolve_started.elapsed().as_millis(),
+                    res.1,
+                    res.2.len()
+                ));
+                res
+            }
             Err(err) => {
+                crate::log_debug(&format!(
+                    "playback req={request_id}: resolve failed after {} ms: {err}",
+                    resolve_started.elapsed().as_millis()
+                ));
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak_ui.upgrade() {
                         if !ctx_clone.session_ctrl.is_request_current(request_id) {
@@ -692,7 +719,18 @@ pub fn start_item_playback_with_resume_ctx(
 
                 let path = resolve_media_input(&stream_url);
                 reset_playback_speed(&ui, &player);
+                crate::log_debug(&format!(
+                    "playback req={request_id}: handing file to mpv, resume_pos={start_pos_secs:.1}s"
+                ));
                 if let Err(e) = player.load_with_start(&path, &stream_headers, start_pos_opt) {
+                    // mpv never accepted the file: drop the optimistic
+                    // playback flags but keep the item so the error screen's
+                    // retry can start it again.
+                    crate::log_debug(&format!(
+                        "playback req={request_id}: mpv rejected load: {e}"
+                    ));
+                    ui.set_playing(false);
+                    ui.set_has_active_media(false);
                     ui.set_player_state("failed".into());
                     show_playback_error(
                         &ui,
@@ -707,6 +745,7 @@ pub fn start_item_playback_with_resume_ctx(
                 }
                 let _ = player.set_pause(false);
                 ui.set_playing(true);
+                crate::log_debug(&format!("playback req={request_id}: mpv accepted load"));
 
                 if !item.is_direct_media() {
                     if let Ok(item_json) = serde_json::to_string(&item) {

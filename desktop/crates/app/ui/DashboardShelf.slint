@@ -62,11 +62,16 @@ export component PerformerCard inherits Rectangle {
             background: HubTheme.navigation-background;
             clip: true;
 
+            // Performer portraits put the face in the top of the frame, so the
+            // cover crop is pinned to the top edge instead of centred; a
+            // centred crop cut heads off on source images taller than the card.
             if root.item.has-thumbnail : Image {
                 source: root.item.thumbnail;
-                width: 100%;
-                height: 100%;
-                image-fit: cover;
+                property <float> cover-scale: max(parent.width / max(self.source.width * 1px, 1px), parent.height / max(self.source.height * 1px, 1px));
+                width: self.source.width * self.cover-scale * 1px;
+                height: self.source.height * self.cover-scale * 1px;
+                x: (parent.width - self.width) / 2;
+                y: 0px;
             }
 
             if !root.item.has-thumbnail : Rectangle {

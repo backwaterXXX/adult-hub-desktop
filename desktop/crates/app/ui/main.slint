@@ -63,9 +63,8 @@ export global HubGrid {
     // Select columns from the requested size, then fit those cards evenly in
     // the viewport. The column count does not depend on the fitted width.
     public pure function zoomed-card-width(available: length, zoom: float, base-card: length, min-width: length) -> length {
-        let requested = max(min-width, base-card * zoom);
         let cols = HubGrid.zoomed-columns(available, zoom, base-card, min-width);
-        return min(requested, HubGrid.card-width(available, cols));
+        return HubGrid.card-width(available, cols);
     }
 
     public pure function catalog-row-height(available: length, cols: int, category: string) -> length {
@@ -395,6 +394,36 @@ component TvSecondaryButton inherits Rectangle {
     }
 }
 
+component DetailTechRow inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    in property <color> value-color: HubTheme.text-secondary;
+    in property <string> font-family: "";
+
+    height: row.preferred-height;
+    background: transparent;
+
+    row := HorizontalLayout {
+        spacing: HubTheme.space-2;
+        Text {
+            min-width: 152px;
+            max-width: 152px;
+            text: root.label;
+            color: HubTheme.text-muted;
+            font-size: HubTheme.body-size;
+            vertical-alignment: top;
+        }
+        Text {
+            horizontal-stretch: 1;
+            text: root.value;
+            color: root.value-color;
+            font-size: HubTheme.body-size;
+            font-family: root.font-family;
+            wrap: word-wrap;
+        }
+    }
+}
+
 component DarkLineEdit inherits Rectangle {
     in-out property <string> text;
     in property <string> placeholder-text: "";
@@ -402,6 +431,7 @@ component DarkLineEdit inherits Rectangle {
     in property <bool> password-field: false;
     in property <bool> enabled: true;
     in property <int> focus-request-id: 0;
+    out property <bool> has-focus: input.has-focus;
     callback edited(string);
     callback accepted(string);
 
@@ -1289,8 +1319,9 @@ export component MainWindow inherits Window {
     in-out property <length> window-target-height: 760px;
     preferred-width: root.window-target-width;
     preferred-height: root.window-target-height;
-    min-width: 800px;
-    min-height: 520px;
+    min-width: root.is-fullscreen ? 0px : 800px;
+    min-height: root.is-fullscreen ? 0px : 520px;
+    full-screen: root.is-fullscreen;
     background: HubTheme.app-background;
     default-font-family: "Segoe UI Variable";
     forward-focus: keys;
@@ -1312,6 +1343,7 @@ export component MainWindow inherits Window {
 
     // Player state
     in-out property <image> video-image;
+    in property <bool> software-ui-renderer: false;
     in-out property <float> position: 0;
     in-out property <float> duration: 0;
     in-out property <bool> playing: false;
@@ -1328,6 +1360,10 @@ export component MainWindow inherits Window {
     in-out property <bool> player-more-controls-visible: false;
     in-out property <bool> player-advanced-controls-visible: false;
     in-out property <string> seek-feedback: "";
+    // Height of the always-reserved bottom control strip. Seek feedback and
+    // other transient overlays are laid out relative to it so they never cover
+    // the centred play/pause indicator.
+    in property <length> player-control-band-height: 140px;
     in-out property <bool> player-is-favorite: false;
     in-out property <bool> player-favorite-enabled: false;
     in-out property <bool> hud-visible: false;
@@ -1452,6 +1488,7 @@ export component MainWindow inherits Window {
     in-out property <length> studio-film-grid-card-width: 160px;
     in-out property <bool> is-resolving-stream: false;
     in-out property <string> search-query: "";
+    in-out property <bool> search-focused: false;
     in-out property <string> search-focus-target: "catalog";
     in-out property <int> search-focus-sequence: 0;
     in-out property <bool> is-catalog-search-results: false;
@@ -1466,6 +1503,16 @@ export component MainWindow inherits Window {
     in-out property <int> search-tag-count: 0;
     in-out property <int> search-channel-count: 0;
     in-out property <string> active-category: "Latest";
+    // The video filter panel only describes video lists. Categories, Studios
+    // and Performers have their own controls and must never inherit an
+    // expanded panel or movie-only chips.
+    property <bool> catalog-filter-categories-available: root.active-category != "Categories"
+        && root.active-category != "Studios"
+        && root.active-category != "Performers";
+    changed active-category => {
+        root.catalog-filters-expanded = false;
+        root.search-focused = false;
+    }
     in-out property <string> current-library: "All Videos";
     in-out property <[LibraryOptionData]> library-options: [];
     in-out property <string> catalog-sort-label: "Date added";
@@ -1531,6 +1578,15 @@ export component MainWindow inherits Window {
     in-out property <string> thumbnail-check-status: "Artwork not checked";
     in-out property <bool> thumbnail-check-failed: true;
     in-out property <bool> checking-connections: false;
+    // Connection diagnostics: one machine-readable state per check (not-checked,
+    // checking, connected, partial, error, not-configured) next to the human
+    // explanation, so a surface can never imply a check that did not succeed.
+    in-out property <string> jellyfin-connection-state: "not-checked";
+    in-out property <string> resolver-connection-state: "not-checked";
+    in-out property <string> artwork-connection-state: "not-checked";
+    in-out property <string> stream-connection-state: "not-checked";
+    in-out property <string> stream-check-status: "Stream not checked";
+    in-out property <string> connection-diagnostics: "";
     in-out property <string> system-os-name: "Unknown";
     in-out property <string> system-os-version: "Unknown";
     in-out property <string> system-cpu-brand: "Unknown processor";
@@ -1591,6 +1647,7 @@ export component MainWindow inherits Window {
     callback cache-catalog-view();
     callback request-performer-search();
     callback load-more-catalog();
+    callback retry-load-more-catalog();
     callback update-catalog-filter(string);
     callback surprise-me();
     callback open-catalog-filter-picker(string);
@@ -1598,6 +1655,7 @@ export component MainWindow inherits Window {
     callback set-catalog-text-filter(string, string);
     callback reset-catalog-text-filters();
     callback clear-catalog-filters();
+    callback clear-catalog-search();
     callback update-performer-filter();
     callback play-item(string);
 
@@ -1646,6 +1704,7 @@ export component MainWindow inherits Window {
     callback export-config();
     callback import-config();
     callback export-diagnostics();
+    callback open-logs-folder();
     callback switch-library();
     callback refresh-library-list();
     callback select-library(string);
@@ -1756,7 +1815,7 @@ export component MainWindow inherits Window {
 
     // Stage 8 Hierarchical Channels Browser & Telegram Cursor Pagination
     in-out property <[string]> channels-categories: ["All Channels", "4K Studios", "VR Experience", "Highlight Clips", "Exclusive"];
-    in-out property <string> active-channel-category: "All Channels";
+    in-out property <string> active-channel-category: "";
     in-out property <string> channel-search-query: "";
     in-out property <[VideoCardData]> channel-items: [];
     in-out property <[VideoCardRowData]> channel-rows: [];
@@ -1828,15 +1887,15 @@ export component MainWindow inherits Window {
     in property <length> desired-catalog-card-width: HubGrid.zoomed-card-width(
         root.catalog-content-width,
         root.card-zoom,
-        root.active-category == "Performers" ? HubGrid.performer-min-card(1.0) : HubGrid.video-min-card(1.0),
-        root.active-category == "Performers" ? 150px : 160px);
+        root.active-category == "Performers" ? HubGrid.performer-min-card(1.0) : (root.active-category == "Studios" ? 220px : HubGrid.video-min-card(1.0)),
+        root.active-category == "Performers" ? 150px : (root.active-category == "Studios" ? 200px : 160px));
     in property <length> desired-channel-card-width: HubGrid.zoomed-card-width(
         root.channel-content-width, root.card-zoom, HubGrid.video-min-card(1.0), 160px);
     in property <int> desired-catalog-columns: HubGrid.zoomed-columns(
         root.catalog-content-width,
         root.card-zoom,
-        root.active-category == "Performers" ? HubGrid.performer-min-card(1.0) : HubGrid.video-min-card(1.0),
-        root.active-category == "Performers" ? 150px : 160px);
+        root.active-category == "Performers" ? HubGrid.performer-min-card(1.0) : (root.active-category == "Studios" ? 220px : HubGrid.video-min-card(1.0)),
+        root.active-category == "Performers" ? 150px : (root.active-category == "Studios" ? 200px : 160px));
     in property <int> desired-channel-columns: HubGrid.zoomed-columns(
         root.channel-content-width, root.card-zoom, HubGrid.video-min-card(1.0), 160px);
 
@@ -2772,11 +2831,15 @@ export component MainWindow inherits Window {
                             horizontal-stretch: 1;
                             min-width: 180px;
                             focus-request-id: root.search-focus-target == "catalog" ? root.search-focus-sequence : 0;
-                            text: root.search-query;
+                            text <=> root.search-query;
                             placeholder-text: root.active-category == "Studios"
                                 ? "Search studios..."
                                 : (root.active-category == "Categories" ? "Search categories..." : "Search videos, cast, channels...");
-                            edited(text) => { root.search-query = text; }
+                            changed has-focus => {
+                                if (self.has-focus) {
+                                    root.search-focused = true;
+                                }
+                            }
                             accepted(text) => {
                                 root.search-query = text;
                                 root.search-catalog(text);
@@ -2791,7 +2854,7 @@ export component MainWindow inherits Window {
                                 keys.focus();
                             }
                         }
-                        if !root.is-catalog-search-results && root.active-category != "Performers" && root.active-category != "Studios" && root.active-category != "Categories" : FilterIconButton {
+                        if root.catalog-filter-categories-available : FilterIconButton {
                             open: root.catalog-filters-expanded;
                             has-active-filters: root.catalog-active-filter-count > 0;
                             active-filter-count: root.catalog-active-filter-count;
@@ -2804,7 +2867,7 @@ export component MainWindow inherits Window {
                             clicked => { root.update-catalog-filter("sort"); }
                         }
                         if root.search-query != "" : TvSecondaryButton {
-                            text: "Clear";
+                            text: "Clear query";
                             custom-height: 40px;
                             clicked => {
                                 root.search-query = "";
@@ -2824,10 +2887,12 @@ export component MainWindow inherits Window {
                         horizontal-stretch: 1;
                         min-width: 180px;
                         focus-request-id: root.search-focus-target == "performer" ? root.search-focus-sequence : 0;
-                        text: root.performer-search-query;
+                        text <=> root.performer-search-query;
                         placeholder-text: "Search performers...";
-                        edited(text) => {
-                            root.performer-search-query = text;
+                        changed has-focus => {
+                            if (self.has-focus) {
+                                root.search-focused = true;
+                            }
                         }
                         accepted(text) => {
                             root.performer-search-query = text;
@@ -2843,6 +2908,16 @@ export component MainWindow inherits Window {
                         primary: true;
                         clicked => {
                             root.is-loading-catalog = true;
+                            root.filter-category("Performers");
+                            keys.focus();
+                        }
+                    }
+
+                    if root.performer-search-query != "" : TvSecondaryButton {
+                        text: "Clear query";
+                        custom-height: 40px;
+                        clicked => {
+                            root.performer-search-query = "";
                             root.filter-category("Performers");
                             keys.focus();
                         }
@@ -2945,8 +3020,7 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                if !root.is-catalog-search-results
-                    && root.active-category != "Performers"
+                if root.catalog-filter-categories-available
                     && root.catalog-filters-expanded : ScrollView {
                     height: 38px;
                     vertical-scrollbar-policy: ScrollBarPolicy.always-off;
@@ -2998,8 +3072,7 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                if !root.is-catalog-search-results
-                    && root.active-category != "Performers"
+                if root.catalog-filter-categories-available
                     && root.catalog-filters-expanded : ScrollView {
                     height: 38px;
                     vertical-scrollbar-policy: ScrollBarPolicy.always-off;
@@ -3011,10 +3084,9 @@ export component MainWindow inherits Window {
                         height: 34px;
                         DarkLineEdit {
                             width: 150px;
-                            text: root.catalog-genre-query;
+                            text <=> root.catalog-genre-query;
                             placeholder-text: "Genre filter";
                             edited(text) => {
-                                root.catalog-genre-query = text;
                                 if (text == "") {
                                     root.set-catalog-text-filter("genre", "");
                                 }
@@ -3033,10 +3105,9 @@ export component MainWindow inherits Window {
                         }
                         DarkLineEdit {
                             width: 150px;
-                            text: root.catalog-studio-query;
+                            text <=> root.catalog-studio-query;
                             placeholder-text: "Studio filter";
                             edited(text) => {
-                                root.catalog-studio-query = text;
                                 if (text == "") {
                                     root.set-catalog-text-filter("studio", "");
                                 }
@@ -3055,10 +3126,9 @@ export component MainWindow inherits Window {
                         }
                         DarkLineEdit {
                             width: 150px;
-                            text: root.catalog-performer-query;
+                            text <=> root.catalog-performer-query;
                             placeholder-text: "Performer filter";
                             edited(text) => {
-                                root.catalog-performer-query = text;
                                 if (text == "") {
                                     root.set-catalog-text-filter("performer", "");
                                 }
@@ -3163,36 +3233,45 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                if root.search-query == "" && root.recent-searches.length > 0 : ScrollView {
-                    height: 40px;
+                if (root.active-category == "Performers" ? root.performer-search-query == "" : root.search-query == "")
+                    && root.recent-searches.length > 0
+                    && (root.search-focused || root.is-catalog-search-results) : ScrollView {
+                    height: 32px;
                     vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                     horizontal-scrollbar-policy: ScrollBarPolicy.as-needed;
                     mouse-drag-pan-enabled: true;
 
                     HorizontalLayout {
-                    spacing: 8px;
-                    height: 34px;
-                    Text {
-                        text: "Recent searches";
-                        color: #c9c9d0;
-                        font-size: 12px;
-                        vertical-alignment: center;
-                    }
-                    for query in root.recent-searches : TvSecondaryButton {
-                        text: query;
-                        custom-height: 40px;
-                        clicked => {
-                            root.search-query = query;
-                            root.search-catalog(query);
-                            keys.focus();
+                        spacing: 8px;
+                        height: 28px;
+                        alignment: start;
+                        Text {
+                            text: "Recent:";
+                            color: #c9c9d0;
+                            font-size: 11px;
+                            font-weight: 600;
+                            vertical-alignment: center;
                         }
-                    }
-                    TvSecondaryButton {
-                        text: "Clear";
-                        custom-height: 40px;
-                        clicked => { root.clear-search-history(); }
-                    }
-                    Rectangle { horizontal-stretch: 1; }
+                        for query in root.recent-searches : TvSecondaryButton {
+                            text: query;
+                            custom-height: 26px;
+                            clicked => {
+                                if (root.active-category == "Performers") {
+                                    root.performer-search-query = query;
+                                    root.is-loading-catalog = true;
+                                    root.filter-category("Performers");
+                                } else {
+                                    root.search-query = query;
+                                    root.search-catalog(query);
+                                }
+                                keys.focus();
+                            }
+                        }
+                        TvSecondaryButton {
+                            text: "Clear history";
+                            custom-height: 26px;
+                            clicked => { root.clear-search-history(); }
+                        }
                     }
                 }
 
@@ -3302,7 +3381,7 @@ export component MainWindow inherits Window {
                     }
 
                     // 2. Filtered-out state (active filters resulted in 0 items)
-                    if (!root.is-catalog-search-results || root.search-error-message == "") && (root.catalog-active-filter-count > 0 || (root.is-catalog-search-results && root.search-query != "") || (root.active-category == "Performers" && (root.performer-search-query != "" || root.performer-letter != "" || root.performers-photo-only))) : HorizontalLayout {
+                    if (!root.is-catalog-search-results || root.search-error-message == "") && (root.catalog-active-filter-count > 0 || (root.is-catalog-search-results && root.search-applied-query != "") || (root.active-category == "Performers" && (root.performer-search-query != "" || root.performer-letter != "" || root.performers-photo-only))) : HorizontalLayout {
                         alignment: center;
 
                         Rectangle {
@@ -3343,8 +3422,20 @@ export component MainWindow inherits Window {
 
                                 HorizontalLayout {
                                     alignment: center;
+                                    spacing: 12px;
 
-                                    TvPrimaryButton {
+                                    // Search and filters are two different
+                                    // states; each button clears exactly one of
+                                    // them and its label says which.
+                                    if root.is-catalog-search-results : TvPrimaryButton {
+                                        text: "Clear search";
+                                        custom-height: 40px;
+                                        clicked => {
+                                            root.clear-catalog-search();
+                                        }
+                                    }
+
+                                    if !root.is-catalog-search-results || root.catalog-active-filter-count > 0 : TvSecondaryButton {
                                         text: root.active-category == "Performers" ? "Reset performer filters" : "Reset filters";
                                         custom-height: 40px;
                                         clicked => {
@@ -3356,10 +3447,6 @@ export component MainWindow inherits Window {
                                                 root.filter-category("Performers");
                                             } else {
                                                 root.clear-catalog-filters();
-                                                if (root.is-catalog-search-results) {
-                                                    root.search-query = "";
-                                                    root.search-catalog("");
-                                                }
                                             }
                                         }
                                     }
@@ -3520,8 +3607,7 @@ export component MainWindow inherits Window {
                         text: "Retry";
                         custom-height: 32px;
                         clicked => {
-                            root.catalog-more-error = "";
-                            root.load-more-catalog();
+                            root.retry-load-more-catalog();
                         }
                     }
                 }
@@ -3589,7 +3675,7 @@ export component MainWindow inherits Window {
                         spacing: 6px;
                         TvSecondaryButton {
                             width: 100%;
-                            text: root.active-channel-category + (root.channel-picker-open ? "  ▴" : "  ▾");
+                            text: (root.active-channel-category != "" ? root.active-channel-category : "Choose a channel") + (root.channel-picker-open ? "  ▴" : "  ▾");
                             clicked => { root.channel-picker-open = !root.channel-picker-open; }
                         }
                         if root.channel-picker-open : ScrollView {
@@ -3613,13 +3699,13 @@ export component MainWindow inherits Window {
                         height: 36px;
                         spacing: HubTheme.space-3;
                         Text {
-                            text: root.active-channel-category;
+                            text: root.active-channel-category != "" ? root.active-channel-category : "Choose a channel";
                             color: HubTheme.text-primary;
                             font-size: HubTheme.title-size;
                             font-weight: 600;
                             vertical-alignment: center;
                         }
-                        if !root.channel-loading && root.channel-error-message == "" && root.channel-error-kind == "" : Rectangle {
+                        if root.active-channel-category != "" && !root.channel-loading && root.channel-error-message == "" && root.channel-error-kind == "" : Rectangle {
                             height: 24px;
                             border-radius: HubTheme.control-radius;
                             background: HubTheme.surface-raised;
@@ -3640,26 +3726,55 @@ export component MainWindow inherits Window {
                     Rectangle { height: 4px; }
 
                     Text {
-                        text: "Telegram channel media";
+                        text: root.active-channel-category != "" ? "Telegram channel media" : "Select a channel from the list below or from the sidebar to explore its video library";
                         color: HubTheme.text-secondary;
                         font-size: HubTheme.metadata-size;
                     }
 
-                    // Toolbar with 16px spacing from description
-                    Rectangle { height: 16px; }
+                    if root.active-channel-category == "" : VerticalLayout {
+                        spacing: 16px;
+                        padding-top: 16px;
+                        vertical-stretch: 1;
 
-                    HorizontalLayout {
+                        Text {
+                            text: "Available channels:";
+                            color: HubTheme.text-secondary;
+                            font-size: 14px;
+                            font-weight: 600;
+                        }
+
+                        ScrollView {
+                            vertical-stretch: 1;
+                            vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
+                            VerticalLayout {
+                                spacing: 8px;
+                                for cat in root.channels-categories : TvSecondaryButton {
+                                    text: cat;
+                                    custom-height: 44px;
+                                    clicked => { root.select-channel-category(cat); }
+                                }
+                            }
+                        }
+                    }
+
+                    // Toolbar with 16px spacing from description
+                    if root.active-channel-category != "" : Rectangle { height: 16px; }
+
+                    if root.active-channel-category != "" : HorizontalLayout {
                         spacing: 8px;
                         height: 40px;
 
                         DarkLineEdit {
                             horizontal-stretch: 1;
                             min-width: 140px;
-                            text: root.channel-search-query;
+                            text <=> root.channel-search-query;
                             placeholder-text: "Search in channel...";
-                            edited(text) => { root.channel-search-query = text; }
+                            changed has-focus => {
+                                if (self.has-focus) {
+                                    root.search-focused = true;
+                                }
+                            }
                             accepted(text) => {
-                                root.channel-search-query = text;
                                 root.search-channel-videos(text);
                             }
                         }
@@ -3669,6 +3784,15 @@ export component MainWindow inherits Window {
                             text: "Search";
                             custom-height: 40px;
                             clicked => { root.search-channel-videos(root.channel-search-query); }
+                        }
+
+                        if root.channel-search-query != "" : TvSecondaryButton {
+                            text: "Clear query";
+                            custom-height: 40px;
+                            clicked => {
+                                root.channel-search-query = "";
+                                root.search-channel-videos("");
+                            }
                         }
 
                         TvSecondaryButton {
@@ -3690,6 +3814,39 @@ export component MainWindow inherits Window {
                             text: "Hide Channel";
                             custom-height: 40px;
                             clicked => { root.hide-current-channel(); }
+                        }
+                    }
+
+                    if root.channel-search-query == "" && root.recent-searches.length > 0 && root.search-focused : ScrollView {
+                        height: 32px;
+                        vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+                        horizontal-scrollbar-policy: ScrollBarPolicy.as-needed;
+                        mouse-drag-pan-enabled: true;
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            height: 28px;
+                            alignment: start;
+                            Text {
+                                text: "Recent:";
+                                color: #c9c9d0;
+                                font-size: 11px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                            for query in root.recent-searches : TvSecondaryButton {
+                                text: query;
+                                custom-height: 26px;
+                                clicked => {
+                                    root.channel-search-query = query;
+                                    root.search-channel-videos(query);
+                                }
+                            }
+                            TvSecondaryButton {
+                                text: "Clear history";
+                                custom-height: 26px;
+                                clicked => { root.clear-search-history(); }
+                            }
                         }
                     }
 
@@ -3731,25 +3888,35 @@ export component MainWindow inherits Window {
                     }
 
                     // Video grid in channel (3-column responsive layout)
-                    if root.channel-loading && root.channel-rows.length == 0 : VerticalLayout {
-                        alignment: start;
-                        spacing: 8px;
-                        Text {
-                            text: "Loading channel videos…";
-                            color: HubTheme.text-secondary;
-                            font-size: 16px;
-                            font-weight: 700;
-                            horizontal-alignment: left;
-                        }
-                        Text {
-                            text: "Fetching channel catalog from Telegram resolver...";
-                            color: HubTheme.text-muted;
-                            font-size: 12px;
-                            horizontal-alignment: left;
+                    if root.active-channel-category != "" && root.channel-loading && root.channel-rows.length == 0 : Rectangle {
+                        height: 240px;
+                        width: 100%;
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 12px;
+                            HorizontalLayout {
+                                alignment: center;
+                                AccentSpinner {
+                                    size: 32px;
+                                }
+                            }
+                            Text {
+                                text: "Loading channel videos…";
+                                color: HubTheme.text-primary;
+                                font-size: 16px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                            }
+                            Text {
+                                text: "Fetching channel catalog from Telegram resolver...";
+                                color: HubTheme.text-muted;
+                                font-size: 13px;
+                                horizontal-alignment: center;
+                            }
                         }
                     }
 
-                    if !root.channel-loading && root.channel-rows.length == 0 : Rectangle {
+                    if root.active-channel-category != "" && !root.channel-loading && root.channel-rows.length == 0 : Rectangle {
                         width: 520px;
                         height: root.channel-error-details-visible ? 320px : 240px;
                         border-radius: 12px;
@@ -3843,11 +4010,11 @@ export component MainWindow inherits Window {
                         }
                     }
 
-                    if root.channel-rows.length == 0 : Rectangle {
+                    if root.active-channel-category != "" && root.channel-rows.length == 0 : Rectangle {
                         vertical-stretch: 1;
                     }
 
-                    if root.channel-rows.length > 0 : channel-list := ListView {
+                    if root.active-channel-category != "" && root.channel-rows.length > 0 : channel-list := ListView {
                         vertical-stretch: 1;
                         content-y <=> root.channel-scroll-y;
 
@@ -3980,8 +4147,8 @@ export component MainWindow inherits Window {
                         }
                     }
 
-                    // End-of-list page indicator: height only while loading.
-                    if root.channel-loading : Rectangle {
+                    // End-of-list page indicator: height only while loading additional pages.
+                    if root.channel-loading && root.channel-rows.length > 0 : Rectangle {
                         height: 44px;
                         width: 100%;
 
@@ -4000,7 +4167,7 @@ export component MainWindow inherits Window {
             if root.active-screen == "player" : Rectangle {
                 width: 100%;
                 height: 100%;
-                background: (root.player-media-loaded || root.is-resolving-stream) ? #000000 : HubTheme.app-background;
+                background: (root.is-fullscreen || root.player-media-loaded || root.is-resolving-stream) ? #000000 : HubTheme.app-background;
                 clip: true;
 
                 // Video Canvas with OSD Overlays
@@ -4009,7 +4176,7 @@ export component MainWindow inherits Window {
                     y: 0;
                     width: 100%;
                     height: 100%;
-                    background: (root.player-media-loaded || root.is-resolving-stream) ? #000000 : HubTheme.app-background;
+                    background: (root.is-fullscreen || root.player-media-loaded || root.is-resolving-stream) ? #000000 : HubTheme.app-background;
                     clip: true;
 
                     // Embedded mpv OpenGL render target - only active when media source exists
@@ -4018,6 +4185,18 @@ export component MainWindow inherits Window {
                         image-fit: contain;
                         width: 100%;
                         height: 100%;
+                    }
+
+                    // Software UI mode: mpv plays video in its own window
+                    if root.player-media-loaded && root.software-ui-renderer : Text {
+                        text: "Video plays in its own window (fallback mode)";
+                        color: HubTheme.text-secondary;
+                        font-size: 16px;
+                        width: 100%;
+                        height: 60px;
+                        y: (parent.height - self.height) / 2;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
                     }
 
                     // Transitional Loading Indicator in Player Scene
@@ -4108,7 +4287,7 @@ export component MainWindow inherits Window {
 
                     video-touch := TouchArea {
                         width: 100%;
-                        height: parent.height - 140px;
+                        height: parent.height - root.player-control-band-height;
                         clicked => {
                             if (root.player-volume-flyout-open) {
                                 root.player-volume-flyout-open = false;
@@ -4138,13 +4317,13 @@ export component MainWindow inherits Window {
                         }
                     }
 
-                    // Dedicated bottom bar touch zone (reserved bottom 140px)
+                    // Dedicated bottom bar touch zone (reserved control strip)
                     // When controls are hidden, clicking here reveals controls WITHOUT triggering video-canvas-clicked
                     bottom-bar-touch := TouchArea {
                         x: 0;
-                        y: parent.height - 140px;
+                        y: parent.height - root.player-control-band-height;
                         width: 100%;
-                        height: 140px;
+                        height: root.player-control-band-height;
                         z: 40;
                         pointer-event(event) => {
                             if (event.kind == PointerEventKind.move) {
@@ -4159,20 +4338,25 @@ export component MainWindow inherits Window {
                         }
                     }
 
+                    // Transient seek/status messages live in a band just above
+                    // the reserved control area. The centre belongs to the
+                    // pause indicator, and a message drawn there hid the primary
+                    // action exactly when the user was looking for it.
                     if root.seek-feedback != "" : Rectangle {
-                        x: (parent.width - 156px) / 2;
-                        y: (parent.height - 62px) / 2;
-                        width: 156px;
-                        height: 62px;
-                        border-radius: 31px;
+                        x: (parent.width - self.width) / 2;
+                        y: max(16px, parent.height - root.player-control-band-height - 76px);
+                        width: 128px;
+                        height: 44px;
+                        border-radius: 22px;
                         background: #0B0D12d9;
                         border-width: 1.5px;
                         border-color: #BE185D88;
+                        z: 60;
 
                         Text {
                             text: root.seek-feedback;
                             color: HubTheme.text-primary;
-                            font-size: 25px;
+                            font-size: 20px;
                             font-weight: 800;
                             horizontal-alignment: center;
                             vertical-alignment: center;
@@ -4374,7 +4558,7 @@ export component MainWindow inherits Window {
                     width: 100%;
                     visible: root.player-media-loaded;
                     height: (root.player-controls-visible || !root.playing || root.player-more-controls-visible || root.player-volume-flyout-open || root.player-timeline-dragging)
-                        ? 140px
+                        ? root.player-control-band-height
                         : 0px;
                     opacity: (root.player-controls-visible || !root.playing || root.player-more-controls-visible || root.player-volume-flyout-open || root.player-timeline-dragging) ? 1 : 0;
                     background: @linear-gradient(180deg, #00000000 0%, #10111499 22%, #101114FA 100%);
@@ -5894,6 +6078,12 @@ export component MainWindow inherits Window {
                 thumbnail-check-status: root.thumbnail-check-status;
                 thumbnail-check-failed: root.thumbnail-check-failed;
                 checking-connections: root.checking-connections;
+                jellyfin-connection-state: root.jellyfin-connection-state;
+                resolver-connection-state: root.resolver-connection-state;
+                artwork-connection-state: root.artwork-connection-state;
+                stream-connection-state: root.stream-connection-state;
+                stream-check-status: root.stream-check-status;
+                connection-diagnostics: root.connection-diagnostics;
                 phash-active: root.phash-active;
                 phash-status-text: root.phash-status-text;
                 buffer-profile-label: root.buffer-profile-label;
@@ -5969,6 +6159,7 @@ export component MainWindow inherits Window {
                 export-config => { root.export-config(); }
                 import-config => { root.import-config(); }
                 export-diagnostics => { root.export-diagnostics(); }
+                open-logs-folder => { root.open-logs-folder(); }
                 toggle-auto-update => { root.toggle-auto-update(); }
                 check-for-updates => { root.check-for-updates(); }
                 start-update-download => { root.start-update-download(); }
@@ -6031,76 +6222,49 @@ export component MainWindow inherits Window {
                         alignment: start;
                         padding-left: root.compact-layout ? HubTheme.compact-content-padding : HubTheme.content-padding;
                         padding-right: root.compact-layout ? HubTheme.compact-content-padding : HubTheme.content-padding;
-                        padding-top: 20px;
-                        padding-bottom: 72px;
-                        spacing: 20px;
+                        padding-top: HubTheme.space-6;
+                        padding-bottom: HubTheme.space-8;
+                        spacing: HubTheme.space-6;
 
-                        // 1a. True backdrop → cinematic banner with title overlay.
-                        if root.detail-has-backdrop : Rectangle {
-                            height: max(min(320px, parent.width * 0.40), title-text.preferred-height + 44px);
-                            border-radius: 12px;
-                            background: #1b1722;
-                            border-width: 1px;
-                            border-color: #FFFFFF18;
-                            clip: true;
-
-                            Image {
-                                source: root.detail-backdrop;
-                                width: 100%;
-                                height: 100%;
-                                image-fit: cover;
-                            }
-
-                            // Dark gradient overlay for text readability
-                            Rectangle {
-                                width: 100%;
-                                height: 100%;
-                                background: @linear-gradient(180deg, #00000010 0%, #00000066 45%, #0E0F14F5 100%);
-                            }
-
-                            VerticalLayout {
-                                width: 100%;
-                                height: 100%;
-                                padding: 22px;
-                                alignment: end;
-                                spacing: 6px;
-
-                                title-text := Text {
-                                    text: root.detail-title;
-                                    color: HubTheme.text-primary;
-                                    font-size: 26px;
-                                    font-weight: 800;
-                                    wrap: word-wrap;
-                                }
-                            }
-                        }
-
-                        // 1b. Only the regular 16:9 thumbnail → compact header.
-                        // Stretched full-width cover-crops faces, so the
-                        // artwork keeps its aspect next to the title.
-                        if !root.detail-has-backdrop && root.detail-has-thumbnail : Rectangle {
-                            height: compact-details-header.preferred-height;
-                            preferred-height: compact-details-header.preferred-height;
-                            border-radius: 12px;
+                        // 1. Header: artwork next to the identity block, so the
+                        //    title, its metadata and the primary actions stay
+                        //    together instead of being split across a full-width
+                        //    banner that was mostly empty space.
+                        Rectangle {
+                            height: details-header.preferred-height;
+                            border-radius: HubTheme.card-radius;
                             background: HubTheme.surface;
                             border-width: 1px;
                             border-color: #FFFFFF18;
                             clip: true;
 
-                            compact-details-header := HorizontalLayout {
-                                padding: 16px;
-                                spacing: 18px;
+                            details-header := HorizontalLayout {
+                                padding: root.compact-layout ? HubTheme.space-4 : HubTheme.space-6;
+                                spacing: root.compact-layout ? HubTheme.space-4 : HubTheme.space-6;
                                 alignment: start;
 
-                                Rectangle {
-                                    width: min(360px, max(180px, (parent.width - 50px) * 0.40));
-                                    height: self.width * 0.5625;
-                                    border-radius: 8px;
-                                    clip: true;
+                                // Artwork keeps its own aspect ratio. Stretching it
+                                // full width cover-cropped faces; no artwork at all
+                                // reserves no block.
+                                if root.detail-has-backdrop || root.detail-has-thumbnail : Rectangle {
+                                    property <image> active-img: root.detail-has-backdrop ? root.detail-backdrop : root.detail-thumbnail;
+                                    property <float> img-ratio: (self.active-img.width > 0 && self.active-img.height > 0)
+                                        ? (self.active-img.height * 1.0 / self.active-img.width)
+                                        : 0.5625;
+                                    width: min(
+                                        root.compact-layout ? 260px : 360px,
+                                        max(
+                                            root.compact-layout ? 160px : 200px,
+                                            details-scroll.visible-width * (root.compact-layout ? 0.30 : 0.36)
+                                        )
+                                    );
+                                    height: self.width * self.img-ratio;
+                                    border-radius: HubTheme.control-radius;
                                     background: #1b1722;
+                                    clip: true;
 
                                     Image {
-                                        source: root.detail-thumbnail;
+                                        source: parent.active-img;
                                         width: 100%;
                                         height: 100%;
                                         image-fit: contain;
@@ -6110,161 +6274,162 @@ export component MainWindow inherits Window {
                                 VerticalLayout {
                                     horizontal-stretch: 1;
                                     alignment: start;
-                                    spacing: 8px;
+                                    spacing: HubTheme.space-3;
 
                                     Text {
                                         text: root.detail-title;
                                         color: HubTheme.text-primary;
-                                        font-size: 24px;
+                                        font-size: root.compact-layout ? 20px : 24px;
                                         font-weight: 800;
                                         wrap: word-wrap;
                                         overflow: elide;
-                                        max-lines: 4;
+                                        max-lines: 3;
                                         vertical-alignment: top;
                                     }
 
-                                    Rectangle {
-                                        background: transparent;
-                                        vertical-stretch: 1;
+                                    // Metadata stays with the title it belongs to.
+                                    HorizontalLayout {
+                                        spacing: HubTheme.space-3;
+                                        alignment: start;
+
+                                        if root.detail-duration != "" : Text {
+                                            text: root.detail-duration;
+                                            color: HubTheme.text-primary;
+                                            font-size: HubTheme.metadata-size;
+                                            font-weight: 700;
+                                            vertical-alignment: center;
+                                        }
+
+                                        if root.detail-year != "" : Text {
+                                            text: root.detail-year;
+                                            color: HubTheme.text-secondary;
+                                            font-size: HubTheme.metadata-size;
+                                            font-weight: 600;
+                                            vertical-alignment: center;
+                                        }
+
+                                        if root.detail-resolution != "" : Text {
+                                            text: root.detail-resolution;
+                                            color: HubTheme.accent-text;
+                                            font-size: HubTheme.metadata-size;
+                                            font-weight: 700;
+                                            vertical-alignment: center;
+                                        }
+
+                                        if root.detail-studio != "" : Rectangle {
+                                            height: HubTheme.control-height - 12px;
+                                            border-radius: HubTheme.control-radius;
+                                            background: detail-studio-touch-fs.has-hover ? #BE185D44 : HubTheme.surface-raised;
+                                            border-width: 1px;
+                                            border-color: detail-studio-touch-fs.has-hover ? HubTheme.accent-outline : HubTheme.control-border;
+
+                                            HorizontalLayout {
+                                                padding-left: HubTheme.space-3;
+                                                padding-right: HubTheme.space-3;
+                                                alignment: center;
+                                                Text {
+                                                    text: root.detail-studio;
+                                                    color: HubTheme.accent-text;
+                                                    font-size: HubTheme.metadata-size;
+                                                    font-weight: 700;
+                                                    vertical-alignment: center;
+                                                    overflow: elide;
+                                                }
+                                            }
+
+                                            detail-studio-touch-fs := TouchArea {
+                                                clicked => { root.open-studio-profile(root.detail-studio); }
+                                            }
+                                        }
+                                    }
+
+                                    // Play/Resume and the state toggles. They wrap
+                                    // onto a second line when the column is narrow,
+                                    // so no button is squeezed into an unreadable
+                                    // stub at 960px.
+                                    FlexboxLayout {
+                                        flex-direction: row;
+                                        flex-wrap: wrap;
+                                        spacing-horizontal: HubTheme.space-3;
+                                        spacing-vertical: HubTheme.space-3;
+
+                                        if root.detail-can-resume : TvPrimaryButton {
+                                            text: "Resume (" + root.detail-resume-text + ")";
+                                            custom-height: HubTheme.control-height;
+                                            clicked => { root.play-detail-item(root.detail-id, true); }
+                                        }
+
+                                        if root.detail-can-resume : TvSecondaryButton {
+                                            text: "Play from Start";
+                                            custom-height: HubTheme.control-height;
+                                            clicked => { root.play-detail-item(root.detail-id, false); }
+                                        }
+
+                                        if !root.detail-can-resume : TvPrimaryButton {
+                                            text: "Play";
+                                            custom-height: HubTheme.control-height;
+                                            // Plain Play still consults the saved position:
+                                            // metadata may load after this screen was drawn,
+                                            // and "Play from Start" stays the explicit opt-out.
+                                            clicked => { root.play-detail-item(root.detail-id, true); }
+                                        }
+
+                                        TvSecondaryButton {
+                                            text: root.detail-is-favorite ? "Favorited" : "Favorite";
+                                            active: root.detail-is-favorite;
+                                            custom-height: HubTheme.control-height;
+                                            clicked => { root.toggle-detail-favorite(root.detail-id); }
+                                        }
+
+                                        TvSecondaryButton {
+                                            text: root.detail-is-played ? "Played" : "Mark watched";
+                                            active: root.detail-is-played;
+                                            custom-height: HubTheme.control-height;
+                                            clicked => { root.toggle-detail-played(root.detail-id); }
+                                        }
                                     }
                                 }
                             }
                         }
 
-                        // 1c. No artwork at all → compact text header, no
-                        // large empty rectangle.
-                        if !root.detail-has-backdrop && !root.detail-has-thumbnail : Rectangle {
-                            height: fallback-title.preferred-height + 36px;
-                            border-radius: 12px;
-                            background: HubTheme.surface;
-                            border-width: 1px;
-                            border-color: #FFFFFF18;
-                            clip: true;
-
-                            VerticalLayout {
-                                width: 100%;
-                                height: 100%;
-                                padding-left: 22px;
-                                padding-right: 22px;
-                                padding-top: 18px;
-                                padding-bottom: 18px;
-                                alignment: center;
-
-                                fallback-title := Text {
-                                    text: root.detail-title;
-                                    color: HubTheme.text-primary;
-                                    font-size: 26px;
-                                    font-weight: 800;
+                        // Description / Synopsis (only when non-empty). The line
+                        // measure is capped: a full-width paragraph at 15px runs
+                        // past 120 characters and is unreadable on wide windows.
+                        // The cell height must come from the text measured at the
+                        // capped width: the parent layout distributes the full
+                        // column width, so a Text-level `width`/`max-width` gets
+                        // measured at the wrong width and the paragraph runs over
+                        // the Cast section. The inner layout pins its own width
+                        // (like the technical-info cells) so the Rectangle's
+                        // height equals the wrapped paragraph height.
+                        if root.detail-overview != "" : Rectangle {
+                            height: overview-cell.preferred-height;
+                            overview-cell := VerticalLayout {
+                                x: 0;
+                                width: Math.min(details-scroll.visible-width
+                                    - 2 * (root.compact-layout ? HubTheme.compact-content-padding : HubTheme.content-padding),
+                                    580px);
+                                spacing: HubTheme.space-2;
+                                Text {
+                                    text: "Description";
+                                    color: HubTheme.text-secondary;
+                                    font-size: 13px;
+                                    font-weight: 700;
+                                }
+                                detail-overview-text := Text {
+                                    text: root.detail-overview;
+                                    color: #d6d2db;
+                                    font-size: 15px;
+                                    line-height-factor: 1.35;
                                     wrap: word-wrap;
+                                    vertical-alignment: top;
                                 }
-                            }
-                        }
-
-                        // 2. Basic Metadata Row
-                        HorizontalLayout {
-                            spacing: 14px;
-                            alignment: start;
-
-                            if root.detail-duration != "" : Text {
-                                text: root.detail-duration;
-                                color: HubTheme.text-primary;
-                                font-size: 13px;
-                                font-weight: 700;
-                                vertical-alignment: center;
-                            }
-
-                            if root.detail-year != "" : Text {
-                                text: root.detail-year;
-                                color: HubTheme.text-secondary;
-                                font-size: 13px;
-                                font-weight: 600;
-                                vertical-alignment: center;
-                            }
-
-                            if root.detail-resolution != "" : Text {
-                                text: root.detail-resolution;
-                                color: #ff99bb;
-                                font-size: 13px;
-                                font-weight: 700;
-                                vertical-alignment: center;
-                            }
-
-                            if root.detail-studio != "" : Rectangle {
-                                height: 28px;
-                                border-radius: 6px;
-                                background: detail-studio-touch-fs.has-hover ? #BE185D44 : #202837cc;
-                                border-width: 1px;
-                                border-color: detail-studio-touch-fs.has-hover ? HubTheme.accent-outline : #FFFFFF22;
-                                HorizontalLayout {
-                                    padding-left: 10px;
-                                    padding-right: 10px;
-                                    alignment: center;
-                                    Text { text: root.detail-studio; color: #ff9abc; font-size: 12px; font-weight: 700; vertical-alignment: center; }
-                                }
-                                detail-studio-touch-fs := TouchArea {
-                                    clicked => { root.open-studio-profile(root.detail-studio); }
-                                }
-                            }
-                        }
-
-                        // 3. Play/Resume & Secondary Actions Row
-                        HorizontalLayout {
-                            spacing: 12px;
-                            alignment: start;
-
-                            if root.detail-can-resume : TvPrimaryButton {
-                                text: "Resume (" + root.detail-resume-text + ")";
-                                custom-height: 42px;
-                                clicked => { root.play-detail-item(root.detail-id, true); }
-                            }
-
-                            if root.detail-can-resume : TvSecondaryButton {
-                                text: "Play from Start";
-                                custom-height: 42px;
-                                clicked => { root.play-detail-item(root.detail-id, false); }
-                            }
-
-                            if !root.detail-can-resume : TvPrimaryButton {
-                                text: "Play";
-                                custom-height: 42px;
-                                clicked => { root.play-detail-item(root.detail-id, false); }
-                            }
-
-                            TvSecondaryButton {
-                                text: root.detail-is-favorite ? "Favorited" : "Favorite";
-                                active: root.detail-is-favorite;
-                                custom-height: 42px;
-                                clicked => { root.toggle-detail-favorite(root.detail-id); }
-                            }
-
-                            TvSecondaryButton {
-                                text: root.detail-is-played ? "Played" : "Mark watched";
-                                active: root.detail-is-played;
-                                custom-height: 42px;
-                                clicked => { root.toggle-detail-played(root.detail-id); }
-                            }
-                        }
-
-                        // Description / Synopsis (only when non-empty)
-                        if root.detail-overview != "" : VerticalLayout {
-                            spacing: 8px;
-                            Text {
-                                text: "Description";
-                                color: HubTheme.text-secondary;
-                                font-size: 13px;
-                                font-weight: 700;
-                            }
-                            Text {
-                                text: root.detail-overview;
-                                color: #d6d2db;
-                                font-size: 14px;
-                                wrap: word-wrap;
                             }
                         }
 
                         // Cast & Performers (Compact ActorChip elements with Flexbox wrapping)
                         if root.detail-performer-cards.length > 0 : VerticalLayout {
-                            spacing: 10px;
+                            spacing: HubTheme.space-3;
                             Text {
                                 text: "Cast & Performers";
                                 color: HubTheme.text-secondary;
@@ -6275,8 +6440,8 @@ export component MainWindow inherits Window {
                             FlexboxLayout {
                                 flex-direction: row;
                                 flex-wrap: wrap;
-                                spacing-horizontal: 12px;
-                                spacing-vertical: 12px;
+                                spacing-horizontal: HubTheme.space-3;
+                                spacing-vertical: HubTheme.space-3;
                                 for performer in root.detail-performer-cards : ActorChip {
                                     name: performer.name;
                                     role: performer.role;
@@ -6287,13 +6452,16 @@ export component MainWindow inherits Window {
                             }
                         }
 
-                        // Categories / Genres & Tags
+                        // Categories / Genres & Tags. The chips wrap: a title with
+                        // a dozen genres used to run past the window edge.
                         if root.detail-genre-items.length > 0 || root.detail-tag-items.length > 0 : VerticalLayout {
-                            spacing: 10px;
+                            spacing: HubTheme.space-3;
 
-                            if root.detail-genre-items.length > 0 : HorizontalLayout {
-                                spacing: 8px;
-                                alignment: start;
+                            if root.detail-genre-items.length > 0 : FlexboxLayout {
+                                flex-direction: row;
+                                flex-wrap: wrap;
+                                spacing-horizontal: HubTheme.space-2;
+                                spacing-vertical: HubTheme.space-2;
                                 Text { text: "Genres:"; color: HubTheme.text-secondary; font-size: 12px; font-weight: 600; vertical-alignment: center; }
                                 for genre in root.detail-genre-items : Rectangle {
                                     height: 26px;
@@ -6317,9 +6485,11 @@ export component MainWindow inherits Window {
                                 }
                             }
 
-                            if root.detail-tag-items.length > 0 : HorizontalLayout {
-                                spacing: 8px;
-                                alignment: start;
+                            if root.detail-tag-items.length > 0 : FlexboxLayout {
+                                flex-direction: row;
+                                flex-wrap: wrap;
+                                spacing-horizontal: HubTheme.space-2;
+                                spacing-vertical: HubTheme.space-2;
                                 Text { text: "Tags:"; color: HubTheme.text-secondary; font-size: 12px; font-weight: 600; vertical-alignment: center; }
                                 for tag in root.detail-tag-items : Rectangle {
                                     height: 26px;
@@ -6346,15 +6516,15 @@ export component MainWindow inherits Window {
 
                         // Similar Titles (Left-aligned header with chevrons on right)
                         if root.detail-similar-items.length > 0 : VerticalLayout {
-                            spacing: 12px;
+                            spacing: HubTheme.space-3;
 
                             HorizontalLayout {
                                 alignment: start;
-                                spacing: 12px;
+                                spacing: HubTheme.space-3;
                                 Text {
                                     text: "Similar Titles";
                                     color: HubTheme.text-secondary;
-                                    font-size: 14px;
+                                    font-size: 13px;
                                     font-weight: 700;
                                     vertical-alignment: center;
                                 }
@@ -6482,141 +6652,177 @@ export component MainWindow inherits Window {
                             }
                         }
 
-                        // Technical Information - section header aligned with the other
-                        // headers; label/value rows wrap naturally instead of stretching.
-                        VerticalLayout {
-                            spacing: 8px;
+                        // Technical Information. One ordered, expandable list: the
+                        // facts a playback problem needs first (container, size,
+                        // provider), identifiers last. The header toggles with
+                        // keyboard as well as mouse.
+                        Rectangle {
+                            height: tech-section.preferred-height;
+                            background: transparent;
 
-                            Rectangle {
-                                height: 28px;
-                                background: tech-touch-fs.has-hover ? #22222a : transparent;
-                                border-radius: 6px;
+                            tech-section := VerticalLayout {
+                                spacing: HubTheme.space-2;
+                                alignment: start;
 
-                                HorizontalLayout {
-                                    padding-left: 2px;
-                                    spacing: 8px;
-                                    alignment: start;
-                                    Text {
-                                        text: "Technical Information";
-                                        color: HubTheme.text-secondary;
-                                        font-size: 13px;
-                                        font-weight: 700;
-                                        vertical-alignment: center;
-                                    }
-                                    Text {
-                                        text: root.detail-tech-expanded ? "▾" : "▸";
-                                        color: HubTheme.text-muted;
-                                        font-size: 13px;
-                                        font-weight: 700;
-                                        vertical-alignment: center;
-                                    }
-                                }
+                                tech-header := Rectangle {
+                                    height: HubTheme.control-height;
+                                    background: tech-touch-fs.has-hover || tech-focus.has-focus ? HubTheme.surface-hover : transparent;
+                                    border-radius: HubTheme.control-radius;
+                                    border-width: tech-focus.has-focus ? 1px : 0px;
+                                    border-color: HubTheme.focus-ring;
+                                    accessible-role: button;
+                                    accessible-label: "Technical information";
+                                    accessible-action-default => { root.detail-tech-expanded = !root.detail-tech-expanded; }
 
-                                tech-touch-fs := TouchArea {
-                                    clicked => { root.detail-tech-expanded = !root.detail-tech-expanded; }
-                                }
-                            }
-
-                            if root.detail-tech-expanded : Rectangle {
-                                border-radius: 6px;
-                                background: #101016;
-                                border-width: 1px;
-                                border-color: #FFFFFF10;
-
-                                VerticalLayout {
-                                    padding: 14px;
-                                    spacing: 8px;
-
-                                    if root.detail-original-title != "" : HorizontalLayout {
-                                        spacing: 8px;
-                                        Text { text: "Original Title"; color: HubTheme.text-muted; font-size: HubTheme.body-size; width: 140px; }
-                                        Text { text: root.detail-original-title; color: HubTheme.text-secondary; font-size: HubTheme.body-size; horizontal-stretch: 1; wrap: word-wrap; }
-                                    }
-
-                                    if root.detail-channel != "" : HorizontalLayout {
-                                        spacing: 8px;
-                                        Text { text: "Channel"; color: HubTheme.text-muted; font-size: HubTheme.body-size; width: 140px; }
-                                        Text { text: root.detail-channel; color: HubTheme.text-secondary; font-size: HubTheme.body-size; horizontal-stretch: 1; wrap: word-wrap; }
-                                    }
-
-                                    if root.detail-source-url != "" : HorizontalLayout {
-                                        spacing: 8px;
-                                        Text { text: "Source URL"; color: HubTheme.text-muted; font-size: HubTheme.body-size; width: 140px; }
-                                        Rectangle {
-                                            horizontal-stretch: 1;
-                                            height: source-url-text.preferred-height;
-                                            background: transparent;
-                                            source-url-text := Text {
-                                                width: 100%;
-                                                text: root.detail-source-url;
-                                                color: source-url-touch.has-hover ? #ffc1d4 : #ff9abc;
-                                                font-size: HubTheme.body-size;
-                                                wrap: word-wrap;
-                                                overflow: elide;
-                                                max-height: 42px;
-                                            }
-                                            source-url-touch := TouchArea {
-                                                clicked => { root.open-detail-source-url(root.detail-source-url); }
-                                            }
-                                            source-url-focus := FocusScope {
-                                                width: 0px;
-                                                height: 0px;
-                                                key-pressed(event) => {
-                                                    if (event.text == Key.Return || event.text == Key.Space) {
-                                                        root.open-detail-source-url(root.detail-source-url);
-                                                        return accept;
-                                                    }
-                                                    reject
-                                                }
-                                            }
+                                    HorizontalLayout {
+                                        padding-left: HubTheme.space-2;
+                                        padding-right: HubTheme.space-2;
+                                        spacing: HubTheme.space-2;
+                                        alignment: start;
+                                        Text {
+                                            text: "Technical Information";
+                                            color: tech-focus.has-focus ? HubTheme.text-primary : HubTheme.text-secondary;
+                                            font-size: 13px;
+                                            font-weight: 700;
+                                            vertical-alignment: center;
+                                        }
+                                        Text {
+                                            text: root.detail-tech-expanded ? "▾" : "▸";
+                                            color: HubTheme.text-muted;
+                                            font-size: 13px;
+                                            font-weight: 700;
+                                            vertical-alignment: center;
                                         }
                                     }
 
-                                    if root.detail-container != "" : HorizontalLayout {
-                                        spacing: 8px;
-                                        Text { text: "Container"; color: HubTheme.text-muted; font-size: HubTheme.body-size; width: 140px; }
-                                        Text { text: root.detail-container; color: HubTheme.text-secondary; font-size: HubTheme.body-size; horizontal-stretch: 1; wrap: word-wrap; }
+                                    tech-touch-fs := TouchArea {
+                                        clicked => { root.detail-tech-expanded = !root.detail-tech-expanded; }
                                     }
-
-                                    HorizontalLayout {
-                                        spacing: 8px;
-                                        Text { text: "File Size"; color: HubTheme.text-muted; font-size: HubTheme.body-size; width: 140px; }
-                                        Text { text: root.detail-file-size != "" ? root.detail-file-size : "Unavailable"; color: HubTheme.text-secondary; font-size: HubTheme.body-size; horizontal-stretch: 1; wrap: word-wrap; }
-                                    }
-
-                                    if root.detail-provider != "" : HorizontalLayout {
-                                        spacing: 8px;
-                                        Text { text: "Provider"; color: HubTheme.text-muted; font-size: HubTheme.body-size; width: 140px; }
-                                        Text { text: root.detail-provider; color: HubTheme.text-secondary; font-size: HubTheme.body-size; horizontal-stretch: 1; wrap: word-wrap; }
-                                    }
-
-                                    HorizontalLayout {
-                                        spacing: 8px;
-                                        Text { text: "Item ID"; color: HubTheme.text-muted; font-size: HubTheme.body-size; width: 140px; }
-                                        Rectangle {
-                                            horizontal-stretch: 1;
-                                            height: item-id-text.preferred-height;
-                                            background: transparent;
-                                            item-id-text := Text {
-                                                width: 100%;
-                                                text: root.detail-id;
-                                                color: root.detail-id-copied ? HubTheme.success : (item-id-touch.has-hover ? #ff9abc : HubTheme.text-muted);
-                                                font-size: 12px;
-                                                font-family: "Consolas";
-                                                wrap: word-wrap;
+                                    tech-focus := FocusScope {
+                                        width: 0px;
+                                        height: 0px;
+                                        key-pressed(event) => {
+                                            if (event.text == Key.Return || event.text == Key.Space) {
+                                                root.detail-tech-expanded = !root.detail-tech-expanded;
+                                                return accept;
                                             }
-                                            item-id-touch := TouchArea {
-                                                clicked => { root.copy-detail-item-id(root.detail-id); }
+                                            reject
+                                        }
+                                    }
+                                }
+
+                                if root.detail-tech-expanded : Rectangle {
+                                    height: tech-body.preferred-height;
+                                    border-radius: HubTheme.control-radius;
+                                    background: #101016;
+                                    border-width: 1px;
+                                    border-color: HubTheme.separator;
+
+                                    tech-body := VerticalLayout {
+                                        padding: HubTheme.space-4;
+                                        spacing: HubTheme.space-2;
+                                        alignment: start;
+
+                                        if root.detail-container != "" : DetailTechRow {
+                                            label: "Container";
+                                            value: root.detail-container;
+                                        }
+
+                                        DetailTechRow {
+                                            label: "File size";
+                                            value: root.detail-file-size != "" ? root.detail-file-size : "Unavailable";
+                                        }
+
+                                        if root.detail-provider != "" : DetailTechRow {
+                                            label: "Provider";
+                                            value: root.detail-provider;
+                                        }
+
+                                        if root.detail-channel != "" : DetailTechRow {
+                                            label: "Channel";
+                                            value: root.detail-channel;
+                                        }
+
+                                        if root.detail-original-title != "" : DetailTechRow {
+                                            label: "Original Title";
+                                            value: root.detail-original-title;
+                                        }
+
+                                        if root.detail-source-url != "" : HorizontalLayout {
+                                            spacing: HubTheme.space-2;
+                                            Text {
+                                                min-width: 152px;
+                                                max-width: 152px;
+                                                text: "Source URL";
+                                                color: HubTheme.text-muted;
+                                                font-size: HubTheme.body-size;
+                                                vertical-alignment: top;
                                             }
-                                            item-id-focus := FocusScope {
-                                                width: 0px;
-                                                height: 0px;
-                                                key-pressed(event) => {
-                                                    if (event.text == Key.Return || event.text == Key.Space) {
-                                                        root.copy-detail-item-id(root.detail-id);
-                                                        return accept;
+                                            Rectangle {
+                                                horizontal-stretch: 1;
+                                                height: source-url-text.preferred-height;
+                                                background: transparent;
+                                                source-url-text := Text {
+                                                    width: 100%;
+                                                    text: root.detail-source-url;
+                                                    color: source-url-touch.has-hover ? #ffc1d4 : HubTheme.accent-text;
+                                                    font-size: HubTheme.body-size;
+                                                    wrap: word-wrap;
+                                                    overflow: elide;
+                                                    max-height: 42px;
+                                                }
+                                                source-url-touch := TouchArea {
+                                                    clicked => { root.open-detail-source-url(root.detail-source-url); }
+                                                }
+                                                source-url-focus := FocusScope {
+                                                    width: 0px;
+                                                    height: 0px;
+                                                    key-pressed(event) => {
+                                                        if (event.text == Key.Return || event.text == Key.Space) {
+                                                            root.open-detail-source-url(root.detail-source-url);
+                                                            return accept;
+                                                        }
+                                                        reject
                                                     }
-                                                    reject
+                                                }
+                                            }
+                                        }
+
+                                        HorizontalLayout {
+                                            spacing: HubTheme.space-2;
+                                            Text {
+                                                min-width: 152px;
+                                                max-width: 152px;
+                                                text: "Item ID";
+                                                color: HubTheme.text-muted;
+                                                font-size: HubTheme.body-size;
+                                                vertical-alignment: top;
+                                            }
+                                            Rectangle {
+                                                horizontal-stretch: 1;
+                                                height: item-id-text.preferred-height;
+                                                background: transparent;
+                                                item-id-text := Text {
+                                                    width: 100%;
+                                                    text: root.detail-id;
+                                                    color: root.detail-id-copied ? HubTheme.success : (item-id-touch.has-hover ? HubTheme.accent-text : HubTheme.text-muted);
+                                                    font-size: 12px;
+                                                    font-family: "Consolas";
+                                                    wrap: word-wrap;
+                                                }
+                                                item-id-touch := TouchArea {
+                                                    clicked => { root.copy-detail-item-id(root.detail-id); }
+                                                }
+                                                item-id-focus := FocusScope {
+                                                    width: 0px;
+                                                    height: 0px;
+                                                    key-pressed(event) => {
+                                                        if (event.text == Key.Return || event.text == Key.Space) {
+                                                            root.copy-detail-item-id(root.detail-id);
+                                                            return accept;
+                                                        }
+                                                        reject
+                                                    }
                                                 }
                                             }
                                         }
@@ -6848,9 +7054,10 @@ export component MainWindow inherits Window {
 
                             // Measure the real viewport (not self.width, which
                             // loops through the Flickable) so this grid and the
-                            // catalog agree on columns at the same width.
+                            // catalog agree on columns at the same width, accounting
+                            // for padding and the vertical scrollbar gutter.
                             property <length> content-pad: root.compact-layout ? HubTheme.compact-content-padding : HubTheme.content-padding;
-                            property <length> avail-w: max(240px, perf-scroll.visible-width - 2 * self.content-pad);
+                            property <length> avail-w: max(240px, perf-scroll.visible-width - 2 * self.content-pad - 16px);
                             property <int> cols: HubGrid.zoomed-columns(self.avail-w, root.card-zoom, HubGrid.video-min-card(1.0), 160px);
                             property <length> card-w: HubGrid.zoomed-card-width(self.avail-w, root.card-zoom, HubGrid.video-min-card(1.0), 160px);
 
@@ -7102,8 +7309,12 @@ export component MainWindow inherits Window {
                             grid-width: self.avail-w;
                             card-width: self.card-w;
 
+                            // Measure the real viewport (not self.width, which
+                            // loops through the Flickable) so this grid and the
+                            // catalog agree on columns at the same width, accounting
+                            // for padding and the vertical scrollbar gutter.
                             property <length> content-pad: root.compact-layout ? HubTheme.compact-content-padding : HubTheme.content-padding;
-                            property <length> avail-w: max(240px, studio-scroll.visible-width - 2 * self.content-pad);
+                            property <length> avail-w: max(240px, studio-scroll.visible-width - 2 * self.content-pad - 16px);
                             property <int> cols: HubGrid.zoomed-columns(self.avail-w, root.card-zoom, HubGrid.video-min-card(1.0), 160px);
                             property <length> card-w: HubGrid.zoomed-card-width(self.avail-w, root.card-zoom, HubGrid.video-min-card(1.0), 160px);
 
@@ -7603,9 +7814,8 @@ export component MainWindow inherits Window {
                         font-weight: 600;
                     }
                     DarkLineEdit {
-                        text: root.server-url-input;
+                        text <=> root.server-url-input;
                         placeholder-text: "http://localhost:8096";
-                        edited(text) => { root.server-url-input = text; }
                     }
 
                     Text {
@@ -7615,9 +7825,8 @@ export component MainWindow inherits Window {
                         font-weight: 600;
                     }
                     DarkLineEdit {
-                        text: root.username-input;
+                        text <=> root.username-input;
                         placeholder-text: "Username";
-                        edited(text) => { root.username-input = text; }
                     }
 
                     Text {
@@ -7627,10 +7836,9 @@ export component MainWindow inherits Window {
                         font-weight: 600;
                     }
                     DarkLineEdit {
-                        text: root.password-input;
+                        text <=> root.password-input;
                         placeholder-text: "Password";
                         password-field: true;
-                        edited(text) => { root.password-input = text; }
                         accepted(text) => {
                             root.password-input = text;
                             root.perform-login(root.server-url-input, root.username-input, root.password-input);
@@ -7727,10 +7935,9 @@ export component MainWindow inherits Window {
                 DarkLineEdit {
                     width: 100%;
                     height: 36px;
-                    text: root.catalog-filter-options-query;
+                    text <=> root.catalog-filter-options-query;
                     placeholder-text: "Filter list…";
                     edited(text) => {
-                        root.catalog-filter-options-query = text;
                         root.filter-catalog-filter-options(text);
                     }
                     accepted(text) => {

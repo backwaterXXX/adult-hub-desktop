@@ -1104,6 +1104,9 @@ mod tests {
         assert_eq!(item.progress_fraction(), 0.5);
         assert!(item.is_favorite);
         assert!(!item.is_played);
+        // A `telegram` ProviderId makes the item stream through the resolver,
+        // but Home/details resume state additionally comes from the server, so
+        // progress must be read from both places.
         assert!(item.is_telegram());
         assert_eq!(item.provider_video_id.as_deref(), Some("tg-999"));
         assert_eq!(item.media_source_id.as_deref(), Some("ms1"));
@@ -1113,6 +1116,34 @@ mod tests {
         assert_eq!(item.studios, vec!["Studio A"]);
         assert_eq!(item.people.len(), 1);
         assert_eq!(item.people[0].name, "Jane Doe");
+    }
+
+    #[test]
+    fn referral_size_is_rejected_even_without_the_placeholder_flag() {
+        // Regression for the "Doctors…" Details screen: the server reported the
+        // 102-byte pointer body without IsPlaceHolder, so the placeholder guard
+        // alone let "102 B" through.
+        let json = r#"{
+            "Id": "strm-item-3",
+            "Name": "Doctors",
+            "MediaSources": [{"Id": "ms4", "Size": 102, "Path": "/mnt/library/Doctors.mkv.strm?v=1"}]
+        }"#;
+
+        let dto: BaseItemDto = serde_json::from_str(json).unwrap();
+        let item = map_base_item_to_tv_item(dto);
+        assert_eq!(item.media_size_bytes(), None);
+        assert_eq!(item.format_media_size(), "Unavailable");
+
+        // A server that reports neither a path nor the flag still cannot leak
+        // the pointer size through the display guard.
+        let json = r#"{
+            "Id": "strm-item-4",
+            "Name": "Doctors",
+            "MediaSources": [{"Id": "ms5", "Size": 102}]
+        }"#;
+        let dto: BaseItemDto = serde_json::from_str(json).unwrap();
+        let item = map_base_item_to_tv_item(dto);
+        assert_eq!(item.media_size_bytes(), None);
     }
 
     #[test]

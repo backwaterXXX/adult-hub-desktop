@@ -499,6 +499,38 @@ export component SettingsView inherits Rectangle {
     in property <string> thumbnail-check-status: "Artwork not checked";
     in property <bool> thumbnail-check-failed: true;
     in property <bool> checking-connections: false;
+    in property <string> jellyfin-connection-state: "not-checked";
+    in property <string> resolver-connection-state: "not-checked";
+    in property <string> artwork-connection-state: "not-checked";
+    in property <string> stream-connection-state: "not-checked";
+    in property <string> stream-check-status: "Stream not checked";
+    in property <string> connection-diagnostics: "";
+
+    // Legible states for the four connection checks. The machine-readable state
+    // drives colour and label, the status text carries the short explanation.
+    pure function checkColor(state: string) -> color {
+        if (state == "connected") { return HubTheme.success; }
+        if (state == "partial") { return #f0b23c; }
+        if (state == "error") { return HubTheme.error; }
+        if (state == "checking") { return HubTheme.text-secondary; }
+        return HubTheme.text-muted;
+    }
+    pure function checkLabel(state: string) -> string {
+        if (state == "connected") { return "Connected"; }
+        if (state == "partial") { return "Partially working"; }
+        if (state == "error") { return "Failed"; }
+        if (state == "checking") { return "Checking…"; }
+        if (state == "not-configured") { return "Not configured"; }
+        return "Not checked";
+    }
+
+    // The four checks the diagnostics section reports, in display order.
+    property <[{ label: string, state: string, detail: string }]> connection-checks: [
+        { label: "Media server", state: root.jellyfin-connection-state, detail: root.jellyfin-connection-status },
+        { label: "Video service", state: root.resolver-connection-state, detail: root.resolver-connection-status },
+        { label: "Stream access", state: root.stream-connection-state, detail: root.stream-check-status },
+        { label: "Artwork", state: root.artwork-connection-state, detail: root.thumbnail-check-status },
+    ];
     in property <bool> phash-active: false;
     in property <string> phash-status-text: "";
     in-out property <bool> diagnostics-expanded: false;
@@ -601,6 +633,7 @@ export component SettingsView inherits Rectangle {
     callback export-config();
     callback import-config();
     callback export-diagnostics();
+    callback open-logs-folder();
 
     callback toggle-auto-update();
     callback check-for-updates();
@@ -1560,7 +1593,7 @@ export component SettingsView inherits Rectangle {
                                         border-radius: HubTheme.control-radius;
                                         background: HubTheme.navigation-background;
                                         border-width: 1px;
-                                        border-color: root.resolver-connection-status == "Connected" || root.resolver-connection-status == "OK" ? #4ADE8066 : HubTheme.separator;
+                                        border-color: root.resolver-connection-state == "connected" ? #4ADE8066 : HubTheme.separator;
 
                                         HorizontalLayout {
                                             padding-left: 14px;
@@ -1568,9 +1601,16 @@ export component SettingsView inherits Rectangle {
                                             spacing: 8px;
                                             alignment: center;
 
+                                            Rectangle {
+                                                width: 8px;
+                                                height: 8px;
+                                                border-radius: 4px;
+                                                background: checkColor(root.resolver-connection-state);
+                                            }
+
                                             Text {
-                                                text: "Status: " + root.resolver-connection-status;
-                                                color: root.resolver-connection-status == "Connected" || root.resolver-connection-status == "OK" ? HubTheme.success : HubTheme.text-primary;
+                                                text: checkLabel(root.resolver-connection-state) + (root.resolver-connection-status != "" && root.resolver-connection-status != "Not checked" ? " — " + root.resolver-connection-status : "");
+                                                color: checkColor(root.resolver-connection-state);
                                                 font-size: HubTheme.metadata-size;
                                                 vertical-alignment: center;
                                                 horizontal-stretch: 1;
@@ -1655,22 +1695,34 @@ export component SettingsView inherits Rectangle {
                                         font-size: HubTheme.metadata-size;
                                     }
 
-                                    HorizontalLayout {
-                                        spacing: 16px;
-                                        Text {
-                                            text: "Jellyfin: " + root.jellyfin-connection-status;
-                                            color: HubTheme.text-secondary;
-                                            font-size: 12px;
-                                        }
-                                        Text {
-                                            text: "Resolver: " + root.resolver-connection-status;
-                                            color: HubTheme.text-secondary;
-                                            font-size: 12px;
-                                        }
-                                        Text {
-                                            text: "Thumbnails: " + root.thumbnail-check-status;
-                                            color: HubTheme.text-secondary;
-                                            font-size: 12px;
+                                    VerticalLayout {
+                                        spacing: 8px;
+
+                                        for check in root.connection-checks : HorizontalLayout {
+                                            spacing: 8px;
+
+                                            Rectangle {
+                                                width: 8px;
+                                                height: 8px;
+                                                border-radius: 4px;
+                                                background: checkColor(check.state);
+                                            }
+
+                                            Text {
+                                                text: check.label;
+                                                color: HubTheme.text-secondary;
+                                                font-size: 12px;
+                                                vertical-alignment: center;
+                                            }
+
+                                            Text {
+                                                text: checkLabel(check.state) + (check.detail != "" ? " — " + check.detail : "");
+                                                color: checkColor(check.state);
+                                                font-size: 12px;
+                                                vertical-alignment: center;
+                                                horizontal-stretch: 1;
+                                                wrap: word-wrap;
+                                            }
                                         }
                                     }
 
@@ -1684,25 +1736,23 @@ export component SettingsView inherits Rectangle {
                                             padding: 12px;
                                             spacing: 6px;
                                             Text {
-                                                text: "Detailed diagnostic test results:";
+                                                text: "Detailed diagnostic results (credentials masked):";
                                                 color: HubTheme.text-muted;
                                                 font-size: 11px;
                                                 font-weight: 600;
+                                                wrap: word-wrap;
                                             }
                                             Text {
-                                                text: "• Video server: " + (root.saved-resolver-url != "" ? root.saved-resolver-url : "No server configured");
+                                                text: "• Media server: " + (root.saved-resolver-url != "" ? root.saved-resolver-url : root.jellyfin-connection-status);
                                                 color: HubTheme.text-secondary;
                                                 font-size: 11px;
+                                                wrap: word-wrap;
                                             }
                                             Text {
-                                                text: "• Response state: " + root.resolver-connection-status;
+                                                text: root.connection-diagnostics != "" ? root.connection-diagnostics : "Run “Test Connection” to collect per-check diagnostics.";
                                                 color: HubTheme.text-secondary;
                                                 font-size: 11px;
-                                            }
-                                            Text {
-                                                text: "• Artwork & thumbnail availability: " + root.thumbnail-check-status;
-                                                color: HubTheme.text-secondary;
-                                                font-size: 11px;
+                                                wrap: word-wrap;
                                             }
                                         }
                                     }
@@ -2263,6 +2313,13 @@ export component SettingsView inherits Rectangle {
                                         custom-height: 40px;
                                         horizontal-stretch: 1;
                                         clicked => { root.export-diagnostics(); }
+                                    }
+
+                                    SettingsButton {
+                                        text: "Open Logs Folder";
+                                        custom-height: 40px;
+                                        horizontal-stretch: 1;
+                                        clicked => { root.open-logs-folder(); }
                                     }
                                 }
                             }
