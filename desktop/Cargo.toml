@@ -31,7 +31,7 @@ windows-sys = { version = "=0.61.2", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
-sysinfo = { version = "0.35.2", default-features = false, features = ["system"] }
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 
 # Keep source locations in backtraces without full type/variable debug data.
 # The test profile inherits dev; release keeps its existing settings.
