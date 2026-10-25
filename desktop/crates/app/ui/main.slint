@@ -2901,7 +2901,8 @@ export component MainWindow inherits Window {
                         retry => { root.refresh-home(); }
                     }
 
-                    if root.is-logged-in : for shelf in root.home-category-shelves : if shelf.items.length > 0 : DashboardShelf {
+                    for shelf in root.home-category-shelves : DashboardShelf {
+                        visible: root.is-logged-in && shelf.items.length > 0;
                         title: shelf.name;
                         category-name: shelf.name;
                         items: shelf.items;
@@ -5246,9 +5247,11 @@ export component MainWindow inherits Window {
                             Rectangle { horizontal-stretch: 1; }
 
                             // Quality selector button (44x44) placed directly before download button
-                            if root.player-has-quality-alternatives : quality-btn := Rectangle {
-                                width: 44px;
+                            quality-btn := Rectangle {
+                                visible: root.player-has-quality-alternatives;
+                                width: root.player-has-quality-alternatives ? 44px : 0px;
                                 height: 44px;
+                                clip: true;
                                 y: (parent.height - self.height) / 2;
                                 border-radius: 22px;
                                 background: ql-touch.has-hover || root.player-quality-panel-open ? #F5F6F822 : transparent;
@@ -5304,6 +5307,7 @@ export component MainWindow inherits Window {
                                 }
 
                                 ql-touch := TouchArea {
+                                    enabled: root.player-has-quality-alternatives;
                                     pointer-event(event) => {
                                         if (event.kind == PointerEventKind.move) {
                                             root.player-controls-visible = true;
@@ -5327,6 +5331,7 @@ export component MainWindow inherits Window {
                                 }
 
                                 ql-focus := FocusScope {
+                                    enabled: root.player-has-quality-alternatives;
                                     width: 0px;
                                     height: 0px;
                                     key-pressed(event) => {
