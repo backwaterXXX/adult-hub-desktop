@@ -58,6 +58,27 @@ export component VideoCard inherits Rectangle {
     property <bool> portrait-thumbnail: root.item.thumbnail.height > root.item.thumbnail.width;
     property <bool> show-play: touch.has-hover || play-touch.has-hover;
     property <string> source-label: root.item.studio != "" ? root.item.studio : "";
+    property <bool> is-title-truncated: title-text.preferred-height > 38px || title-text.preferred-width > root.card-width - 20px;
+    property <bool> is-card-active: touch.has-hover || root.is-focused || root.has-focus;
+    property <bool> tooltip-active: false;
+
+    changed item => {
+        root.tooltip-active = false;
+    }
+
+    changed is-card-active => {
+        if (!root.is-card-active) {
+            root.tooltip-active = false;
+        }
+    }
+
+    tooltip-timer := Timer {
+        interval: 500ms;
+        running: root.is-card-active && root.is-title-truncated && !root.tooltip-active;
+        triggered => {
+            root.tooltip-active = true;
+        }
+    }
 
     horizontal-stretch: root.fixed-width ? 0 : 1;
     preferred-width: root.card-width;
@@ -277,7 +298,7 @@ export component VideoCard inherits Rectangle {
             spacing: 2px;
 
             // Title: always left-aligned, vertical top, max 2 lines, ending with ellipsis
-            Text {
+            title-text := Text {
                 text: root.item.title;
                 color: HubTheme.text-primary;
                 font-size: HubTheme.card-title-size;
@@ -319,6 +340,38 @@ export component VideoCard inherits Rectangle {
                     overflow: elide;
                     horizontal-stretch: 1;
                 }
+            }
+        }
+    }
+
+    // Non-intercepting floating tooltip for truncated titles, activated after 500ms
+    if root.tooltip-active && root.is-card-active && root.is-title-truncated : Rectangle {
+        x: 6px;
+        y: max(4px, parent.height - tooltip-layout.preferred-height - 4px);
+        width: parent.width - 12px;
+        height: tooltip-layout.preferred-height;
+        border-radius: 6px;
+        background: #18181BF8;
+        border-width: 1px;
+        border-color: #FFFFFF28;
+        drop-shadow-blur: 10px;
+        drop-shadow-color: #000000AA;
+        z: 100;
+
+        tooltip-layout := VerticalLayout {
+            padding-left: 8px;
+            padding-right: 8px;
+            padding-top: 6px;
+            padding-bottom: 6px;
+            alignment: center;
+
+            Text {
+                text: root.item.title;
+                color: #FFFFFF;
+                font-size: 13px;
+                font-weight: 600;
+                wrap: word-wrap;
+                horizontal-alignment: left;
             }
         }
     }

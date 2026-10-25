@@ -87,7 +87,7 @@ export global HubGrid {
             return 72px + HubGrid.gap();
         }
         if category == "Categories" {
-            return min(120px, width * 0.45) + 56px + HubGrid.gap();
+            return 56px + HubGrid.gap();
         }
         return width * 0.5625 + 70px + HubGrid.gap();
     }
@@ -821,49 +821,86 @@ component PerformerHeroHeaderCompact inherits Rectangle {
 component TvChoiceChip inherits Rectangle {
     in property <string> text;
     in property <bool> selected: false;
+    in property <bool> removable: false;
+    in property <bool> enabled: true;
     out property <bool> has-focus: focus-scope.has-focus;
     callback clicked();
 
     forward-focus: focus-scope;
     accessible-role: button;
     accessible-label: root.text;
-    accessible-action-default => { root.clicked(); }
+    accessible-action-default => { if (root.enabled) { root.clicked(); } }
 
-    height: 40px;
-    border-radius: HubTheme.control-radius;
-    background: root.selected ? HubTheme.surface-raised : (root.has-focus || touch.has-hover ? HubTheme.surface-hover : transparent);
-    border-width: root.has-focus ? 1px : 0px;
-    border-color: root.has-focus ? HubTheme.focus-ring : transparent;
+    height: 36px;
+    border-radius: 8px;
+    background: !root.enabled
+        ? #FFFFFF05
+        : (touch.pressed
+            ? #BE185D33
+            : (root.selected
+                ? (touch.has-hover ? #BE185D28 : #BE185D1A)
+                : (touch.has-hover ? #FFFFFF12 : #FFFFFF08)));
+    border-width: (root.has-focus || focus-scope.has-focus) ? 2px : 1px;
+    border-color: (root.has-focus || focus-scope.has-focus)
+        ? HubTheme.focus-ring
+        : (root.selected ? #BE185D88 : (touch.has-hover ? #FFFFFF2A : #FFFFFF14));
+
+    animate background { duration: 120ms; }
+    animate border-color { duration: 120ms; }
 
     HorizontalLayout {
-        padding-left: 16px;
-        padding-right: 16px;
+        padding-left: root.selected && !root.removable ? 10px : 12px;
+        padding-right: root.removable ? 8px : 12px;
+        spacing: 6px;
         alignment: center;
+
+        // Checkmark for active toggle state
+        if root.selected && !root.removable : Image {
+            source: @image-url("../../../assets/icons/check.svg");
+            width: 14px;
+            height: 14px;
+            colorize: HubTheme.accent;
+            vertical-alignment: center;
+            image-fit: contain;
+        }
+
         Text {
             text: root.text;
-            color: root.selected || root.has-focus ? HubTheme.text-primary : (touch.has-hover ? HubTheme.text-primary : HubTheme.text-secondary);
+            color: !root.enabled
+                ? HubTheme.text-muted
+                : (root.selected ? #FFFFFF : (touch.has-hover ? HubTheme.text-primary : HubTheme.text-secondary));
             font-size: 13px;
-            font-weight: root.selected ? 700 : 500;
+            font-weight: root.selected ? 600 : 500;
             vertical-alignment: center;
+        }
+
+        // Clear SVG Close icon for removable active filter chips
+        if root.removable : Rectangle {
+            width: 18px;
+            height: 18px;
+            border-radius: 9px;
+            background: touch.has-hover ? #FFFFFF22 : transparent;
+            Image {
+                source: @image-url("../../../assets/icons/close.svg");
+                width: 10px;
+                height: 10px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                colorize: touch.has-hover ? #FFFFFF : #A1A1AA;
+                image-fit: contain;
+            }
         }
     }
 
-    Rectangle {
-        x: 8px;
-        y: parent.height - 2px;
-        width: parent.width - 16px;
-        height: 2px;
-        border-radius: 1px;
-        background: root.selected ? HubTheme.accent : transparent;
-    }
-
     touch := TouchArea {
+        enabled: root.enabled;
         clicked => { root.clicked(); }
     }
 
     focus-scope := FocusScope {
         width: 0px;
         height: 0px;
+        enabled: root.enabled;
         key-pressed(event) => {
             if (event.text == Key.Space || event.text == Key.Return) {
                 root.clicked();
@@ -928,14 +965,16 @@ component QualityOptionRow inherits Rectangle {
     forward-focus: focus-scope;
 
     height: 44px;
-    border-radius: 8px;
-    background: focus-scope.has-focus
-        ? (root.option.is-selected ? #BE185D33 : #FFFFFF18)
-        : (root.option.is-selected ? #BE185D22 : (touch.has-hover ? #FFFFFF10 : transparent));
-    border-width: focus-scope.has-focus ? 2px : 0px;
+    border-radius: 6px;
+    background: touch.pressed
+        ? #FFFFFF14
+        : (root.option.is-selected
+            ? (touch.has-hover ? #FFFFFF14 : #FFFFFF0E)
+            : (touch.has-hover ? #FFFFFF0A : transparent));
+    border-width: focus-scope.has-focus ? 1px : 0px;
     border-color: HubTheme.focus-ring;
     accessible-role: button;
-    accessible-label: root.option.resolution + " " + root.option.codec + " " + root.option.size-text + (root.option.is-selected ? " selected" : "");
+    accessible-label: root.option.resolution + (root.option.is-original ? " Original" : "") + " " + root.option.codec + " " + root.option.size-text + (root.option.is-selected ? " selected" : "");
 
     touch := TouchArea {
         width: 100%;
@@ -967,28 +1006,13 @@ component QualityOptionRow inherits Rectangle {
         height: 100%;
         padding-left: 12px;
         padding-right: 12px;
-        spacing: 10px;
+        spacing: 8px;
 
-        // Fixed selection column: 20 px, single checkmark only on active item
-        Rectangle {
-            width: 20px;
-            height: 20px;
-            if root.option.is-selected : Image {
-                source: @image-url("../../../assets/icons/check.svg");
-                width: 16px;
-                height: 16px;
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-                image-fit: contain;
-                colorize: HubTheme.accent;
-            }
-        }
-
-        // Flexible resolution column, left-aligned, 14 px font
+        // 1. Flexible resolution column on left
         Text {
             horizontal-stretch: 1;
-            text: root.option.resolution + (root.option.is-original ? " (Original)" : "");
-            color: root.option.is-selected ? #FFFFFF : HubTheme.text-primary;
+            text: root.option.resolution + (root.option.is-original ? " Original" : "");
+            color: #F4F4F5;
             font-size: 14px;
             font-weight: root.option.is-selected ? 600 : 400;
             vertical-alignment: center;
@@ -996,33 +1020,44 @@ component QualityOptionRow inherits Rectangle {
             overflow: elide;
         }
 
-        // Fixed codec column: ~48 px, 12-13 px font, readable secondary color
-        Rectangle {
-            width: 48px;
-            height: 22px;
-            border-radius: 4px;
-            background: root.option.codec != "" ? #FFFFFF12 : transparent;
-            if root.option.codec != "" : Text {
-                width: 100%;
-                height: 100%;
-                text: root.option.codec;
-                color: HubTheme.text-secondary;
-                font-size: 12px;
-                font-weight: 500;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
+        // 2. Fixed codec column: 44 px, 12 px font, #A1A1AA, plain text (no badge)
+        Text {
+            width: 44px;
+            text: root.option.codec;
+            color: #A1A1AA;
+            font-size: 12px;
+            font-weight: 400;
+            horizontal-alignment: left;
+            vertical-alignment: center;
+            overflow: elide;
         }
 
-        // Fixed size column: ~76 px, 12-13 px font, readable secondary color, right-aligned
+        // 3. Fixed size column: 72 px, 12 px font, #A1A1AA, right-aligned
         Text {
-            width: 76px;
+            width: 72px;
             text: root.option.size-text;
-            color: HubTheme.text-secondary;
+            color: #A1A1AA;
             font-size: 12px;
             font-weight: 400;
             horizontal-alignment: right;
             vertical-alignment: center;
+            overflow: elide;
+        }
+
+        // 4. Fixed selection column: 20 px on right, single checkmark only on active item
+        Rectangle {
+            width: 20px;
+            height: 20px;
+            y: (parent.height - self.height) / 2;
+            if root.option.is-selected : Image {
+                source: @image-url("../../../assets/icons/check.svg");
+                width: 14px;
+                height: 14px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                image-fit: contain;
+                colorize: HubTheme.accent;
+            }
         }
     }
 }
@@ -1388,7 +1423,7 @@ component CatalogGridCard inherits Rectangle {
     preferred-width: root.card-width;
     height: root.card.provider == "performer" ? (root.card-width * 1.35 + 58px) :
             (root.card.provider == "studio" ? 72px :
-            ((root.card.provider == "genre" || root.card.provider == "category") ? (min(120px, root.card-width * 0.45) + 56px) :
+            ((root.card.provider == "genre" || root.card.provider == "category") ? 56px :
             (root.card-width * 0.5625 + 70px)));
 
     if root.card.provider == "performer" : PerformerCard {
@@ -2102,15 +2137,15 @@ export component MainWindow inherits Window {
     in property <length> desired-catalog-card-width: HubGrid.zoomed-card-width(
         root.catalog-content-width,
         root.card-zoom,
-        root.active-category == "Performers" ? HubGrid.performer-min-card(1.0) : (root.active-category == "Studios" ? 220px : HubGrid.video-min-card(1.0)),
-        root.active-category == "Performers" ? 150px : (root.active-category == "Studios" ? 200px : 160px));
+        root.active-category == "Performers" ? HubGrid.performer-min-card(1.0) : ((root.active-category == "Studios" || root.active-category == "Categories") ? 220px : HubGrid.video-min-card(1.0)),
+        root.active-category == "Performers" ? 150px : ((root.active-category == "Studios" || root.active-category == "Categories") ? 180px : 160px));
     in property <length> desired-channel-card-width: HubGrid.zoomed-card-width(
         root.channel-content-width, root.card-zoom, HubGrid.video-min-card(1.0), 160px);
     in property <int> desired-catalog-columns: HubGrid.zoomed-columns(
         root.catalog-content-width,
         root.card-zoom,
-        root.active-category == "Performers" ? HubGrid.performer-min-card(1.0) : (root.active-category == "Studios" ? 220px : HubGrid.video-min-card(1.0)),
-        root.active-category == "Performers" ? 150px : (root.active-category == "Studios" ? 200px : 160px));
+        root.active-category == "Performers" ? HubGrid.performer-min-card(1.0) : ((root.active-category == "Studios" || root.active-category == "Categories") ? 220px : HubGrid.video-min-card(1.0)),
+        root.active-category == "Performers" ? 150px : ((root.active-category == "Studios" || root.active-category == "Categories") ? 180px : 160px));
     in property <int> desired-channel-columns: HubGrid.zoomed-columns(
         root.channel-content-width, root.card-zoom, HubGrid.video-min-card(1.0), 160px);
 
@@ -3187,11 +3222,6 @@ export component MainWindow inherits Window {
                             tooltip-text: root.catalog-filters-expanded ? "Hide filters" : (root.catalog-active-filter-count > 0 ? ("Filters (" + root.catalog-active-filter-count + ")") : "Filters");
                             clicked => { root.catalog-filters-expanded = !root.catalog-filters-expanded; }
                         }
-                        if !root.is-catalog-search-results && root.active-category != "Performers" && root.active-category != "Categories" : TvSecondaryButton {
-                            text: "Sort: " + root.catalog-sort-label;
-                            custom-height: 40px;
-                            clicked => { root.update-catalog-filter("sort"); }
-                        }
                         if root.search-query != "" : TvSecondaryButton {
                             text: "Clear query";
                             custom-height: 40px;
@@ -3501,32 +3531,37 @@ export component MainWindow inherits Window {
                         }
 
                         if root.catalog-unwatched-only : TvChoiceChip {
-                            text: "Unwatched ✕";
+                            text: "Unwatched";
                             selected: true;
+                            removable: true;
                             clicked => { root.update-catalog-filter("unwatched"); }
                         }
 
                         if root.catalog-favorites-only && root.active-category != "Favorites" : TvChoiceChip {
-                            text: "Favorites ✕";
+                            text: "Favorites";
                             selected: true;
+                            removable: true;
                             clicked => { root.update-catalog-filter("favorites"); }
                         }
 
                         if root.catalog-hd-only : TvChoiceChip {
-                            text: "HD ✕";
+                            text: "HD";
                             selected: true;
+                            removable: true;
                             clicked => { root.update-catalog-filter("hd"); }
                         }
 
                         if root.catalog-duration-label != "Any length" : TvChoiceChip {
-                            text: "Length: " + root.catalog-duration-label + " ✕";
+                            text: "Length: " + root.catalog-duration-label;
                             selected: true;
+                            removable: true;
                             clicked => { root.update-catalog-filter("duration"); }
                         }
 
                         if root.catalog-genre-query != "" : TvChoiceChip {
-                            text: "Genre: " + root.catalog-genre-query + " ✕";
+                            text: "Genre: " + root.catalog-genre-query;
                             selected: true;
+                            removable: true;
                             clicked => {
                                 root.catalog-genre-query = "";
                                 root.set-catalog-text-filter("genre", "");
@@ -3534,8 +3569,9 @@ export component MainWindow inherits Window {
                         }
 
                         if root.catalog-studio-query != "" : TvChoiceChip {
-                            text: "Studio: " + root.catalog-studio-query + " ✕";
+                            text: "Studio: " + root.catalog-studio-query;
                             selected: true;
+                            removable: true;
                             clicked => {
                                 root.catalog-studio-query = "";
                                 root.set-catalog-text-filter("studio", "");
@@ -3543,8 +3579,9 @@ export component MainWindow inherits Window {
                         }
 
                         if root.catalog-performer-query != "" : TvChoiceChip {
-                            text: "Performer: " + root.catalog-performer-query + " ✕";
+                            text: "Performer: " + root.catalog-performer-query;
                             selected: true;
+                            removable: true;
                             clicked => {
                                 root.catalog-performer-query = "";
                                 root.set-catalog-text-filter("performer", "");
@@ -6410,12 +6447,12 @@ export component MainWindow inherits Window {
                 if root.player-quality-panel-open && root.player-has-quality-alternatives : Rectangle {
                     property <length> anchor-btn-y: bottom-panel.y + controls-row.y + quality-btn.y;
                     property <length> anchor-bottom: min(bottom-panel.y - 8px, anchor-btn-y - 10px);
-                    property <length> header-chrome-height: 65px;
+                    property <length> header-chrome-height: 52px;
                     property <length> item-height: 44px;
-                    property <length> item-gap: 4px;
+                    property <length> item-gap: 2px;
                     property <length> list-desired-height: root.player-quality-options.length * item-height + max(0, root.player-quality-options.length - 1) * item-gap;
                     property <length> max-available-panel-height: max(160px, anchor-bottom - 16px);
-                    property <length> max-list-height: min(340px, max-available-panel-height - header-chrome-height);
+                    property <length> max-list-height: min(360px, max-available-panel-height - header-chrome-height);
                     property <length> list-view-height: min(list-desired-height, max-list-height);
 
                     width: min(320px, parent.width - 32px);
@@ -6423,11 +6460,11 @@ export component MainWindow inherits Window {
                     x: max(16px, min(parent.width - self.width - 16px, 24px + quality-btn.x + (quality-btn.width - self.width) / 2));
                     y: max(16px, anchor-bottom - self.height);
                     border-radius: 12px;
-                    background: #121319FA;
+                    background: #18181BF8;
                     border-width: 1px;
-                    border-color: #FFFFFF22;
-                    drop-shadow-blur: 16px;
-                    drop-shadow-color: #00000088;
+                    border-color: #FFFFFF14;
+                    drop-shadow-blur: 12px;
+                    drop-shadow-color: #00000066;
                     clip: true;
                     z: 75;
 
@@ -6442,45 +6479,25 @@ export component MainWindow inherits Window {
                     }
 
                     VerticalLayout {
-                        padding-left: 14px;
-                        padding-right: 14px;
-                        padding-top: 12px;
-                        padding-bottom: 12px;
-                        spacing: 8px;
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        padding-top: 8px;
+                        padding-bottom: 8px;
+                        spacing: 0px;
 
-                        // Header with Title and Close button
+                        // Header (36px high, 12px horizontal padding, 14px semibold #F4F4F5, no close button)
                         HorizontalLayout {
-                            height: 24px;
-                            alignment: space-between;
+                            height: 36px;
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            alignment: start;
                             Text {
                                 text: "Quality";
                                 font-size: 14px;
                                 font-weight: 600;
-                                color: HubTheme.text-primary;
+                                color: #F4F4F5;
                                 vertical-alignment: center;
                             }
-                            Rectangle {
-                                width: 24px;
-                                height: 24px;
-                                border-radius: 12px;
-                                background: ql-close-touch.has-hover ? #FFFFFF22 : transparent;
-                                Image {
-                                    source: @image-url("../../../assets/icons/close.svg");
-                                    width: 14px;
-                                    height: 14px;
-                                    x: (parent.width - self.width) / 2;
-                                    y: (parent.height - self.height) / 2;
-                                    image-fit: contain;
-                                }
-                                ql-close-touch := TouchArea {
-                                    clicked => { root.player-quality-panel-open = false; }
-                                }
-                            }
-                        }
-
-                        Rectangle {
-                            height: 1px;
-                            background: #FFFFFF15;
                         }
 
                         ScrollView {
@@ -6917,7 +6934,9 @@ export component MainWindow inherits Window {
                             clip: true;
 
                             details-header := HorizontalLayout {
-                                padding: root.compact-layout ? HubTheme.space-4 : HubTheme.space-6;
+                                padding: (root.detail-has-backdrop || root.detail-has-thumbnail)
+                                    ? (root.compact-layout ? HubTheme.space-4 : HubTheme.space-6)
+                                    : (root.compact-layout ? HubTheme.space-3 : HubTheme.space-4);
                                 spacing: root.compact-layout ? HubTheme.space-4 : HubTheme.space-6;
                                 alignment: start;
 
@@ -6960,8 +6979,6 @@ export component MainWindow inherits Window {
                                         font-size: root.compact-layout ? 20px : 24px;
                                         font-weight: 800;
                                         wrap: word-wrap;
-                                        overflow: elide;
-                                        max-lines: 3;
                                         vertical-alignment: top;
                                     }
 
@@ -7364,12 +7381,15 @@ export component MainWindow inherits Window {
                                             font-weight: 700;
                                             vertical-alignment: center;
                                         }
-                                        Text {
-                                            text: root.detail-tech-expanded ? "▾" : "▸";
-                                            color: HubTheme.text-muted;
-                                            font-size: 13px;
-                                            font-weight: 700;
+                                        Image {
+                                            source: root.detail-tech-expanded
+                                                ? @image-url("../../../assets/icons/chevron-down.svg")
+                                                : @image-url("../../../assets/icons/chevron-right.svg");
+                                            width: 14px;
+                                            height: 14px;
+                                            colorize: HubTheme.text-muted;
                                             vertical-alignment: center;
+                                            image-fit: contain;
                                         }
                                     }
 

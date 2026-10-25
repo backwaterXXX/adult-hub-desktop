@@ -999,6 +999,19 @@ pub fn pick_config_file() -> Option<String> {
     }
 }
 
+pub fn normalize_codec_name(raw: &str) -> String {
+    let lower = raw.trim().to_lowercase();
+    match lower.as_str() {
+        "h264" | "avc" | "avc1" | "x264" | "h.264" => "H.264".to_string(),
+        "hevc" | "h265" | "x265" | "hev1" | "hvc1" | "h.265" => "HEVC".to_string(),
+        "av1" | "av01" => "AV1".to_string(),
+        "vp9" | "vp09" => "VP9".to_string(),
+        "vp8" => "VP8".to_string(),
+        "" => String::new(),
+        other => other.to_uppercase(),
+    }
+}
+
 pub fn format_variant_options(
     variants: &[adult_hub_client::VideoVariantDto],
     active_id: &str,
@@ -1015,7 +1028,7 @@ pub fn format_variant_options(
             let has_duplicate = height_counts.get(&v.height).copied().unwrap_or(0) > 1;
             let label = v.display_label(has_duplicate);
             let res = v.resolution_label();
-            let details = v.codec.as_deref().unwrap_or("").to_uppercase();
+            let codec_norm = v.codec.as_deref().map(normalize_codec_name).unwrap_or_default();
             let size_text = v
                 .file_size
                 .map(adult_hub_client::format_media_size)
@@ -1026,8 +1039,8 @@ pub fn format_variant_options(
                 id: v.id.clone().into(),
                 label: label.into(),
                 resolution: res.into(),
-                details: details.clone().into(),
-                codec: details.into(),
+                details: codec_norm.clone().into(),
+                codec: codec_norm.into(),
                 size_text: size_text.into(),
                 is_original: v.is_original,
                 is_selected,
@@ -1275,10 +1288,24 @@ mod tests {
         // Original 1080p with duplicate resolution must mention H264 and size
         assert!(opts[0].label.contains("Original"));
         assert!(opts[0].label.contains("H264"));
+        assert_eq!(opts[0].codec, "H.264");
         assert!(opts[0].is_selected);
 
         // Alt 1080p must mention HEVC
         assert!(opts[1].label.contains("HEVC"));
+        assert_eq!(opts[1].codec, "HEVC");
         assert!(!opts[1].is_selected);
+    }
+
+    #[test]
+    fn test_normalize_codec_name() {
+        assert_eq!(normalize_codec_name("h264"), "H.264");
+        assert_eq!(normalize_codec_name("avc1"), "H.264");
+        assert_eq!(normalize_codec_name("hevc"), "HEVC");
+        assert_eq!(normalize_codec_name("h265"), "HEVC");
+        assert_eq!(normalize_codec_name("av1"), "AV1");
+        assert_eq!(normalize_codec_name("av01"), "AV1");
+        assert_eq!(normalize_codec_name("vp9"), "VP9");
+        assert_eq!(normalize_codec_name(""), "");
     }
 }

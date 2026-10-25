@@ -1128,7 +1128,7 @@ pub fn tv_item_to_card(item: &TvItem) -> VideoCardData {
         studio: if item
             .genres
             .iter()
-            .any(|tag| tag == "__adult_hub_performer" || tag == "__adult_hub_studio")
+            .any(|tag| tag == "__adult_hub_performer" || tag == "__adult_hub_studio" || tag == "__adult_hub_genre")
         {
             item.child_count
                 .filter(|count| *count > 0)

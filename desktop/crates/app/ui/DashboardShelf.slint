@@ -234,62 +234,53 @@ export component CategoryCard inherits Rectangle {
     accessible-action-default => { root.clicked(); }
 
     in property <length> card-width: 240px;
-    property <length> artwork-height: min(120px, root.card-width * 0.45);
 
     width: root.card-width;
     preferred-width: root.card-width;
-    height: root.artwork-height + 56px;
-    border-radius: HubTheme.card-radius;
-    background: touch.has-hover ? HubTheme.surface-hover : ((root.is-focused || root.has-focus) ? #FFFFFF08 : HubTheme.surface);
+    height: 56px;
+    border-radius: 10px;
+    background: touch.pressed
+        ? #222530
+        : (touch.has-hover
+            ? HubTheme.surface-hover
+            : ((root.is-focused || root.has-focus) ? #FFFFFF0E : HubTheme.surface));
     border-width: (root.is-focused || root.has-focus) ? 2px : (touch.has-hover ? 1px : 0px);
     border-color: (root.is-focused || root.has-focus) ? HubTheme.focus-ring : HubTheme.separator;
     clip: true;
 
-    VerticalLayout {
-        spacing: 0px;
+    animate background { duration: 120ms; }
+    animate border-color { duration: 120ms; }
 
-        Rectangle {
-            height: root.artwork-height;
-            background: @linear-gradient(135deg, #241628 0%, #14131b 100%);
-            clip: true;
-
-            Image {
-                source: @image-url("../../../assets/icons/channels.svg");
-                width: 32px;
-                height: 32px;
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-                image-fit: contain;
-                opacity: 0.4;
-            }
-        }
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: 8px;
+        alignment: start;
 
         VerticalLayout {
-            height: 56px;
-            padding-left: 12px;
-            padding-right: 12px;
-            padding-top: 6px;
-            padding-bottom: 6px;
-            spacing: 2px;
             alignment: center;
+            spacing: 2px;
+            horizontal-stretch: 1;
 
             Text {
                 text: root.item.title;
-                color: HubTheme.text-primary;
-                font-size: HubTheme.card-title-size;
+                color: (touch.has-hover || root.is-focused || root.has-focus) ? #FFFFFF : HubTheme.text-primary;
+                font-size: 14px;
                 font-weight: 600;
                 horizontal-alignment: left;
                 vertical-alignment: center;
                 overflow: elide;
-                width: 100%;
+                wrap: word-wrap;
+                max-lines: 2;
             }
 
-            Text {
-                text: "Category";
+            if root.item.studio != "" : Text {
+                text: root.item.studio;
                 color: HubTheme.text-muted;
                 font-size: 11px;
                 horizontal-alignment: left;
                 vertical-alignment: center;
+                overflow: elide;
             }
         }
     }

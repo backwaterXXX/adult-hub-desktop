@@ -579,6 +579,13 @@ export component SettingsView inherits Rectangle {
         if (state == "not-configured") { return "Not configured"; }
         return "Not checked";
     }
+    pure function formatCheckStatus(state: string, detail: string) -> string {
+        let lbl = checkLabel(state);
+        if (state == "not-checked" || detail == "" || detail == lbl || detail == "Not checked" || detail == "Artwork not checked") {
+            return lbl;
+        }
+        return lbl + " — " + detail;
+    }
 
     // The four checks the diagnostics section reports, in display order.
     property <[{ label: string, state: string, detail: string }]> connection-checks: [
@@ -1885,7 +1892,7 @@ export component SettingsView inherits Rectangle {
                                             }
 
                                             Text {
-                                                text: checkLabel(root.resolver-connection-state) + (root.resolver-connection-status != "" && root.resolver-connection-status != "Not checked" ? " — " + root.resolver-connection-status : "");
+                                                text: formatCheckStatus(root.resolver-connection-state, root.resolver-connection-status);
                                                 color: checkColor(root.resolver-connection-state);
                                                 font-size: HubTheme.metadata-size;
                                                 vertical-alignment: center;
@@ -1992,7 +1999,7 @@ export component SettingsView inherits Rectangle {
                                             }
 
                                             Text {
-                                                text: checkLabel(check.state) + (check.detail != "" ? " — " + check.detail : "");
+                                                text: formatCheckStatus(check.state, check.detail);
                                                 color: checkColor(check.state);
                                                 font-size: 12px;
                                                 vertical-alignment: center;

@@ -3329,6 +3329,13 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             let Some(ui) = weak.upgrade() else { return };
             if cat != "Latest" {
                 ui.set_catalog_category_drilldown(false);
+            } else if !ui.get_catalog_category_drilldown() {
+                ui.set_catalog_genre_query("".into());
+                if let Ok(mut map) = catalog_filters.lock() {
+                    if let Some(f) = map.get_mut("Latest") {
+                        f.genre.clear();
+                    }
+                }
             }
             save_catalog_view(&ui, &catalog_paging, &cached_catalog, &catalog_views);
             performer_search_generation.fetch_add(1, Ordering::SeqCst);
