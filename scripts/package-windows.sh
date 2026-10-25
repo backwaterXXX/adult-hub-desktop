@@ -17,7 +17,21 @@ if [[ "${SKIP_VERSION_BUMP:-0}" != "1" && "${CI:-false}" != "true" && "${GITHUB_
 fi
 
 VERSION=$(grep -m 1 '^version = ' "${ROOT_DIR}/desktop/Cargo.toml" | sed -E 's/version = "([^"]+)"/\1/')
-export ADULT_HUB_COMMIT_HASH="$(git rev-parse --short=8 HEAD 2>/dev/null || echo "unknown")"
+COMMIT_HASH="$(git rev-parse --short=8 HEAD 2>/dev/null || true)"
+if [[ -z "${COMMIT_HASH}" || "${COMMIT_HASH}" == "unknown" ]]; then
+    if [[ -f "${ROOT_DIR}/.git/HEAD" ]]; then
+        head_ref=$(cat "${ROOT_DIR}/.git/HEAD")
+        if [[ "${head_ref}" =~ ^ref:\ (.*) ]]; then
+            ref_file="${ROOT_DIR}/.git/${BASH_REMATCH[1]}"
+            if [[ -f "${ref_file}" ]]; then
+                COMMIT_HASH=$(cut -c1-8 "${ref_file}")
+            fi
+        else
+            COMMIT_HASH=$(echo "${head_ref}" | cut -c1-8)
+        fi
+    fi
+fi
+export ADULT_HUB_COMMIT_HASH="${COMMIT_HASH:-}"
 export ADULT_HUB_BUILD_DATE="$(date -u +%Y-%m-%d)"
 
 echo "==> Preparing Windows build for Adult Hub Desktop v${VERSION} (${ADULT_HUB_COMMIT_HASH}, ${ADULT_HUB_BUILD_DATE})..."

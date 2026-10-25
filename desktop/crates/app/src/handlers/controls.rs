@@ -27,12 +27,237 @@ struct SeekRepeatState {
     last_seek_at: Option<Instant>,
 }
 
+pub fn apply_and_persist_buffer_profile(
+    ui: &MainWindow,
+    player: Option<&adult_hub_player::Player>,
+    local_store: &adult_hub_storage::LocalStore,
+    profile: BufferProfile,
+) -> Result<(), String> {
+    if let Some(player) = player {
+        if let Err(e) = player.set_buffer_profile(profile) {
+            return Err(format!("Failed to apply buffer profile: {e}"));
+        }
+    }
+    if let Err(e) = local_store.set_setting("buffer_profile", profile.id()) {
+        crate::diagnostics::GLOBAL_LOG.w("Settings", &format!("Could not persist buffer profile: {e}"));
+    }
+    ui.set_buffer_profile(profile.id().into());
+    ui.set_buffer_profile_label(format!("Buffer: {}", profile.name()).into());
+    ui.set_buffer_profile_description(profile.description().into());
+    crate::diagnostics::GLOBAL_LOG.i(
+        "Player",
+        &format!(
+            "Buffer profile active: {} (max_bytes={}, back_bytes={}, readahead={}s, wait={}s)",
+            profile.name(),
+            profile.demuxer_max_bytes(),
+            profile.demuxer_max_back_bytes(),
+            profile.demuxer_readahead_secs(),
+            profile.cache_pause_wait()
+        ),
+    );
+    Ok(())
+}
+
+pub fn select_random_candidate(
+    ctx: &AppContext,
+    current_id: Option<&str>,
+) -> Option<TvItem> {
+    let session = ctx.credential_store.get().ok().flatten();
+    let chosen_item: Option<TvItem> = if let Some(session) = &session {
+        let parent_id = ctx
+            .local_store
+            .get_setting("selected_library_id")
+            .ok()
+            .flatten();
+        let page_res = ctx.jellyfin.get_items(
+            &session.server_url,
+            &session.user_id,
+            &session.access_token,
+            &GetItemsQuery {
+                parent_id: parent_id.as_deref(),
+                limit: 50,
+                sort_by: "Random",
+                ..Default::default()
+            },
+        );
+        match page_res {
+            Ok(page) => {
+                let total = page.total_record_count;
+                let items = if total > 50 && fastrand::bool() {
+                    let random_offset = fastrand::usize(0..total.saturating_sub(49));
+                    ctx.jellyfin
+                        .get_items(
+                            &session.server_url,
+                            &session.user_id,
+                            &session.access_token,
+                            &GetItemsQuery {
+                                parent_id: parent_id.as_deref(),
+                                start_index: random_offset,
+                                limit: 50,
+                                sort_by: "Random",
+                                ..Default::default()
+                            },
+                        )
+                        .map(|p| p.items)
+                        .unwrap_or(page.items)
+                } else {
+                    page.items
+                };
+                let filtered = filter_catalog_items(items, &ctx.local_store);
+                ctx.shuffle_engine
+                    .select_candidate(&filtered, current_id)
+            }
+            Err(err) => {
+                crate::diagnostics::GLOBAL_LOG
+                    .w("Shuffle", &format!("Jellyfin random query failed: {err}"));
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    chosen_item.or_else(|| {
+        let catalog = ctx.cached_catalog.lock().unwrap().clone();
+        let filtered = filter_catalog_items(catalog, &ctx.local_store);
+        ctx.shuffle_engine
+            .select_candidate(&filtered, current_id)
+    })
+}
+
+pub fn trigger_movie_switch(ui: &MainWindow, ctx: &AppContext, is_random: bool) {
+    if ui.get_is_switching_movie() {
+        crate::log_debug("movie_switch: ignoring duplicate switch request while in progress");
+        return;
+    }
+
+    // 1. Invalidate previous in-flight requests immediately
+    let request_id = ctx.session_ctrl.next_request_id();
+
+    // 2. Checkpoint outgoing item's progress BEFORE touching playback state
+    let pos = ctx.player.as_ref().and_then(|p| p.position()).unwrap_or(0.0).max(0.0);
+    let dur = ctx.player.as_ref().and_then(|p| p.duration()).unwrap_or(0.0).max(0.0);
+    let pos_ms = (pos * 1000.0) as u64;
+    let dur_ms = (dur * 1000.0) as u64;
+
+    let outgoing = ctx.current_playing_item.lock().unwrap().take();
+    if let Some(prev) = outgoing.as_ref() {
+        if pos_ms >= 5000 {
+            ctx.session_ctrl.checkpoint_progress(prev, pos_ms, dur_ms, false);
+        }
+        ctx.reporter.stop_session(pos_ms);
+    }
+
+    // 3. Pause active audio/video without stopping mpv pipeline or discarding buffer in background
+    if let Some(player) = &ctx.player {
+        let _ = player.set_pause(true);
+    }
+
+    // 3. Immediately transition UI into resolving/loading state on the player screen
+    ui.set_is_switching_movie(true);
+    ui.set_movie_switch_message("Loading next movie…".into());
+    ui.set_has_active_media(true);
+    ui.set_playing(true);
+    ui.set_player_media_loaded(false);
+    ui.set_player_state("resolving".into());
+    ui.set_player_loading_message("Selecting next video…".into());
+    ui.set_player_title("".into());
+    ui.set_player_subtitle("".into());
+    ui.set_player_error_message(String::new().into());
+    ui.set_toast_visible(false);
+    ui.set_player_controls_visible(true);
+    ui.set_player_more_controls_visible(false);
+    ui.set_player_has_quality_alternatives(false);
+    ui.set_player_quality_panel_open(false);
+    ui.set_player_quality_subpage_open(false);
+    ui.set_player_selected_quality_id("original".into());
+    ui.set_player_selected_quality_label("Original".into());
+    ui.set_player_quality_options(slint::ModelRc::default());
+    *ctx.active_quality_id.lock().unwrap() = "original".to_string();
+    *ctx.current_video_variants.lock().unwrap() = Vec::new();
+    if let Some(player) = &ctx.player {
+        player.set_quality_variant(None);
+    }
+    ui.set_playback_ended_visible(false);
+    ui.set_autoplay_countdown_sec(0);
+    if ui.get_active_screen() != "player" {
+        ctx.push_nav_destination(
+            crate::handlers::browsing::current_nav_destination(ui, ctx),
+        );
+    }
+    ui.set_active_screen("player".into());
+    ui.set_status(if is_random {
+        "Selecting a random title…".into()
+    } else {
+        "Loading next movie…".into()
+    });
+    ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
+
+    let weak = ui.as_weak();
+    let ctx_worker = ctx.clone();
+    let current_id = outgoing.as_ref().map(|item| item.id.clone());
+
+    std::thread::spawn(move || {
+        let final_item = if is_random {
+            select_random_candidate(&ctx_worker, current_id.as_deref())
+        } else {
+            let next_opt = ctx_worker.get_next_contextual_item(current_id.as_deref());
+            if next_opt.is_some() {
+                next_opt
+            } else {
+                select_random_candidate(&ctx_worker, current_id.as_deref())
+            }
+        };
+
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            // If request_id is stale (e.g. user navigated back or initiated another switch), drop it
+            if !ctx_worker.session_ctrl.is_request_current(request_id) {
+                return;
+            }
+
+            match final_item {
+                Some(target) => {
+                    if ctx_worker
+                        .active_playback_context
+                        .lock()
+                        .unwrap()
+                        .is_empty()
+                    {
+                        ctx_worker.set_playback_context(
+                            ctx_worker.cached_catalog.lock().unwrap().clone(),
+                        );
+                    }
+                    ui.set_status(format!("Playing {}", target.title).into());
+                    crate::playback::start_item_playback_with_resume_ctx(
+                        &ui,
+                        &ctx_worker,
+                        target,
+                        Some(false),
+                    );
+                }
+                None => {
+                    ui.set_is_switching_movie(false);
+                    ui.set_player_state("failed".into());
+                    let msg = if is_random {
+                        "No random titles are available in this library"
+                    } else {
+                        "No next titles are available"
+                    };
+                    ui.set_player_error_message(msg.into());
+                    ui.set_status(msg.into());
+                    ui.set_status_color(slint::Color::from_rgb_u8(244, 177, 66));
+                }
+            }
+        });
+    });
+}
+
 pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
     let player = ctx.player.clone();
     let autoplay_active = ctx.autoplay_active.clone();
     let hwdec_active = ctx.hwdec_active.clone();
     let reporter = ctx.reporter.clone();
-    let session_ctrl = ctx.session_ctrl.clone();
     let current_item = ctx.current_playing_item.clone();
     let local_store = ctx.local_store.clone();
     let seek_repeat_state = Arc::new(Mutex::new(SeekRepeatState::default()));
@@ -435,29 +660,36 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
     {
         let weak = ui.as_weak();
         let player = player.clone();
-        const PROFILES: [BufferProfile; 4] = [
-            BufferProfile::Standard,
-            BufferProfile::FastStart,
-            BufferProfile::Large,
-            BufferProfile::LowMemory,
-        ];
-        let prof_idx = Rc::new(Cell::new(0usize));
+        let local_store = local_store.clone();
+        ui.on_select_buffer_profile(move |id| {
+            let Some(ui) = weak.upgrade() else { return };
+            let Some(profile) = BufferProfile::from_id(&id) else {
+                show_error(&ui, format!("Unknown buffer profile: {id}"));
+                return;
+            };
+            if let Err(err) = apply_and_persist_buffer_profile(&ui, player.as_deref(), &local_store, profile) {
+                show_error(&ui, err);
+            }
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let player = player.clone();
+        let local_store = local_store.clone();
         ui.on_cycle_buffer_profile(move || {
             let Some(ui) = weak.upgrade() else { return };
-            let Some(player) = &player else { return };
-            let next = (prof_idx.get() + 1) % PROFILES.len();
-            prof_idx.set(next);
-            let profile = PROFILES[next];
-            if let Err(error) = player.set_buffer_profile(profile) {
-                show_error(&ui, error.to_string());
-            } else {
-                let name = match profile {
-                    adult_hub_player::BufferProfile::FastStart => "Fast Start",
-                    adult_hub_player::BufferProfile::Standard => "Standard",
-                    adult_hub_player::BufferProfile::Large => "Large",
-                    adult_hub_player::BufferProfile::LowMemory => "Low RAM",
-                };
-                ui.set_buffer_profile_label(format!("Buffer: {name}").into());
+            let current = player
+                .as_ref()
+                .map(|p| p.buffer_profile())
+                .unwrap_or(BufferProfile::Standard);
+            let current_idx = BufferProfile::ALL
+                .iter()
+                .position(|p| *p == current)
+                .unwrap_or(0);
+            let next_profile = BufferProfile::ALL[(current_idx + 1) % BufferProfile::ALL.len()];
+            if let Err(err) = apply_and_persist_buffer_profile(&ui, player.as_deref(), &local_store, next_profile) {
+                show_error(&ui, err);
             }
         });
     }
@@ -506,163 +738,19 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
 
     {
         let weak = ui.as_weak();
-        let player = player.clone();
-        let reporter = reporter.clone();
-        let session_ctrl = session_ctrl.clone();
-        let current_item = current_item.clone();
-        let ctx_shuffle = ctx.clone();
+        let ctx_clone = ctx.clone();
         ui.on_play_random(move || {
             let Some(ui) = weak.upgrade() else { return };
-            let Some(player) = &player else { return };
+            trigger_movie_switch(&ui, &ctx_clone, true);
+        });
+    }
 
-            // 1. Invalidate previous in-flight requests immediately
-            let request_id = session_ctrl.next_request_id();
-
-            // 2. Immediately stop previous playback (audio AND video)
-            let _ = player.stop();
-
-            // Checkpoint outgoing item and stop reporter session
-            let outgoing = current_item.lock().unwrap().take();
-            if let Some(prev) = outgoing.as_ref() {
-                let pos = (player.position().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
-                let dur = (player.duration().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
-                if pos >= 5000 {
-                    session_ctrl.checkpoint_progress(prev, pos, dur, false);
-                }
-                reporter.stop_session(pos);
-            }
-
-            // 3. Immediately transition UI into resolving/loading state on the player screen
-            ui.set_has_active_media(true);
-            ui.set_playing(true);
-            ui.set_player_media_loaded(false);
-            ui.set_player_state("resolving".into());
-            ui.set_player_loading_message("Selecting next video…".into());
-            ui.set_player_title("".into());
-            ui.set_player_subtitle("".into());
-            ui.set_player_error_message(String::new().into());
-            ui.set_toast_visible(false);
-            ui.set_player_controls_visible(true);
-            ui.set_player_more_controls_visible(false);
-            ui.set_playback_ended_visible(false);
-            ui.set_autoplay_countdown_sec(0);
-            if ui.get_active_screen() != "player" {
-                ctx_shuffle.push_nav_destination(
-                    crate::handlers::browsing::current_nav_destination(&ui, &ctx_shuffle),
-                );
-            }
-            ui.set_active_screen("player".into());
-            ui.set_status("Selecting a random title…".into());
-            ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
-
-            let weak = weak.clone();
-            let ctx_worker = ctx_shuffle.clone();
-            let current_id = outgoing.as_ref().map(|item| item.id.clone());
-
-            std::thread::spawn(move || {
-                let session = ctx_worker.credential_store.get().ok().flatten();
-                let chosen_item: Option<TvItem> = if let Some(session) = &session {
-                    let parent_id = ctx_worker
-                        .local_store
-                        .get_setting("selected_library_id")
-                        .ok()
-                        .flatten();
-                    let page_res = ctx_worker.jellyfin.get_items(
-                        &session.server_url,
-                        &session.user_id,
-                        &session.access_token,
-                        &GetItemsQuery {
-                            parent_id: parent_id.as_deref(),
-                            limit: 50,
-                            sort_by: "Random",
-                            ..Default::default()
-                        },
-                    );
-                    match page_res {
-                        Ok(page) => {
-                            let total = page.total_record_count;
-                            let items = if total > 50 && fastrand::bool() {
-                                let random_offset = fastrand::usize(0..total.saturating_sub(49));
-                                ctx_worker
-                                    .jellyfin
-                                    .get_items(
-                                        &session.server_url,
-                                        &session.user_id,
-                                        &session.access_token,
-                                        &GetItemsQuery {
-                                            parent_id: parent_id.as_deref(),
-                                            start_index: random_offset,
-                                            limit: 50,
-                                            sort_by: "Random",
-                                            ..Default::default()
-                                        },
-                                    )
-                                    .map(|p| p.items)
-                                    .unwrap_or(page.items)
-                            } else {
-                                page.items
-                            };
-                            let filtered = filter_catalog_items(items, &ctx_worker.local_store);
-                            ctx_worker
-                                .shuffle_engine
-                                .select_candidate(&filtered, current_id.as_deref())
-                        }
-                        Err(err) => {
-                            crate::diagnostics::GLOBAL_LOG
-                                .w("Shuffle", &format!("Jellyfin random query failed: {err}"));
-                            None
-                        }
-                    }
-                } else {
-                    None
-                };
-
-                let final_item = chosen_item.or_else(|| {
-                    let catalog = ctx_worker.cached_catalog.lock().unwrap().clone();
-                    let filtered = filter_catalog_items(catalog, &ctx_worker.local_store);
-                    ctx_worker
-                        .shuffle_engine
-                        .select_candidate(&filtered, current_id.as_deref())
-                });
-
-                let _ = slint::invoke_from_event_loop(move || {
-                    let Some(ui) = weak.upgrade() else { return };
-                    // If request_id is stale (e.g. user clicked Shuffle again or navigated back), drop it
-                    if !ctx_worker.session_ctrl.is_request_current(request_id) {
-                        return;
-                    }
-
-                    match final_item {
-                        Some(target) => {
-                            if ctx_worker
-                                .active_playback_context
-                                .lock()
-                                .unwrap()
-                                .is_empty()
-                            {
-                                ctx_worker.set_playback_context(
-                                    ctx_worker.cached_catalog.lock().unwrap().clone(),
-                                );
-                            }
-                            ui.set_status(format!("Playing {}", target.title).into());
-                            crate::playback::start_item_playback_with_resume_ctx(
-                                &ui,
-                                &ctx_worker,
-                                target,
-                                Some(false),
-                            );
-                        }
-                        None => {
-                            ui.set_player_state("failed".into());
-                            ui.set_player_error_message(
-                                "No random titles are available in this library".into(),
-                            );
-                            ui.set_status("No random titles available".into());
-                            ui.set_status_color(slint::Color::from_rgb_u8(244, 177, 66));
-                        }
-                    }
-                });
-            });
+    {
+        let weak = ui.as_weak();
+        let ctx_clone = ctx.clone();
+        ui.on_play_next(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            trigger_movie_switch(&ui, &ctx_clone, false);
         });
     }
 
@@ -740,6 +828,17 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
                     Some(false),
                 );
             }
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        let ctx_quality = ctx.clone();
+        ui.on_select_quality(move |variant_id| {
+            let Some(ui) = weak.upgrade() else { return };
+            ui.set_player_quality_panel_open(false);
+            ui.set_player_quality_subpage_open(false);
+            crate::playback::switch_video_quality(&ui, &ctx_quality, variant_id.to_string());
         });
     }
 
@@ -908,6 +1007,7 @@ pub fn install_fullscreen(ui: &MainWindow) {
     let fullscreen = Rc::new(Cell::new(false));
     let was_maximized = Rc::new(Cell::new(false));
     let saved_normal_size = Rc::new(Cell::new((1180.0_f32, 760.0_f32)));
+    let saved_normal_phys = Rc::new(Cell::new(Option::<(u32, u32)>::None));
     let saved_normal_pos = Rc::new(Cell::new(Option::<(i32, i32)>::None));
     #[cfg(target_os = "windows")]
     let saved_win32_placement = Rc::new(Cell::new(Option::<windows_sys::Win32::UI::WindowsAndMessaging::WINDOWPLACEMENT>::None));
@@ -917,6 +1017,7 @@ pub fn install_fullscreen(ui: &MainWindow) {
         let fullscreen = fullscreen.clone();
         let was_maximized = was_maximized.clone();
         let saved_normal_size = saved_normal_size.clone();
+        let saved_normal_phys = saved_normal_phys.clone();
         let saved_normal_pos = saved_normal_pos.clone();
         #[cfg(target_os = "windows")]
         let saved_win32_placement = saved_win32_placement.clone();
@@ -931,6 +1032,12 @@ pub fn install_fullscreen(ui: &MainWindow) {
                 let is_max = ui.window().is_maximized();
                 was_maximized.set(is_max);
                 saved_normal_size.set((ui.get_window_target_width(), ui.get_window_target_height()));
+
+                let norm_phys = ui.window().with_winit_window(|w| {
+                    let s = w.inner_size();
+                    (s.width, s.height)
+                });
+                saved_normal_phys.set(norm_phys);
 
                 let pos = ui.window().with_winit_window(|w| {
                     w.outer_position().ok().map(|p| (p.x, p.y))
@@ -1040,6 +1147,7 @@ pub fn install_fullscreen(ui: &MainWindow) {
                         use windows_sys::Win32::UI::WindowsAndMessaging::{
                             GetWindowLongW, SetWindowLongW, SetWindowPlacement, SetWindowPos, GWL_STYLE,
                             SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER,
+                            SWP_SHOWWINDOW,
                             WS_OVERLAPPEDWINDOW,
                         };
                         use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -1051,18 +1159,37 @@ pub fn install_fullscreen(ui: &MainWindow) {
                                 unsafe {
                                     SetWindowLongW(hwnd, GWL_STYLE, (style | WS_OVERLAPPEDWINDOW) as i32);
                                 }
-                                if let Some(wp) = saved_win32_placement.take() {
+                                if let Some(mut wp) = saved_win32_placement.take() {
                                     unsafe {
-                                        SetWindowPlacement(hwnd, &wp);
-                                        SetWindowPos(
-                                            hwnd,
-                                            0 as _,
-                                            0,
-                                            0,
-                                            0,
-                                            0,
-                                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
-                                        );
+                                        if !was_maximized.get() {
+                                            wp.showCmd = windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL as u32;
+                                            SetWindowPlacement(hwnd, &wp);
+                                            let norm_w = (wp.rcNormalPosition.right - wp.rcNormalPosition.left).max(100);
+                                            let norm_h = (wp.rcNormalPosition.bottom - wp.rcNormalPosition.top).max(100);
+                                            let norm_x = wp.rcNormalPosition.left;
+                                            let norm_y = wp.rcNormalPosition.top;
+                                            SetWindowPos(
+                                                hwnd,
+                                                0 as _,
+                                                norm_x,
+                                                norm_y,
+                                                norm_w,
+                                                norm_h,
+                                                SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED | SWP_SHOWWINDOW,
+                                            );
+                                        } else {
+                                            wp.showCmd = windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWMAXIMIZED as u32;
+                                            SetWindowPlacement(hwnd, &wp);
+                                            SetWindowPos(
+                                                hwnd,
+                                                0 as _,
+                                                0,
+                                                0,
+                                                0,
+                                                0,
+                                                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -1078,7 +1205,11 @@ pub fn install_fullscreen(ui: &MainWindow) {
                         crate::log_debug(&format!("fullscreen: restoring previous normal rect: {w:.0}x{h:.0}"));
                         ui.set_window_target_width(w);
                         ui.set_window_target_height(h);
+                        if let Some((pw, ph)) = saved_normal_phys.get() {
+                            let _ = window.request_inner_size(winit::dpi::PhysicalSize::new(pw, ph));
+                        }
                         if let Some((x, y)) = saved_normal_pos.get() {
+                            let _ = window.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
                             ui.window().set_position(slint::WindowPosition::Physical(
                                 slint::PhysicalPosition::new(x, y),
                             ));
@@ -1127,6 +1258,19 @@ pub fn install_fullscreen(ui: &MainWindow) {
         let toggle = toggle_fullscreen.clone();
         ui.on_escape_pressed(move || {
             let Some(ui) = ui_weak.upgrade() else { return };
+            if ui.get_player_quality_panel_open() {
+                ui.set_player_quality_panel_open(false);
+                return;
+            }
+            if ui.get_player_quality_subpage_open() {
+                ui.set_player_quality_subpage_open(false);
+                return;
+            }
+            if ui.get_player_more_controls_visible() {
+                ui.set_player_more_controls_visible(false);
+                ui.set_player_quality_subpage_open(false);
+                return;
+            }
             if ui.get_player_volume_flyout_open() {
                 ui.set_player_volume_flyout_open(false);
                 return;

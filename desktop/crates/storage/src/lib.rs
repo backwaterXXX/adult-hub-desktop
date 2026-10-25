@@ -942,7 +942,7 @@ impl LocalStore {
             return Err(StorageError::Custom("seekStepSec must be positive".into()));
         }
         let profile = config.buffer_profile.as_str();
-        if profile != "fast_start" && profile != "standard" && profile != "large" {
+        if profile != "fast_start" && profile != "standard" && profile != "large" && profile != "low_memory" {
             return Err(StorageError::Custom(format!(
                 "Unsupported buffer profile: {}",
                 config.buffer_profile

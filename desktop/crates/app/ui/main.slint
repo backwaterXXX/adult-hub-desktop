@@ -35,6 +35,17 @@ export struct DownloadHistoryEntry {
     size-text: string,
 }
 
+export struct VideoQualityOption {
+    id: string,
+    label: string,
+    resolution: string,
+    details: string,
+    codec: string,
+    size-text: string,
+    is-original: bool,
+    is-selected: bool,
+}
+
 // Shared desktop palette. Detailed reusable theme controls live in theme.slint.
 
 // Single responsive grid rule used by the catalog shelves, the performer
@@ -1310,9 +1321,84 @@ component CatalogGridCard inherits Rectangle {
     }
 }
 
+component ChannelPickerTile inherits Rectangle {
+    in property <string> text;
+    in property <bool> active: false;
+    callback clicked();
+
+    border-radius: 10px;
+    background: touch.pressed ? #222530 : (touch.has-hover ? #252836 : #161822);
+    border-width: 1px;
+    border-color: touch.has-hover ? #BE185D88 : (root.active ? #BE185D : #FFFFFF12);
+    height: 56px;
+
+    animate background { duration: 120ms; }
+    animate border-color { duration: 120ms; }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        spacing: 12px;
+        alignment: start;
+
+        Rectangle {
+            width: 36px;
+            height: 36px;
+            border-radius: 8px;
+            background: touch.has-hover ? #BE185D22 : #FFFFFF0A;
+            y: (parent.height - self.height) / 2;
+
+            Image {
+                source: @image-url("../../../assets/icons/channels.svg");
+                width: 18px;
+                height: 18px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                image-fit: contain;
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            spacing: 2px;
+            horizontal-stretch: 1;
+
+            Text {
+                text: root.text;
+                color: root.active ? #ff5c91 : HubTheme.text-primary;
+                font-size: 14px;
+                font-weight: 600;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+
+            Text {
+                text: "Channel catalog";
+                color: HubTheme.text-muted;
+                font-size: 11px;
+                vertical-alignment: center;
+            }
+        }
+
+        Text {
+            text: "→";
+            color: touch.has-hover ? #BE185D : HubTheme.text-muted;
+            font-size: 16px;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+    }
+}
+
 export component MainWindow inherits Window {
+    in-out property <bool> app-ready: false;
     in-out property <string> app-version: "0.2.0";
     in-out property <string> app-version-details: "";
+    in-out property <string> build-id: "";
     title: "Adult Hub Desktop";
     icon: @image-url("../../../assets/adult-hub-desktop.png");
     in-out property <length> window-target-width: 1180px;
@@ -1353,6 +1439,21 @@ export component MainWindow inherits Window {
     in-out property <string> player-subtitle: "";
     in-out property <string> player-state: "idle"; // "idle", "resolving", "loading", "buffering", "playing", "paused", "failed"
     in-out property <string> player-loading-message: "";
+    in-out property <bool> is-switching-movie: false;
+    in-out property <string> movie-switch-message: "Loading next movie…";
+    in-out property <bool> is-changing-quality: false;
+    in-out property <bool> player-has-quality-alternatives: false;
+    in-out property <bool> player-is-telegram-stream: false;
+    in-out property <bool> player-quality-panel-open: false;
+    in-out property <bool> player-quality-subpage-open: false;
+    in-out property <string> player-selected-quality-id: "original";
+    in-out property <string> player-selected-quality-label: "Original";
+    in-out property <[VideoQualityOption]> player-quality-options: [];
+    property <bool> has-home-content: root.home-resume-items.length > 0
+        || root.home-history-items.length > 0
+        || root.home-latest-items.length > 0
+        || root.home-random-items.length > 0
+        || root.home-performer-items.length > 0;
     in-out property <bool> player-controls-visible: true;
     in-out property <bool> player-timeline-dragging: false;
     in-out property <bool> browse-nav-expanded: true;
@@ -1399,7 +1500,9 @@ export component MainWindow inherits Window {
 
     // Stage 3 Player Features state
     in-out property <string> speed-label: "1.0x";
+    in-out property <string> buffer-profile: "standard";
     in-out property <string> buffer-profile-label: "Buffer: Standard";
+    in-out property <string> buffer-profile-description: "";
     in-out property <bool> hwdec-active: true;
     in-out property <bool> autoplay-active: false;
     in-out property <bool> playback-ended-visible: false;
@@ -1662,11 +1765,14 @@ export component MainWindow inherits Window {
     // Stage 3 Playback Callbacks
     callback cycle-speed();
     callback cycle-buffer-profile();
+    callback select-buffer-profile(string);
     callback toggle-hwdec();
     callback toggle-autoplay();
     callback play-random();
+    callback play-next();
     callback toggle-player-favorite();
     callback play-current-from-start();
+    callback select-quality(string);
 
     // Stage 4 Desktop & Settings Callbacks
     callback panic-exit();
@@ -1693,6 +1799,8 @@ export component MainWindow inherits Window {
     callback check-connections();
     callback refresh-system-info();
     callback cycle-seek-step();
+    callback select-seek-step(int);
+    callback copy-build-id(string);
     callback cycle-cache-limit();
     callback toggle-low-ram();
     callback toggle-phash();
@@ -2114,11 +2222,15 @@ export component MainWindow inherits Window {
                 return accept;
             }
             if (event.text == "n" || event.text == "N") {
-                root.play-random();
+                root.play-next();
                 return accept;
             }
             }
             if (event.text == Key.Escape) {
+                if (root.player-quality-panel-open) {
+                    root.player-quality-panel-open = false;
+                    return accept;
+                }
                 if (root.player-volume-flyout-open) {
                     root.player-volume-flyout-open = false;
                     return accept;
@@ -2507,15 +2619,6 @@ export component MainWindow inherits Window {
                         }
                     }
 
-                    if root.is-logged-in && (root.home-resume-items.length > 0 || root.home-latest-items.length > 0) : HomeFeaturedHero {
-                        item: root.home-resume-items.length > 0 ? root.home-resume-items[0] : root.home-latest-items[0];
-                        is-resume: root.home-resume-items.length > 0;
-                        has-item: true;
-                        play(id) => { root.play-item(id); }
-                        open-detail(id) => { root.open-item-detail(id); }
-                    }
-
-
                     if !root.is-logged-in : Rectangle {
                         height: 144px;
                         border-radius: 12px;
@@ -2574,7 +2677,110 @@ export component MainWindow inherits Window {
                         }
                     }
 
-                    if root.home-error-message != "" : Rectangle {
+                    // 1. Initial compact loading state when there is no saved library data yet
+                    if root.is-logged-in && root.home-is-loading && !root.has-home-content && root.home-error-message == "" : Rectangle {
+                        min-height: 320px;
+                        vertical-stretch: 1;
+
+                        LoadingState {
+                            spinner-size: 36px;
+                            text: "Loading library…";
+                            compact: true;
+                        }
+                    }
+
+                    // 2. Connection error state when there is no saved content to display
+                    if root.is-logged-in && !root.home-is-loading && !root.has-home-content && root.home-error-message != "" : Rectangle {
+                        min-height: 320px;
+                        vertical-stretch: 1;
+
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 14px;
+
+                            HorizontalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 44px;
+                                    height: 44px;
+                                    border-radius: 22px;
+                                    background: #C2185B22;
+                                    Image {
+                                        source: @image-url("../../../assets/icons/alert.svg");
+                                        width: 22px;
+                                        height: 22px;
+                                        x: (parent.width - self.width) / 2;
+                                        y: (parent.height - self.height) / 2;
+                                        image-fit: contain;
+                                    }
+                                }
+                            }
+
+                            Text {
+                                text: root.home-error-message;
+                                color: #e6d9df;
+                                font-size: 14px;
+                                font-weight: 600;
+                                horizontal-alignment: center;
+                                wrap: word-wrap;
+                            }
+
+                            HorizontalLayout {
+                                alignment: center;
+                                TvSecondaryButton {
+                                    text: "Retry";
+                                    custom-height: 36px;
+                                    clicked => { root.refresh-home(); }
+                                }
+                            }
+                        }
+                    }
+
+                    // 3. Empty library state when library has zero items
+                    if root.is-logged-in && !root.home-is-loading && !root.has-home-content && root.home-error-message == "" : Rectangle {
+                        min-height: 320px;
+                        vertical-stretch: 1;
+
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 12px;
+
+                            Text {
+                                text: "Your library is empty";
+                                color: HubTheme.text-primary;
+                                font-size: 16px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                            }
+
+                            Text {
+                                text: "No videos found in your active library.";
+                                color: HubTheme.text-secondary;
+                                font-size: 13px;
+                                horizontal-alignment: center;
+                            }
+
+                            HorizontalLayout {
+                                alignment: center;
+                                spacing: 10px;
+                                padding-top: 4px;
+
+                                TvSecondaryButton {
+                                    text: "Refresh Library";
+                                    custom-height: 36px;
+                                    clicked => { root.refresh-home(); }
+                                }
+                                TvSecondaryButton {
+                                    text: "Browse";
+                                    custom-height: 36px;
+                                    clicked => { root.switch-screen("browse"); }
+                                }
+                            }
+                        }
+                    }
+
+                    // Top banner if background refresh encounters an error while content is already displayed
+                    if root.is-logged-in && root.has-home-content && root.home-error-message != "" : Rectangle {
                         height: 48px;
                         border-radius: HubTheme.control-radius;
                         background: HubTheme.surface;
@@ -2617,13 +2823,20 @@ export component MainWindow inherits Window {
                         }
                     }
 
-                    DashboardShelf {
+                    if root.is-logged-in && root.has-home-content && (root.home-resume-items.length > 0 || root.home-latest-items.length > 0) : HomeFeaturedHero {
+                        item: root.home-resume-items.length > 0 ? root.home-resume-items[0] : root.home-latest-items[0];
+                        is-resume: root.home-resume-items.length > 0;
+                        has-item: true;
+                        play(id) => { root.play-item(id); }
+                        open-detail(id) => { root.open-item-detail(id); }
+                    }
+
+                    if root.is-logged-in && root.home-resume-items.length > 0 : DashboardShelf {
                         title: "Continue Watching";
                         items: root.home-resume-items;
                         loading: root.home-is-loading;
                         error-message: root.home-resume-error;
                         viewport-width: root.width - (root.nav-collapsed ? 0px : (root.compact-layout ? 72px : 216px)) - (root.compact-layout ? HubTheme.compact-content-padding * 2 : HubTheme.content-padding * 2);
-                        empty-message: root.is-logged-in && !root.home-is-loading && root.home-error-message == "" && root.home-resume-items.length == 0 ? "Videos in progress will appear here, ready to resume where you left off." : "";
                         play-item(id) => { root.play-item(id); }
                         open-item(id) => { root.open-item-detail(id); }
                         thumbnail-retry(item) => { root.retry-thumbnail(item); }
@@ -2632,7 +2845,7 @@ export component MainWindow inherits Window {
                         retry => { root.refresh-home(); }
                     }
 
-                    if root.home-history-items.length > 0 : DashboardShelf {
+                    if root.is-logged-in && root.home-history-items.length > 0 : DashboardShelf {
                         title: "Watch History";
                         items: root.home-history-items;
                         viewport-width: root.width - (root.nav-collapsed ? 0px : (root.compact-layout ? 72px : 216px)) - (root.compact-layout ? HubTheme.compact-content-padding * 2 : HubTheme.content-padding * 2);
@@ -2643,13 +2856,12 @@ export component MainWindow inherits Window {
                         show-all(category-name) => { root.active-category = "Watch History"; root.switch-screen("browse"); root.filter-category("Watch History"); }
                     }
 
-                    DashboardShelf {
+                    if root.is-logged-in && root.home-latest-items.length > 0 : DashboardShelf {
                         title: "Recently Added";
                         items: root.home-latest-items;
                         loading: root.home-is-loading;
                         error-message: root.home-latest-error;
                         viewport-width: root.width - (root.nav-collapsed ? 0px : (root.compact-layout ? 72px : 216px)) - (root.compact-layout ? HubTheme.compact-content-padding * 2 : HubTheme.content-padding * 2);
-                        empty-message: root.is-logged-in && !root.home-is-loading && root.home-error-message == "" && root.home-latest-items.length == 0 ? "No recently added videos found in your active library." : "";
                         play-item(id) => { root.play-item(id); }
                         open-item(id) => { root.open-item-detail(id); }
                         thumbnail-retry(item) => { root.retry-thumbnail(item); }
@@ -2658,13 +2870,12 @@ export component MainWindow inherits Window {
                         retry => { root.refresh-home(); }
                     }
 
-                    DashboardShelf {
+                    if root.is-logged-in && root.home-random-items.length > 0 : DashboardShelf {
                         title: "Random Picks";
                         items: root.home-random-items;
                         loading: root.home-is-loading;
                         error-message: root.home-random-error;
                         viewport-width: root.width - (root.nav-collapsed ? 0px : (root.compact-layout ? 72px : 216px)) - (root.compact-layout ? HubTheme.compact-content-padding * 2 : HubTheme.content-padding * 2);
-                        empty-message: root.is-logged-in && !root.home-is-loading && root.home-error-message == "" && root.home-random-items.length == 0 ? "No videos available for random selection." : "";
                         action-label: root.home-random-unwatched-only ? "Unwatched only" : "All";
                         play-item(id) => { root.play-item(id); }
                         open-item(id) => { root.open-item-detail(id); }
@@ -2674,7 +2885,7 @@ export component MainWindow inherits Window {
                         retry => { root.refresh-home(); }
                     }
 
-                    DashboardShelf {
+                    if root.is-logged-in && root.home-performer-items.length > 0 : DashboardShelf {
                         title: "Performers";
                         items: root.home-performer-items;
                         loading: root.home-is-loading;
@@ -2682,7 +2893,6 @@ export component MainWindow inherits Window {
                         performer-cards: true;
                         viewport-width: root.width - (root.nav-collapsed ? 0px : (root.compact-layout ? 72px : 216px)) - (root.compact-layout ? HubTheme.compact-content-padding * 2 : HubTheme.content-padding * 2);
                         action-label: "Browse performers";
-                        empty-message: root.is-logged-in && !root.home-is-loading && root.home-error-message == "" && root.home-performer-items.length == 0 ? "Performer profiles will appear here when available." : "";
                         play-item(id) => { root.play-item(id); }
                         open-item(id) => { root.open-item-detail(id); }
                         thumbnail-retry(item) => { root.retry-thumbnail(item); }
@@ -2691,14 +2901,13 @@ export component MainWindow inherits Window {
                         retry => { root.refresh-home(); }
                     }
 
-                    for shelf in root.home-category-shelves : DashboardShelf {
+                    if root.is-logged-in : for shelf in root.home-category-shelves : if shelf.items.length > 0 : DashboardShelf {
                         title: shelf.name;
                         category-name: shelf.name;
                         items: shelf.items;
                         loading: root.home-is-loading;
                         error-message: shelf.error_message;
                         viewport-width: root.width - (root.nav-collapsed ? 0px : (root.compact-layout ? 72px : 216px)) - (root.compact-layout ? HubTheme.compact-content-padding * 2 : HubTheme.content-padding * 2);
-                        empty-message: root.is-logged-in && !root.home-is-loading && root.home-error-message == "" && shelf.items.length == 0 ? "No videos found in this category." : "";
                         play-item(id) => { root.play-item(id); }
                         open-item(id) => { root.open-item-detail(id); }
                         thumbnail-retry(item) => { root.retry-thumbnail(item); }
@@ -3747,10 +3956,11 @@ export component MainWindow inherits Window {
                             vertical-stretch: 1;
                             vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
                             VerticalLayout {
-                                spacing: 8px;
-                                for cat in root.channels-categories : TvSecondaryButton {
+                                spacing: 10px;
+                                alignment: start;
+                                for cat in root.channels-categories : ChannelPickerTile {
                                     text: cat;
-                                    custom-height: 44px;
+                                    active: cat == root.active-channel-category;
                                     clicked => { root.select-channel-category(cat); }
                                 }
                             }
@@ -4199,14 +4409,37 @@ export component MainWindow inherits Window {
                         vertical-alignment: center;
                     }
 
-                    // Transitional Loading Indicator in Player Scene
-                    if (root.player-state == "resolving" || root.player-state == "loading" || (!root.player-media-loaded && root.player-error-message == "" && root.has-active-media)) : LoadingState {
-                        x: (parent.width - self.width) / 2;
-                        y: (parent.height - self.height) / 2;
-                        width: min(parent.width - 48px, 480px);
-                        spinner-size: 56px;
-                        text: root.player-loading-message != "" ? root.player-loading-message : "Connecting to stream…";
-                        z: 50;
+                    // Unified Movie Loading Indicator in Player Scene (Next, Shuffle, Quality Change, and Initial Load)
+                    if (root.is-switching-movie || root.is-changing-quality || root.player-state == "resolving" || root.player-state == "loading" || (!root.player-media-loaded && root.player-error-message == "" && root.has-active-media)) && root.player-error-message == "" && root.player-state != "failed" : Rectangle {
+                        width: 100%;
+                        height: 100%;
+                        background: #0B0D12FA;
+                        z: 60;
+
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 14px;
+
+                            HorizontalLayout {
+                                alignment: center;
+                                AccentSpinner {
+                                    size: 52px;
+                                }
+                            }
+
+                            Text {
+                                text: root.is-changing-quality
+                                    ? "Changing quality…"
+                                    : (root.is-switching-movie
+                                        ? root.movie-switch-message
+                                        : (root.player-loading-message != "" ? root.player-loading-message : "Loading next movie…"));
+                                color: HubTheme.text-primary;
+                                font-size: 16px;
+                                font-weight: 600;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
                     }
 
                     // Discrete Buffering Indicator during active playback
@@ -4881,6 +5114,63 @@ export component MainWindow inherits Window {
                                 }
                             }
 
+                            // Next button
+                            next-btn := Rectangle {
+                                width: 44px;
+                                height: 44px;
+                                y: (parent.height - self.height) / 2;
+                                border-radius: 22px;
+                                background: next-touch.has-hover ? #F5F6F818 : transparent;
+                                border-width: next-focus.has-focus ? 2px : 0px;
+                                border-color: HubTheme.focus-ring;
+                                forward-focus: next-focus;
+                                accessible-role: button;
+                                accessible-label: "Play next video";
+
+                                Image {
+                                    source: @image-url("../../../assets/icons/chevron-right.svg");
+                                    width: 22px;
+                                    height: 22px;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                    image-fit: contain;
+                                }
+
+                                next-touch := TouchArea {
+                                    pointer-event(event) => {
+                                        if (event.kind == PointerEventKind.move) {
+                                            root.player-controls-visible = true;
+                                            player-controls-hide-timer.restart();
+                                        }
+                                    }
+                                    clicked => {
+                                        if (root.player-volume-flyout-open) {
+                                            root.player-volume-flyout-open = false;
+                                        }
+                                        root.player-controls-visible = true;
+                                        player-controls-hide-timer.restart();
+                                        root.play-next();
+                                    }
+                                }
+
+                                next-focus := FocusScope {
+                                    width: 0px;
+                                    height: 0px;
+                                    key-pressed(event) => {
+                                        if (event.text == Key.Space || event.text == Key.Return) {
+                                            if (root.player-volume-flyout-open) {
+                                                root.player-volume-flyout-open = false;
+                                            }
+                                            root.player-controls-visible = true;
+                                            player-controls-hide-timer.restart();
+                                            root.play-next();
+                                            return accept;
+                                        }
+                                        reject
+                                    }
+                                }
+                            }
+
                             // Shuffle button
                             shuffle-btn := Rectangle {
                                 width: 44px;
@@ -4955,6 +5245,115 @@ export component MainWindow inherits Window {
                             // Flexible space separating left playback controls from right utility tools
                             Rectangle { horizontal-stretch: 1; }
 
+                            // Quality selector button (44x44) placed directly before download button
+                            if root.player-has-quality-alternatives : quality-btn := Rectangle {
+                                width: 44px;
+                                height: 44px;
+                                y: (parent.height - self.height) / 2;
+                                border-radius: 22px;
+                                background: ql-touch.has-hover || root.player-quality-panel-open ? #F5F6F822 : transparent;
+                                border-width: ql-focus.has-focus ? 2px : 0px;
+                                border-color: HubTheme.focus-ring;
+                                forward-focus: ql-focus;
+                                accessible-role: button;
+                                accessible-label: "Quality";
+                                accessible-action-default => {
+                                    root.player-controls-visible = true;
+                                    player-controls-hide-timer.restart();
+                                    if (root.download-panel-open) {
+                                        root.download-panel-open = false;
+                                    }
+                                    if (root.player-more-controls-visible) {
+                                        root.player-more-controls-visible = false;
+                                    }
+                                    if (root.player-volume-flyout-open) {
+                                        root.player-volume-flyout-open = false;
+                                    }
+                                    root.player-quality-panel-open = !root.player-quality-panel-open;
+                                }
+
+                                Image {
+                                    source: @image-url("../../../assets/icons/quality.svg");
+                                    width: 22px;
+                                    height: 22px;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                    image-fit: contain;
+                                }
+
+                                // Tooltip visible on hover
+                                if ql-touch.has-hover && !root.player-quality-panel-open : Rectangle {
+                                    y: -32px;
+                                    x: (parent.width - self.width) / 2;
+                                    height: 24px;
+                                    width: ql-tooltip-text.preferred-width + 16px;
+                                    border-radius: 4px;
+                                    background: #1e2029ee;
+                                    border-width: 1px;
+                                    border-color: #FFFFFF22;
+                                    z: 100;
+
+                                    ql-tooltip-text := Text {
+                                        text: "Quality";
+                                        font-size: 11px;
+                                        font-weight: 500;
+                                        color: HubTheme.text-primary;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                ql-touch := TouchArea {
+                                    pointer-event(event) => {
+                                        if (event.kind == PointerEventKind.move) {
+                                            root.player-controls-visible = true;
+                                            player-controls-hide-timer.restart();
+                                        }
+                                    }
+                                    clicked => {
+                                        root.player-controls-visible = true;
+                                        player-controls-hide-timer.restart();
+                                        if (root.download-panel-open) {
+                                            root.download-panel-open = false;
+                                        }
+                                        if (root.player-more-controls-visible) {
+                                            root.player-more-controls-visible = false;
+                                        }
+                                        if (root.player-volume-flyout-open) {
+                                            root.player-volume-flyout-open = false;
+                                        }
+                                        root.player-quality-panel-open = !root.player-quality-panel-open;
+                                    }
+                                }
+
+                                ql-focus := FocusScope {
+                                    width: 0px;
+                                    height: 0px;
+                                    key-pressed(event) => {
+                                        if (event.text == Key.Space || event.text == Key.Return) {
+                                            root.player-controls-visible = true;
+                                            player-controls-hide-timer.restart();
+                                            if (root.download-panel-open) {
+                                                root.download-panel-open = false;
+                                            }
+                                            if (root.player-more-controls-visible) {
+                                                root.player-more-controls-visible = false;
+                                            }
+                                            if (root.player-volume-flyout-open) {
+                                                root.player-volume-flyout-open = false;
+                                            }
+                                            root.player-quality-panel-open = !root.player-quality-panel-open;
+                                            return accept;
+                                        }
+                                        if (event.text == Key.Escape && root.player-quality-panel-open) {
+                                            root.player-quality-panel-open = false;
+                                            return accept;
+                                        }
+                                        reject
+                                    }
+                                }
+                            }
+
                             // Download button (44x44) placed directly before volume control
                             download-btn := Rectangle {
                                 width: 44px;
@@ -4968,6 +5367,9 @@ export component MainWindow inherits Window {
                                 accessible-role: button;
                                 accessible-label: "Download video";
                                 accessible-action-default => {
+                                    if (root.player-quality-panel-open) {
+                                        root.player-quality-panel-open = false;
+                                    }
                                     if (root.download-status == "downloading" || root.download-status == "preparing" || root.download-status == "completed" || root.download-status == "error") {
                                         root.toggle-download-panel();
                                     } else {
@@ -5086,6 +5488,9 @@ export component MainWindow inherits Window {
                                     clicked => {
                                         root.player-controls-visible = true;
                                         player-controls-hide-timer.restart();
+                                        if (root.player-quality-panel-open) {
+                                            root.player-quality-panel-open = false;
+                                        }
                                         if (root.download-status == "downloading" || root.download-status == "preparing" || root.download-status == "completed" || root.download-status == "error") {
                                             root.toggle-download-panel();
                                         } else {
@@ -5101,6 +5506,9 @@ export component MainWindow inherits Window {
                                         if (event.text == Key.Space || event.text == Key.Return) {
                                             root.player-controls-visible = true;
                                             player-controls-hide-timer.restart();
+                                            if (root.player-quality-panel-open) {
+                                                root.player-quality-panel-open = false;
+                                            }
                                             if (root.download-status == "downloading" || root.download-status == "preparing" || root.download-status == "completed" || root.download-status == "error") {
                                                 root.toggle-download-panel();
                                             } else {
@@ -5365,6 +5773,9 @@ export component MainWindow inherits Window {
                                         }
                                     }
                                     clicked => {
+                                        if (root.player-quality-panel-open) {
+                                            root.player-quality-panel-open = false;
+                                        }
                                         if (root.player-volume-flyout-open) {
                                             root.player-volume-flyout-open = false;
                                         }
@@ -5379,6 +5790,9 @@ export component MainWindow inherits Window {
                                     height: 0px;
                                     key-pressed(event) => {
                                         if (event.text == Key.Space || event.text == Key.Return) {
+                                            if (root.player-quality-panel-open) {
+                                                root.player-quality-panel-open = false;
+                                            }
                                             root.player-more-controls-visible = !root.player-more-controls-visible;
                                             if (root.player-more-controls-visible) {
                                                 root.player-volume-flyout-open = false;
@@ -5852,6 +6266,167 @@ export component MainWindow inherits Window {
                     }
                 }
 
+                // Non-modal Quality Selection Panel anchored directly above quality-btn
+                if root.player-quality-panel-open && root.player-has-quality-alternatives : Rectangle {
+                    width: min(320px, parent.width - 32px);
+                    height: min(340px, min(parent.height - 100px, ql-layout.preferred-height));
+                    x: max(16px, min(parent.width - self.width - 16px, 24px + quality-btn.x + (quality-btn.width - self.width) / 2));
+                    y: max(16px, parent.height - 76px - self.height);
+                    border-radius: 12px;
+                    background: #121319FA;
+                    border-width: 1px;
+                    border-color: #FFFFFF22;
+                    drop-shadow-blur: 16px;
+                    drop-shadow-color: #00000088;
+                    clip: true;
+                    z: 75;
+
+                    TouchArea {
+                        pointer-event(event) => {
+                            if (event.kind == PointerEventKind.move) {
+                                root.player-controls-visible = true;
+                                player-controls-hide-timer.restart();
+                            }
+                            EventResult.accept
+                        }
+                    }
+
+                    ql-layout := VerticalLayout {
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        padding-top: 12px;
+                        padding-bottom: 14px;
+                        spacing: 8px;
+
+                        // Header with Title and Close button
+                        HorizontalLayout {
+                            alignment: space-between;
+                            Text {
+                                text: "QUALITY";
+                                font-size: 11px;
+                                font-weight: 700;
+                                color: HubTheme.text-muted;
+                                vertical-alignment: center;
+                            }
+                            Rectangle {
+                                width: 24px;
+                                height: 24px;
+                                border-radius: 12px;
+                                background: ql-close-touch.has-hover ? #FFFFFF22 : transparent;
+                                Image {
+                                    source: @image-url("../../../assets/icons/close.svg");
+                                    width: 14px;
+                                    height: 14px;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                    image-fit: contain;
+                                }
+                                ql-close-touch := TouchArea {
+                                    clicked => { root.player-quality-panel-open = false; }
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            height: 1px;
+                            background: #FFFFFF15;
+                        }
+
+                        ScrollView {
+                            width: 100%;
+                            height: 100%;
+                            vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
+                            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                            mouse-drag-pan-enabled: true;
+
+                            VerticalLayout {
+                                spacing: 4px;
+
+                                for opt in root.player-quality-options : Rectangle {
+                                    height: 40px;
+                                    border-radius: 8px;
+                                    background: opt-touch.pressed ? #252836 : (opt.is-selected ? #BE185D26 : (opt-touch.has-hover ? #FFFFFF12 : transparent));
+                                    border-width: opt.is-selected ? 1px : 0px;
+                                    border-color: #BE185D88;
+
+                                    opt-touch := TouchArea {
+                                        pointer-event(event) => {
+                                            if (event.kind == PointerEventKind.move) {
+                                                root.player-controls-visible = true;
+                                                player-controls-hide-timer.restart();
+                                            }
+                                        }
+                                        clicked => {
+                                            root.player-controls-visible = true;
+                                            player-controls-hide-timer.restart();
+                                            root.player-quality-panel-open = false;
+                                            root.select-quality(opt.id);
+                                        }
+                                    }
+
+                                    HorizontalLayout {
+                                        padding-left: 10px;
+                                        padding-right: 10px;
+                                        spacing: 8px;
+                                        alignment: center;
+
+                                        Rectangle {
+                                            width: 16px;
+                                            height: 16px;
+                                            border-radius: 8px;
+                                            background: opt.is-selected ? #BE185D : #FFFFFF15;
+                                            border-width: 1px;
+                                            border-color: opt.is-selected ? #BE185D : #FFFFFF33;
+
+                                            if opt.is-selected : Image {
+                                                source: @image-url("../../../assets/icons/check-circle.svg");
+                                                width: 14px;
+                                                height: 14px;
+                                                x: (parent.width - self.width) / 2;
+                                                y: (parent.height - self.height) / 2;
+                                                image-fit: contain;
+                                            }
+                                        }
+
+                                        Text {
+                                            text: opt.resolution + (opt.is-original ? " (Original)" : "");
+                                            color: opt.is-selected ? #FFFFFF : HubTheme.text-primary;
+                                            font-size: 13px;
+                                            font-weight: opt.is-selected ? 700 : 500;
+                                            vertical-alignment: center;
+                                            horizontal-stretch: 1;
+                                        }
+
+                                        if opt.codec != "" : Rectangle {
+                                            height: 20px;
+                                            border-radius: 4px;
+                                            background: #FFFFFF15;
+                                            HorizontalLayout {
+                                                padding-left: 6px;
+                                                padding-right: 6px;
+                                                Text {
+                                                    text: opt.codec;
+                                                    color: HubTheme.text-secondary;
+                                                    font-size: 10px;
+                                                    font-weight: 600;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                        }
+
+                                        if opt.size-text != "" : Text {
+                                            text: opt.size-text;
+                                            color: HubTheme.text-muted;
+                                            font-size: 11px;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Popover Dismiss Scrim for More Menu
                 if root.player-more-controls-visible : TouchArea {
                     width: 100%;
@@ -6056,6 +6631,7 @@ export component MainWindow inherits Window {
                 error-message: "";
                 app-version: root.app-version;
                 app-version-details: root.app-version-details;
+                build-id: root.build-id;
                 is-logged-in: root.is-logged-in;
                 logged-in-user: root.logged-in-user;
                 server-url-input <=> root.server-url-input;
@@ -6086,7 +6662,9 @@ export component MainWindow inherits Window {
                 connection-diagnostics: root.connection-diagnostics;
                 phash-active: root.phash-active;
                 phash-status-text: root.phash-status-text;
+                buffer-profile: root.buffer-profile;
                 buffer-profile-label: root.buffer-profile-label;
+                buffer-profile-description: root.buffer-profile-description;
                 seek-step-label: root.seek-step-label;
                 seek-step-sec: root.seek-step-sec;
                 hwdec-active: root.hwdec-active;
@@ -6137,7 +6715,10 @@ export component MainWindow inherits Window {
                 check-connections => { root.check-connections(); }
                 toggle-phash => { root.toggle-phash(); }
                 cycle-buffer-profile => { root.cycle-buffer-profile(); }
+                select-buffer-profile(profile) => { root.select-buffer-profile(profile); }
                 cycle-seek-step => { root.cycle-seek-step(); }
+                select-seek-step(step) => { root.select-seek-step(step); }
+                copy-build-id(id) => { root.copy-build-id(id); }
                 toggle-hwdec => { root.toggle-hwdec(); }
                 toggle-autoplay => { root.toggle-autoplay(); }
                 toggle-low-ram => { root.toggle-low-ram(); }
@@ -7512,7 +8093,7 @@ export component MainWindow inherits Window {
                         clicked => {
                             root.autoplay-countdown-sec = 0;
                             root.playback-ended-visible = false;
-                            root.play-random();
+                            root.play-next();
                         }
                     }
 
@@ -8076,6 +8657,14 @@ export component MainWindow inherits Window {
         }
         }
 
+    }
+
+    if !root.app-ready : Rectangle {
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: 100%;
+        background: #0f0f13;
     }
 
 }

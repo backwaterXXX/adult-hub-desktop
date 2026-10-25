@@ -517,6 +517,96 @@ pub struct PhashJobDto {
     pub thumbnail_ready: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VideoVariantDto {
+    pub id: String,
+    #[serde(default)]
+    pub is_original: bool,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub codec: Option<String>,
+    pub mime_type: Option<String>,
+    pub file_size: Option<u64>,
+    pub duration: Option<f64>,
+    pub bitrate: Option<u64>,
+    pub estimated_average_bitrate: Option<u64>,
+}
+
+impl VideoVariantDto {
+    pub fn resolution_label(&self) -> String {
+        match self.height {
+            Some(2160) => "4K".to_string(),
+            Some(1440) => "1440p".to_string(),
+            Some(1080) => "1080p".to_string(),
+            Some(720) => "720p".to_string(),
+            Some(480) => "480p".to_string(),
+            Some(360) => "360p".to_string(),
+            Some(h) if h > 0 => format!("{h}p"),
+            _ => match (self.width, self.height) {
+                (Some(w), Some(h)) if w > 0 && h > 0 => format!("{w}x{h}"),
+                _ => "Unknown".to_string(),
+            },
+        }
+    }
+
+    pub fn display_label(&self, has_duplicate_resolution: bool) -> String {
+        let res = self.resolution_label();
+        let size_str = self.file_size.map(format_media_size);
+        let codec_str = self.codec.as_deref().map(|c| c.to_uppercase());
+
+        if self.is_original {
+            if has_duplicate_resolution {
+                let mut extra = Vec::new();
+                if let Some(c) = codec_str {
+                    extra.push(c);
+                }
+                if let Some(s) = size_str {
+                    extra.push(s);
+                }
+                if extra.is_empty() {
+                    format!("{res} (Original)")
+                } else {
+                    format!("{res} (Original, {})", extra.join(", "))
+                }
+            } else if let Some(s) = size_str {
+                format!("{res} (Original, {s})")
+            } else {
+                format!("{res} (Original)")
+            }
+        } else if has_duplicate_resolution {
+            let mut extra = Vec::new();
+            if let Some(c) = codec_str {
+                extra.push(c);
+            }
+            if let Some(s) = size_str {
+                extra.push(s);
+            }
+            if extra.is_empty() {
+                res
+            } else {
+                format!("{res} ({})", extra.join(", "))
+            }
+        } else if let Some(s) = size_str {
+            format!("{res} ({s})")
+        } else {
+            res
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VideoVariantsResponseDto {
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub video_processing_pending: bool,
+    #[serde(default)]
+    pub has_alternatives: bool,
+    pub video_id: Option<String>,
+    #[serde(default)]
+    pub variants: Vec<VideoVariantDto>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -618,5 +708,75 @@ mod tests {
         assert_eq!(item.format_media_size(), "1.00 GB");
         item.file_size_bytes = Some(0);
         assert_eq!(item.format_media_size(), "Unavailable");
+    }
+
+    #[test]
+    fn parses_video_variants_dto_and_formats_labels() {
+        let json = r#"{
+            "status": "ready",
+            "video_processing_pending": false,
+            "has_alternatives": true,
+            "video_id": "telegram:-100123:456:789",
+            "variants": [
+                {
+                    "id": "original",
+                    "is_original": true,
+                    "width": 1920,
+                    "height": 1080,
+                    "codec": "h264",
+                    "mime_type": "video/mp4",
+                    "file_size": 2500000000,
+                    "duration": 120.0,
+                    "estimated_average_bitrate": 8000000
+                },
+                {
+                    "id": "alt_1001",
+                    "is_original": false,
+                    "width": 1920,
+                    "height": 1080,
+                    "codec": "hevc",
+                    "mime_type": "video/mp4",
+                    "file_size": 1100000000,
+                    "duration": 120.0,
+                    "estimated_average_bitrate": 4000000
+                },
+                {
+                    "id": "alt_1002",
+                    "is_original": false,
+                    "width": 1280,
+                    "height": 720,
+                    "codec": "h264",
+                    "mime_type": "video/mp4",
+                    "file_size": 600000000,
+                    "duration": 120.0,
+                    "estimated_average_bitrate": 2000000
+                }
+            ]
+        }"#;
+
+        let resp: VideoVariantsResponseDto = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.status, "ready");
+        assert!(resp.has_alternatives);
+        assert!(!resp.video_processing_pending);
+        assert_eq!(resp.variants.len(), 3);
+
+        let orig = &resp.variants[0];
+        assert_eq!(orig.resolution_label(), "1080p");
+        // Duplicate resolution: distinguish with codec and size
+        let orig_label = orig.display_label(true);
+        assert!(orig_label.contains("1080p"));
+        assert!(orig_label.contains("Original"));
+        assert!(orig_label.contains("H264"));
+        assert!(orig_label.contains("2.33 GB"));
+
+        let alt1 = &resp.variants[1];
+        let alt1_label = alt1.display_label(true);
+        assert!(alt1_label.contains("1080p"));
+        assert!(alt1_label.contains("HEVC"));
+        assert!(alt1_label.contains("1.02 GB"));
+
+        let alt2 = &resp.variants[2];
+        let alt2_label = alt2.display_label(false);
+        assert_eq!(alt2_label, "720p (572.2 MB)");
     }
 }

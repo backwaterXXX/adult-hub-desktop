@@ -138,6 +138,62 @@ fn set_home_shelves(ui: &MainWindow, shelves: &[Vec<VideoCardData>]) {
     ));
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Clone, Default)]
+pub struct PersistedHomeCache {
+    pub all_items: Vec<TvItem>,
+    pub shelves: Vec<Vec<TvItem>>,
+    pub category_shelves: Vec<(String, Vec<TvItem>, String)>,
+}
+
+pub fn restore_saved_home_data(
+    ui: &MainWindow,
+    local_store: &LocalStore,
+    server_url: &str,
+    home_catalog: &Arc<Mutex<Vec<TvItem>>>,
+) -> bool {
+    let Ok(Some(json)) = local_store.get_setting("home_shelves_cache_v1") else {
+        return false;
+    };
+    let Ok(cache) = serde_json::from_str::<PersistedHomeCache>(&json) else {
+        return false;
+    };
+    if cache.shelves.iter().all(|s| s.is_empty()) && cache.category_shelves.is_empty() {
+        return false;
+    }
+
+    *home_catalog.lock().unwrap() = cache.all_items;
+
+    let shelves = cache
+        .shelves
+        .iter()
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| tv_item_to_card_for_server(item, server_url))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    set_home_shelves(ui, &shelves);
+
+    let ui_category_shelves = cache
+        .category_shelves
+        .into_iter()
+        .map(|(name, items, error_message)| {
+            let cards = items
+                .iter()
+                .map(|item| tv_item_to_card_for_server(item, server_url))
+                .collect::<Vec<_>>();
+            HomeCategoryShelfData {
+                name: name.into(),
+                items: Rc::new(slint::VecModel::from(cards)).into(),
+                error_message: error_message.into(),
+            }
+        })
+        .collect::<Vec<_>>();
+    ui.set_home_category_shelves(Rc::new(slint::VecModel::from(ui_category_shelves)).into());
+    true
+}
+
 fn update_home_thumbnail_model(
     items: slint::ModelRc<VideoCardData>,
     requests: &[ThumbnailRequest],
@@ -2440,6 +2496,34 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     random.into_iter().take(4).collect::<Vec<_>>(),
                     performers.into_iter().take(12).collect::<Vec<_>>(),
                 ];
+                let overall_error = if !categories_error.is_empty() {
+                    categories_error.clone()
+                } else if !resume_error.is_empty() {
+                    resume_error.clone()
+                } else if !latest_error.is_empty() {
+                    latest_error.clone()
+                } else if !random_error.is_empty() {
+                    random_error.clone()
+                } else if !performer_error.is_empty() {
+                    performer_error.clone()
+                } else {
+                    String::new()
+                };
+
+                let has_any_items = shelves.iter().any(|s| !s.is_empty())
+                    || category_shelves.iter().any(|(_, s, _)| !s.is_empty());
+
+                if overall_error.is_empty() && has_any_items {
+                    let home_cache = PersistedHomeCache {
+                        all_items: all_items.clone(),
+                        shelves: shelves.to_vec(),
+                        category_shelves: category_shelves.clone(),
+                    };
+                    if let Ok(json) = serde_json::to_string(&home_cache) {
+                        let _ = local_store.set_setting("home_shelves_cache_v1", &json);
+                    }
+                }
+
                 *home_catalog.lock().unwrap() = all_items;
                 let categories_for_ui = categories.clone();
                 let selected_categories_for_ui = selected_categories.clone();
@@ -2450,11 +2534,17 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     }
                     if let Some(ui) = weak.upgrade() {
                         ui.set_home_is_loading(false);
-                        ui.set_home_error_message(categories_error.into());
+                        ui.set_home_error_message(overall_error.into());
                         ui.set_home_resume_error(resume_error.into());
                         ui.set_home_latest_error(latest_error.into());
                         ui.set_home_random_error(random_error.into());
                         ui.set_home_performer_error(performer_error.into());
+
+                        // If background refresh failed with an error and returned no items,
+                        // keep any already displayed items instead of overwriting with empty
+                        if !has_any_items && !overall_error.is_empty() && ui.get_has_home_content() {
+                            return;
+                        }
                         let shelves = shelves
                             .iter()
                             .map(|items| {

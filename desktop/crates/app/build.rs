@@ -40,6 +40,109 @@ fn release_repository() -> String {
         .unwrap_or_else(|| "adult-hub/adult-hub-desktop".to_owned())
 }
 
+fn resolve_git_dir() -> Option<PathBuf> {
+    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").ok()?);
+    let mut candidate = manifest_dir.clone();
+    for _ in 0..5 {
+        let git_candidate = candidate.join(".git");
+        if git_candidate.is_dir() {
+            return Some(git_candidate);
+        }
+        if git_candidate.is_file() {
+            if let Ok(content) = fs::read_to_string(&git_candidate) {
+                if let Some(path) = content.trim().strip_prefix("gitdir:") {
+                    let gitdir_path = candidate.join(path.trim());
+                    if gitdir_path.exists() {
+                        return Some(gitdir_path);
+                    }
+                }
+            }
+        }
+        if !candidate.pop() {
+            break;
+        }
+    }
+    None
+}
+
+fn resolve_commit_hash_from_git_dir(git_dir: &std::path::Path) -> Option<String> {
+    let head_path = git_dir.join("HEAD");
+    let head_content = fs::read_to_string(head_path).ok()?;
+    let trimmed = head_content.trim();
+    if let Some(ref_path_rel) = trimmed.strip_prefix("ref:") {
+        let ref_path = git_dir.join(ref_path_rel.trim());
+        if let Ok(hash) = fs::read_to_string(&ref_path) {
+            let h = hash.trim();
+            if h.len() >= 8 {
+                return Some(h[..8].to_string());
+            }
+        }
+        // Try packed-refs
+        let packed_refs_path = git_dir.join("packed-refs");
+        if let Ok(packed) = fs::read_to_string(&packed_refs_path) {
+            let target_ref = ref_path_rel.trim();
+            for line in packed.lines() {
+                if line.starts_with('#') || line.starts_with('^') {
+                    continue;
+                }
+                let mut parts = line.split_whitespace();
+                if let (Some(hash), Some(r)) = (parts.next(), parts.next()) {
+                    if r == target_ref && hash.len() >= 8 {
+                        return Some(hash[..8].to_string());
+                    }
+                }
+            }
+        }
+    } else if trimmed.len() >= 8 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Some(trimmed[..8].to_string());
+    }
+    None
+}
+
+fn resolve_commit_hash() -> String {
+    if let Ok(hash) = std::env::var("ADULT_HUB_COMMIT_HASH") {
+        let trimmed = hash.trim();
+        if !trimmed.is_empty() && trimmed != "unknown" {
+            return trimmed.to_string();
+        }
+    }
+
+    if let Ok(output) = Command::new("git").args(["rev-parse", "--short=8", "HEAD"]).output() {
+        if output.status.success() {
+            if let Ok(s) = String::from_utf8(output.stdout) {
+                let trimmed = s.trim();
+                if !trimmed.is_empty() && trimmed != "unknown" {
+                    return trimmed.to_string();
+                }
+            }
+        }
+    }
+
+    if let Some(git_dir) = resolve_git_dir() {
+        if let Some(hash) = resolve_commit_hash_from_git_dir(&git_dir) {
+            return hash;
+        }
+    }
+
+    // Deterministic source hash fallback when git metadata is completely unavailable
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    use std::hash::Hasher;
+    for candidate in [
+        "desktop/Cargo.lock",
+        "Cargo.lock",
+        "desktop/Cargo.toml",
+        "Cargo.toml",
+        "../Cargo.lock",
+        "../../Cargo.lock",
+    ] {
+        if let Ok(bytes) = fs::read(candidate) {
+            hasher.write(&bytes);
+        }
+    }
+    let h = hasher.finish();
+    format!("{:08x}", (h & 0xffff_ffff) as u32)
+}
+
 fn main() {
     println!("cargo:rerun-if-env-changed=GITHUB_REPOSITORY");
     println!(
@@ -47,29 +150,22 @@ fn main() {
         release_repository()
     );
 
-    let commit_hash = std::env::var("ADULT_HUB_COMMIT_HASH").unwrap_or_else(|_| {
-        Command::new("git")
-            .args(["rev-parse", "--short=8", "HEAD"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "unknown".into())
-    });
+    let commit_hash = resolve_commit_hash();
 
-    let build_date = std::env::var("ADULT_HUB_BUILD_DATE").unwrap_or_else(|_| {
-        Command::new("date")
-            .args(["-u", "+%Y-%m-%d"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "2026-10-21".into())
-    });
+    let build_date = std::env::var("ADULT_HUB_BUILD_DATE")
+        .ok()
+        .filter(|s| !s.trim().is_empty() && s != "unknown")
+        .unwrap_or_else(|| {
+            Command::new("date")
+                .args(["-u", "+%Y-%m-%d"])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "2026-10-25".into())
+        });
 
     let dirty_output = Command::new("git")
         .args(["status", "--porcelain"])
@@ -106,14 +202,16 @@ fn main() {
         "cargo:rustc-env=ADULT_HUB_DIRTY={}",
         if dirty { "1" } else { "0" }
     );
-    let build_id = std::env::var("ADULT_HUB_BUILD_ID").unwrap_or_else(|_| {
-        format!(
-            "{}-{}{}",
-            std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".into()),
-            commit_hash,
-            dirty_suffix
-        )
-    });
+    let pkg_version = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.2.23".into());
+    let build_date_compact = build_date.replace('-', "");
+    let build_id = std::env::var("ADULT_HUB_BUILD_ID")
+        .ok()
+        .filter(|s| !s.trim().is_empty() && s != "unknown" && !s.contains("unknown"))
+        .unwrap_or_else(|| {
+            format!(
+                "{pkg_version}-{commit_hash}-{build_date_compact}{dirty_suffix}"
+            )
+        });
     println!("cargo:rustc-env=ADULT_HUB_BUILD_ID={build_id}");
 
     println!("cargo:rerun-if-changed=ui");

@@ -58,6 +58,7 @@ pub fn resolve_media_input(input: &str) -> String {
 pub fn show_error(ui: &MainWindow, message: impl Into<slint::SharedString>) {
     let msg = message.into();
     crate::diagnostics::GLOBAL_LOG.e("UI", msg.as_str());
+    ui.set_is_switching_movie(false);
     if ui.get_active_screen() == "player" {
         ui.set_player_media_loaded(false);
         ui.set_player_controls_visible(true);
@@ -85,6 +86,7 @@ pub fn show_playback_error(
     let short = short_message.into();
     let det = detail.into();
     crate::diagnostics::GLOBAL_LOG.e("Playback", &format!("{short}: {det}"));
+    ui.set_is_switching_movie(false);
     if ui.get_active_screen() == "player" {
         ui.set_player_media_loaded(false);
         ui.set_player_controls_visible(true);
@@ -136,6 +138,12 @@ pub fn load_media(ui: &MainWindow, player: &Player, input: &str, headers: &[Stri
     reset_playback_speed(ui, player);
     ui.set_player_controls_visible(true);
     ui.set_player_more_controls_visible(false);
+    ui.set_player_has_quality_alternatives(false);
+    ui.set_player_quality_panel_open(false);
+    ui.set_player_quality_subpage_open(false);
+    ui.set_player_selected_quality_id("original".into());
+    ui.set_player_selected_quality_label("Original".into());
+    ui.set_player_quality_options(slint::ModelRc::default());
     ui.set_player_media_loaded(false);
     ui.set_player_title(
         Path::new(&path)
@@ -146,7 +154,8 @@ pub fn load_media(ui: &MainWindow, player: &Player, input: &str, headers: &[Stri
             .into(),
     );
     ui.set_player_error_message(String::new().into());
-    ui.set_status(format!("Loading: {path}").into());
+    let clean_path = adult_hub_player::sanitize_media_url(&path);
+    ui.set_status(format!("Loading: {clean_path}").into());
     ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
     if let Err(error) = player.load_with_start(&path, headers, None) {
         // mpv never accepted the file: do not leave the UI claiming playback.
@@ -226,10 +235,17 @@ pub fn stop_active_playback_for_navigation(
     }
 
     ui.set_has_active_media(false);
+    ui.set_is_switching_movie(false);
     ui.set_player_subtitle("".into());
     ui.set_playing(false);
     ui.set_player_controls_visible(true);
     ui.set_player_more_controls_visible(false);
+    ui.set_player_has_quality_alternatives(false);
+    ui.set_player_quality_panel_open(false);
+    ui.set_player_quality_subpage_open(false);
+    ui.set_player_selected_quality_id("original".into());
+    ui.set_player_selected_quality_label("Original".into());
+    ui.set_player_quality_options(slint::ModelRc::default());
     ui.set_player_media_loaded(false);
     ui.set_player_title("".into());
     ui.set_position(0.0);
@@ -421,9 +437,22 @@ pub fn start_item_playback_with_resume(
     ui.set_player_error_message(String::new().into());
     ui.set_player_controls_visible(true);
     ui.set_player_more_controls_visible(false);
+    ui.set_player_has_quality_alternatives(false);
+    ui.set_player_quality_panel_open(false);
+    ui.set_player_quality_subpage_open(false);
+    ui.set_player_selected_quality_id("original".into());
+    ui.set_player_selected_quality_label("Original".into());
+    ui.set_player_quality_options(slint::ModelRc::default());
     ui.set_player_media_loaded(false);
     ui.set_player_title(crate::catalog::display_title(&item).into());
     ui.set_player_subtitle(format_player_subtitle(&item).into());
+    ui.set_player_is_telegram_stream(item.is_telegram());
+    ui.set_player_has_quality_alternatives(false);
+    ui.set_player_quality_subpage_open(false);
+    ui.set_player_selected_quality_id("original".into());
+    ui.set_player_selected_quality_label("Original".into());
+    ui.set_player_quality_options(slint::ModelRc::default());
+    player.set_quality_variant(None);
     ui.set_url_text(stream_url.clone().into());
     ui.set_status(format!("Loading: {}", item.title).into());
     ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
@@ -529,18 +558,18 @@ pub fn start_item_playback_with_resume_ctx(
         item.is_telegram()
     ));
 
-    // 1. Immediately stop previous playback (audio AND video)
-    let _ = player.stop();
-
-    // Persist outgoing video's progress and stop session
+    // 1. Checkpoint outgoing video's progress BEFORE touching playback state
+    let pos = (player.position().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
+    let dur = (player.duration().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
     if let Some(prev) = ctx.current_playing_item.lock().unwrap().take() {
-        let pos = (player.position().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
-        let dur = (player.duration().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
         if pos >= 5000 && prev.id != item.id {
             ctx.session_ctrl.checkpoint_progress(&prev, pos, dur, false);
         }
         ctx.reporter.stop_session(pos);
     }
+
+    // Pause outgoing playback without stopping mpv pipeline or discarding buffer
+    let _ = player.set_pause(true);
 
     // 2. Immediately update UI to show player screen and loading/resolving overlay
     *ctx.current_playing_item.lock().unwrap() = Some(item.clone());
@@ -552,6 +581,12 @@ pub fn start_item_playback_with_resume_ctx(
     ui.set_toast_visible(false); // Clear any stale error toast
     ui.set_player_controls_visible(true);
     ui.set_player_more_controls_visible(false);
+    ui.set_player_has_quality_alternatives(false);
+    ui.set_player_quality_panel_open(false);
+    ui.set_player_quality_subpage_open(false);
+    ui.set_player_selected_quality_id("original".into());
+    ui.set_player_selected_quality_label("Original".into());
+    ui.set_player_quality_options(slint::ModelRc::default());
     ui.set_player_media_loaded(false);
     ui.set_player_state("resolving".into());
     ui.set_player_loading_message("Resolving stream address…".into());
@@ -559,6 +594,16 @@ pub fn start_item_playback_with_resume_ctx(
     ui.set_player_subtitle(format_player_subtitle(&item).into());
     ui.set_status(format!("Preparing: {}", item.title).into());
     ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
+    ui.set_player_is_telegram_stream(item.is_telegram());
+    ui.set_player_has_quality_alternatives(false);
+    ui.set_player_quality_subpage_open(false);
+    ui.set_player_selected_quality_id("original".into());
+    ui.set_player_selected_quality_label("Original".into());
+    ui.set_player_quality_options(slint::ModelRc::default());
+    *ctx.active_quality_id.lock().unwrap() = "original".to_string();
+    *ctx.current_video_variants.lock().unwrap() = Vec::new();
+    player.set_quality_variant(None);
+
     if ui.get_active_screen() != "player" {
         ctx.push_nav_destination(crate::handlers::browsing::current_nav_destination(ui, ctx));
     }
@@ -568,6 +613,84 @@ pub fn start_item_playback_with_resume_ctx(
     let weak_ui = ui.as_weak();
     let ctx_clone = ctx.clone();
     let headers = ctx.headers.clone();
+
+    // Asynchronously fetch video quality alternatives for Telegram content
+    if item.is_telegram() {
+        let weak_ui_variants = ui.as_weak();
+        let ctx_variants = ctx.clone();
+        let vid_ref = if item.id.starts_with("telegram:") {
+            item.id.clone()
+        } else if let Some(ref vid) = item.provider_video_id {
+            if vid.starts_with("telegram:") {
+                vid.clone()
+            } else {
+                format!("telegram:{vid}")
+            }
+        } else {
+            format!("telegram:{}", item.id)
+        };
+
+        std::thread::spawn(move || {
+            let resolver_url = ctx_variants.get_resolver_url();
+            let Some(base_url) = resolver_url else { return };
+            if base_url.trim().is_empty() { return };
+
+            match ctx_variants.resolver.get_video_variants(&base_url, &vid_ref) {
+                Ok(response) => {
+                    let _ = slint::invoke_from_event_loop(move || {
+                        let Some(ui) = weak_ui_variants.upgrade() else { return };
+                        if !ctx_variants.session_ctrl.is_request_current(request_id) {
+                            return;
+                        }
+                        *ctx_variants.current_video_variants.lock().unwrap() = response.variants.clone();
+                        let active_id = ctx_variants.active_quality_id.lock().unwrap().clone();
+
+                        if response.has_alternatives && response.variants.len() > 1 {
+                            let opts = format_variant_options(&response.variants, &active_id);
+                            let active_label = opts
+                                .iter()
+                                .find(|o| o.id == active_id)
+                                .map(|o| o.label.to_string())
+                                .unwrap_or_else(|| "Original".to_string());
+
+                            ui.set_player_has_quality_alternatives(true);
+                            ui.set_player_selected_quality_label(active_label.clone().into());
+                            if let Some(player) = &ctx_variants.player {
+                                player.set_quality_variant(Some(active_label));
+                            }
+                            update_slint_quality_options(&ui, &opts);
+                        } else {
+                            ui.set_player_has_quality_alternatives(false);
+                            let orig_label = response
+                                .variants
+                                .iter()
+                                .find(|v| v.is_original)
+                                .map(|v| v.display_label(false))
+                                .unwrap_or_else(|| "Original".to_string());
+                            ui.set_player_selected_quality_label(orig_label.clone().into());
+                            if let Some(player) = &ctx_variants.player {
+                                player.set_quality_variant(Some(orig_label));
+                            }
+                        }
+                    });
+                }
+                Err(err) => {
+                    crate::diagnostics::GLOBAL_LOG.w(
+                        "Resolver",
+                        &format!("Could not fetch video variants for {vid_ref}: {err}"),
+                    );
+                    let _ = slint::invoke_from_event_loop(move || {
+                        let Some(ui) = weak_ui_variants.upgrade() else { return };
+                        if !ctx_variants.session_ctrl.is_request_current(request_id) {
+                            return;
+                        }
+                        ui.set_player_has_quality_alternatives(false);
+                        ui.set_player_selected_quality_label("Original".into());
+                    });
+                }
+            }
+        });
+    }
 
     std::thread::spawn(move || {
         let resolve_started = std::time::Instant::now();
@@ -865,5 +988,286 @@ pub fn pick_config_file() -> Option<String> {
         Some(candidate.to_string_lossy().into_owned())
     } else {
         None
+    }
+}
+
+pub fn format_variant_options(
+    variants: &[adult_hub_client::VideoVariantDto],
+    active_id: &str,
+) -> Vec<crate::VideoQualityOption> {
+    use std::collections::HashMap;
+    let mut height_counts: HashMap<Option<u32>, usize> = HashMap::new();
+    for v in variants {
+        *height_counts.entry(v.height).or_insert(0) += 1;
+    }
+
+    variants
+        .iter()
+        .map(|v| {
+            let has_duplicate = height_counts.get(&v.height).copied().unwrap_or(0) > 1;
+            let label = v.display_label(has_duplicate);
+            let res = v.resolution_label();
+            let details = v.codec.as_deref().unwrap_or("").to_uppercase();
+            let size_text = v
+                .file_size
+                .map(adult_hub_client::format_media_size)
+                .unwrap_or_default();
+            let is_selected = v.id == active_id;
+
+            crate::VideoQualityOption {
+                id: v.id.clone().into(),
+                label: label.into(),
+                resolution: res.into(),
+                details: details.clone().into(),
+                codec: details.into(),
+                size_text: size_text.into(),
+                is_original: v.is_original,
+                is_selected,
+            }
+        })
+        .collect()
+}
+
+pub fn update_slint_quality_options(ui: &MainWindow, options: &[crate::VideoQualityOption]) {
+    let model = std::rc::Rc::new(slint::VecModel::from(options.to_vec()));
+    ui.set_player_quality_options(model.into());
+}
+
+pub fn switch_video_quality(
+    ui: &MainWindow,
+    ctx: &AppContext,
+    target_variant_id: String,
+) {
+    let Some(player) = ctx.player.clone() else {
+        return;
+    };
+    let current_variant = ctx.active_quality_id.lock().unwrap().clone();
+    if current_variant == target_variant_id {
+        return;
+    }
+    if ui.get_is_changing_quality() {
+        return;
+    }
+
+    let item = ctx.current_playing_item.lock().unwrap().clone();
+    let Some(item) = item else {
+        return;
+    };
+    if !item.is_telegram() {
+        return;
+    }
+
+    // Capture complete player state before touching or preparing new stream
+    let current_pos_secs = player.position().unwrap_or(0.0);
+    let was_paused = player.is_paused();
+    let current_volume = player.volume().unwrap_or(100.0);
+    let was_muted = player.is_muted();
+    let current_speed = player.get_f64("speed").unwrap_or(1.0);
+    let previous_stream_url = ui.get_url_text().to_string();
+
+    ui.set_player_quality_panel_open(false);
+    ui.set_player_quality_subpage_open(false);
+    ui.set_is_changing_quality(true);
+    ui.set_player_loading_message("Changing quality…".into());
+
+    let quality_req_id = ctx.session_ctrl.next_request_id();
+    let weak_ui = ui.as_weak();
+    let ctx_clone = ctx.clone();
+    let headers = ctx.headers.clone();
+    let player_clone = player.clone();
+
+    std::thread::spawn(move || {
+        let session = ctx_clone.credential_store.get().ok().flatten();
+        let resolver_url = ctx_clone.get_resolver_url();
+
+        let resolution_result = PlaybackSessionController::resolve_stream_url_with_variant(
+            &item,
+            session.as_ref().map(|s| s.server_url.as_str()),
+            resolver_url.as_deref(),
+            session.as_ref().map(|s| s.access_token.as_str()),
+            Some(&target_variant_id),
+        );
+
+        match resolution_result {
+            Ok((new_stream_url, _play_method)) => {
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = weak_ui.upgrade() else { return };
+                    if !ctx_clone.session_ctrl.is_request_current(quality_req_id) {
+                        return;
+                    }
+
+                    // Fresh position right before load
+                    let target_pos = player_clone.position().unwrap_or(current_pos_secs);
+                    *ctx_clone.pending_resume_position.lock().unwrap() = if target_pos > 0.0 {
+                        Some(target_pos)
+                    } else {
+                        None
+                    };
+
+                    let path = resolve_media_input(&new_stream_url);
+                    if let Err(e) = player_clone.load_with_start(&path, &headers, Some(target_pos)) {
+                        crate::diagnostics::GLOBAL_LOG.e("Player", &format!("Quality load failed: {e}"));
+                        // Attempt fallback to previous URL to preserve working source
+                        let _ = player_clone.load_with_start(
+                            &resolve_media_input(&previous_stream_url),
+                            &headers,
+                            Some(target_pos),
+                        );
+                        let _ = player_clone.set_pause(was_paused);
+                        ui.set_is_changing_quality(false);
+                        ui.set_toast_message("Failed to switch quality, keeping current stream".into());
+                        ui.set_toast_type("error".into());
+                        ui.set_toast_visible(true);
+                        return;
+                    }
+
+                    let _ = player_clone.set_speed(current_speed);
+                    let _ = player_clone.set_volume(current_volume);
+                    let _ = player_clone.set_muted(was_muted);
+                    let _ = player_clone.set_pause(was_paused);
+                    ui.set_playing(!was_paused);
+                    ui.set_url_text(new_stream_url.into());
+
+                    *ctx_clone.active_quality_id.lock().unwrap() = target_variant_id.clone();
+                    ui.set_player_selected_quality_id(target_variant_id.clone().into());
+
+                    let variants = ctx_clone.current_video_variants.lock().unwrap().clone();
+                    let opts = format_variant_options(&variants, &target_variant_id);
+                    let active_label = opts
+                        .iter()
+                        .find(|o| o.id == target_variant_id)
+                        .map(|o| o.label.to_string())
+                        .unwrap_or_else(|| target_variant_id.clone());
+
+                    ui.set_player_selected_quality_label(active_label.clone().into());
+                    player_clone.set_quality_variant(Some(active_label));
+                    update_slint_quality_options(&ui, &opts);
+                });
+            }
+            Err(err) => {
+                crate::diagnostics::GLOBAL_LOG.w("Player", &format!("Quality resolution error: {err}"));
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = weak_ui.upgrade() else { return };
+                    if !ctx_clone.session_ctrl.is_request_current(quality_req_id) {
+                        return;
+                    }
+                    ui.set_is_changing_quality(false);
+                    ui.set_toast_message(format!("Could not switch quality: {err}").into());
+                    ui.set_toast_type("error".into());
+                    ui.set_toast_visible(true);
+                });
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use adult_hub_client::VideoVariantDto;
+
+    #[test]
+    fn format_variant_options_distinct_resolutions() {
+        let variants = vec![
+            VideoVariantDto {
+                id: "original".into(),
+                is_original: true,
+                width: Some(3840),
+                height: Some(2160),
+                codec: Some("hevc".into()),
+                mime_type: Some("video/mp4".into()),
+                file_size: Some(4_000_000_000),
+                duration: Some(100.0),
+                bitrate: None,
+                estimated_average_bitrate: Some(320_000_000),
+            },
+            VideoVariantDto {
+                id: "alt_1080".into(),
+                is_original: false,
+                width: Some(1920),
+                height: Some(1080),
+                codec: Some("h264".into()),
+                mime_type: Some("video/mp4".into()),
+                file_size: Some(1_000_000_000),
+                duration: Some(100.0),
+                bitrate: None,
+                estimated_average_bitrate: Some(80_000_000),
+            },
+            VideoVariantDto {
+                id: "alt_720".into(),
+                is_original: false,
+                width: Some(1280),
+                height: Some(720),
+                codec: Some("h264".into()),
+                mime_type: Some("video/mp4".into()),
+                file_size: Some(500_000_000),
+                duration: Some(100.0),
+                bitrate: None,
+                estimated_average_bitrate: Some(40_000_000),
+            },
+        ];
+
+        let opts = format_variant_options(&variants, "alt_1080");
+        assert_eq!(opts.len(), 3);
+
+        // 4K Original
+        assert_eq!(opts[0].id, "original");
+        assert!(opts[0].label.contains("4K"));
+        assert!(opts[0].label.contains("Original"));
+        assert!(!opts[0].is_selected);
+        assert!(opts[0].is_original);
+
+        // 1080p
+        assert_eq!(opts[1].id, "alt_1080");
+        assert!(opts[1].label.contains("1080p"));
+        assert!(opts[1].is_selected);
+        assert!(!opts[1].is_original);
+
+        // 720p
+        assert_eq!(opts[2].id, "alt_720");
+        assert!(opts[2].label.contains("720p"));
+        assert!(!opts[2].is_selected);
+    }
+
+    #[test]
+    fn format_variant_options_duplicate_resolutions_differentiates_codecs_and_size() {
+        let variants = vec![
+            VideoVariantDto {
+                id: "original".into(),
+                is_original: true,
+                width: Some(1920),
+                height: Some(1080),
+                codec: Some("h264".into()),
+                mime_type: Some("video/mp4".into()),
+                file_size: Some(2_000_000_000),
+                duration: Some(100.0),
+                bitrate: None,
+                estimated_average_bitrate: None,
+            },
+            VideoVariantDto {
+                id: "alt_hevc".into(),
+                is_original: false,
+                width: Some(1920),
+                height: Some(1080),
+                codec: Some("hevc".into()),
+                mime_type: Some("video/mp4".into()),
+                file_size: Some(900_000_000),
+                duration: Some(100.0),
+                bitrate: None,
+                estimated_average_bitrate: None,
+            },
+        ];
+
+        let opts = format_variant_options(&variants, "original");
+        assert_eq!(opts.len(), 2);
+
+        // Original 1080p with duplicate resolution must mention H264 and size
+        assert!(opts[0].label.contains("Original"));
+        assert!(opts[0].label.contains("H264"));
+        assert!(opts[0].is_selected);
+
+        // Alt 1080p must mention HEVC
+        assert!(opts[1].label.contains("HEVC"));
+        assert!(!opts[1].is_selected);
     }
 }

@@ -143,6 +143,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ver_details = format!("v{pkg_ver} ({commit}{dirty}) · build: {build_id} · Built {build_date}");
     ui.set_app_version(pkg_ver.into());
     ui.set_app_version_details(ver_details.into());
+    ui.set_build_id(build_id.into());
 
     // In software UI mode there is no shared OpenGL context, so mpv renders
     // video in its own window with an independent GPU/software pipeline.
@@ -165,6 +166,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("cannot set initial volume: {error}");
         }
     }
+
+    let initial_buffer_profile = local_store
+        .get_setting("buffer_profile")
+        .ok()
+        .flatten()
+        .and_then(|id| adult_hub_player::BufferProfile::from_id(&id))
+        .unwrap_or(adult_hub_player::BufferProfile::Standard);
+    if let Some(player) = &player {
+        if let Err(error) = player.set_buffer_profile(initial_buffer_profile) {
+            eprintln!("cannot set initial buffer profile: {error}");
+        }
+    }
+    ui.set_buffer_profile(initial_buffer_profile.id().into());
+    ui.set_buffer_profile_label(format!("Buffer: {}", initial_buffer_profile.name()).into());
+    ui.set_buffer_profile_description(initial_buffer_profile.description().into());
 
     let _card_zoom_persistence = install_card_zoom_persistence(&ui, local_store.clone());
     let credential_store = Arc::new(CredentialStore::new());
@@ -243,6 +259,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let autoplay_active = Arc::new(AtomicBool::new(false));
     let hwdec_active = Arc::new(AtomicBool::new(true));
 
+    let home_catalog = Arc::new(Mutex::new(Vec::new()));
+
     let ctx = AppContext {
         player: player.clone(),
         headers: options.headers.clone(),
@@ -257,7 +275,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         detail_active_item: Arc::new(Mutex::new(None)),
         pending_resume_position: Arc::new(Mutex::new(None)),
         cached_catalog: cached_catalog.clone(),
-        home_catalog: Arc::new(Mutex::new(Vec::new())),
+        home_catalog: home_catalog.clone(),
         performer_catalog: Arc::new(Mutex::new(Vec::new())),
         studio_catalog: Arc::new(Mutex::new(Vec::new())),
         autoplay_active: autoplay_active.clone(),
@@ -268,6 +286,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         shuffle_engine: Arc::new(crate::shuffle::ShuffleEngine::default()),
         download_manager: Arc::new(download::DownloadManager::new()),
         active_playback_context: Arc::new(Mutex::new(Vec::new())),
+        current_video_variants: Arc::new(Mutex::new(Vec::new())),
+        active_quality_id: Arc::new(Mutex::new("original".to_string())),
     };
 
     // Synchronize initial settings to UI
@@ -386,6 +406,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &current_item,
                     );
                 }
+                if let Some(player) = &player {
+                    let _ = player.stop();
+                }
+                let _ = slint::quit_event_loop();
             }
             slint::CloseRequestResponse::HideWindow
         });
@@ -401,6 +425,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &reporter,
                 &phash_coord,
                 &initial_resolver_url,
+                &local_store,
+                &home_catalog,
             );
         } else {
             *pending_http_restore.lock().unwrap() = Some(session.clone());
@@ -471,6 +497,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let weak = ui.as_weak();
         let local_store = local_store.clone();
+        let home_catalog = home_catalog.clone();
         let pending_http_restore = pending_http_restore.clone();
         let reporter = reporter.clone();
         let phash_coord = phash_coord.clone();
@@ -519,7 +546,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         } else {
                             initial_resolver_url.clone()
                         };
-                        activate_session(&ui, &session, &reporter, &phash_coord, &resolver_url);
+                        activate_session(
+                            &ui,
+                            &session,
+                            &reporter,
+                            &phash_coord,
+                            &resolver_url,
+                            &local_store,
+                            &home_catalog,
+                        );
                     }
                 }
                 _ => {}
@@ -1197,12 +1232,14 @@ fn install_window_event_filter(
                     completed.set(true);
                     timer_stop.stop();
                     applied_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    ui.set_app_ready(true);
                     log_startup("window geometry: restore completed successfully (timer)");
                 }
             },
         );
     } else {
         geometry_applied_successfully.store(true, std::sync::atomic::Ordering::SeqCst);
+        ui.set_app_ready(true);
     }
 
     {
@@ -1254,6 +1291,7 @@ fn install_window_event_filter(
                                 event_restore_timer.stop();
                                 event_restore_applied
                                     .store(true, std::sync::atomic::Ordering::SeqCst);
+                                ui.set_app_ready(true);
                                 log_startup(
                                     "window geometry: restore completed successfully (event-driven)",
                                 );
@@ -1658,6 +1696,18 @@ fn current_window_geometry(ui: &MainWindow) -> Option<WindowGeometry> {
         }
         let position = window.outer_position().ok()?;
         let size = window.inner_size();
+        // Guard: if an unmaximized window matches or exceeds the monitor dimensions,
+        // it is in a transient fullscreen exit state before native resize completes;
+        // reject it to protect the saved normal window geometry.
+        if !window.is_maximized() {
+            if let Some(mon) = window.current_monitor() {
+                let mon_size = mon.size();
+                if size.width >= mon_size.width && size.height >= mon_size.height {
+                    crate::log_debug("current_window_geometry: window dimensions match or exceed monitor in unmaximized state; rejecting as transient");
+                    return None;
+                }
+            }
+        }
         // Physical pixels: this is the single unit the saved geometry uses.
         let sane = size.width > 0
             && size.height > 0
@@ -1752,6 +1802,7 @@ fn apply_saved_window_geometry(
 ) -> bool {
     let Some(raw) = local_store.get_setting(WINDOW_GEOMETRY_KEY).ok().flatten() else {
         log_startup("window geometry: nothing saved, keeping the default window rect");
+        ui.set_app_ready(true);
         return true;
     };
     let Some(saved) = WindowGeometry::decode(&raw) else {
@@ -1759,6 +1810,7 @@ fn apply_saved_window_geometry(
             "window geometry: stored value \"{raw}\" is not a valid physical rect, \
              keeping the default window rect"
         ));
+        ui.set_app_ready(true);
         return true;
     };
 
@@ -1843,6 +1895,7 @@ fn apply_saved_window_geometry(
             validated.maximized
         ));
     }
+    ui.set_app_ready(true);
     true
 }
 
@@ -1902,6 +1955,8 @@ fn activate_session(
     reporter: &PlaybackReporter,
     phash_coord: &phash::PhashCoordinator,
     resolver_url: &str,
+    local_store: &LocalStore,
+    home_catalog: &Arc<Mutex<Vec<TvItem>>>,
 ) {
     reporter.set_auth(
         Some(session.server_url.clone()),
@@ -1918,6 +1973,12 @@ fn activate_session(
     ui.set_is_logged_in(true);
     ui.set_logged_in_user(session.username.clone().into());
     ui.set_server_url_input(session.server_url.clone().into());
+    crate::handlers::browsing::restore_saved_home_data(
+        ui,
+        local_store,
+        &session.server_url,
+        home_catalog,
+    );
     ui.invoke_filter_category("Latest".into());
     ui.invoke_refresh_library_list();
     ui.invoke_refresh_home();
@@ -2469,6 +2530,8 @@ mod tests {
             shuffle_engine: Arc::new(crate::shuffle::ShuffleEngine::default()),
             download_manager: Arc::new(download::DownloadManager::new()),
             active_playback_context: Arc::new(Mutex::new(Vec::new())),
+            current_video_variants: Arc::new(Mutex::new(Vec::new())),
+            active_quality_id: Arc::new(Mutex::new("original".to_string())),
         };
 
         // 1. Home item should be found even when Browse cached_catalog is empty

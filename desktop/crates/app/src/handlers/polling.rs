@@ -13,6 +13,97 @@ use std::time::{Duration, Instant};
 
 const MAX_AUTOMATIC_RETRIES: u8 = 3;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StallCause {
+    BufferLimitTooSmall,
+    TransientBandwidthDrop,
+    BandwidthDeficit,
+    SeekOrReopenCost,
+    DecodingIssue,
+    WaitingForSource,
+    Unknown,
+}
+
+impl StallCause {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::BufferLimitTooSmall => "BufferLimitTooSmall",
+            Self::TransientBandwidthDrop => "TransientBandwidthDrop",
+            Self::BandwidthDeficit => "BandwidthDeficit",
+            Self::SeekOrReopenCost => "SeekOrReopenCost",
+            Self::DecodingIssue => "DecodingIssue",
+            Self::WaitingForSource => "WaitingForSource",
+            Self::Unknown => "Unknown",
+        }
+    }
+}
+
+pub fn classify_stall_cause(
+    start_time: Instant,
+    last_seek_time: Option<Instant>,
+    last_load_time: Option<Instant>,
+    dropped_frames_diff: u64,
+    stall_start_fw_bytes: u64,
+    stall_start_cache_secs: f64,
+    stall_start_video_bitrate: Option<f64>,
+    stall_start_raw_input_rate: Option<f64>,
+    current_input_rate: Option<f64>,
+    active_profile: adult_hub_player::BufferProfile,
+) -> StallCause {
+    if let Some(seek_time) = last_seek_time
+        && start_time.saturating_duration_since(seek_time) <= Duration::from_millis(4000)
+    {
+        StallCause::SeekOrReopenCost
+    } else if let Some(load_time) = last_load_time
+        && start_time.saturating_duration_since(load_time) <= Duration::from_millis(5000)
+    {
+        StallCause::SeekOrReopenCost
+    } else if dropped_frames_diff >= 5 {
+        StallCause::DecodingIssue
+    } else {
+        let max_bytes_limit: u64 = match active_profile {
+            adult_hub_player::BufferProfile::FastStart => 48 * 1024 * 1024,
+            adult_hub_player::BufferProfile::Standard => 160 * 1024 * 1024,
+            adult_hub_player::BufferProfile::Large => 384 * 1024 * 1024,
+            adult_hub_player::BufferProfile::LowMemory => 24 * 1024 * 1024,
+        };
+        if stall_start_fw_bytes >= (max_bytes_limit * 85 / 100)
+            && stall_start_cache_secs < 8.0
+        {
+            StallCause::BufferLimitTooSmall
+        } else if let (Some(video_bitrate), Some(start_rate), Some(curr_rate)) = (
+            stall_start_video_bitrate.filter(|&v| v > 0.0),
+            stall_start_raw_input_rate,
+            current_input_rate,
+        ) {
+            let start_bps = start_rate * 8.0;
+            let curr_bps = curr_rate * 8.0;
+            if start_bps < (video_bitrate * 0.8) && curr_bps < (video_bitrate * 0.8) {
+                StallCause::BandwidthDeficit
+            } else {
+                StallCause::TransientBandwidthDrop
+            }
+        } else if stall_start_cache_secs <= 0.2 {
+            StallCause::WaitingForSource
+        } else {
+            StallCause::Unknown
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct StallTracker {
+    pub count: u32,
+    pub total_duration: Duration,
+    pub stall_start: Option<Instant>,
+    pub stall_start_dropped_frames: u64,
+    pub stall_start_fw_bytes: u64,
+    pub stall_start_cache_secs: f64,
+    pub stall_start_raw_input_rate: Option<f64>,
+    pub stall_start_video_bitrate: Option<f64>,
+    pub active_generation: u64,
+}
+
 #[derive(Default)]
 struct PlaybackRecovery {
     retries: u8,
@@ -37,6 +128,7 @@ pub fn install_polling(ui: &MainWindow, ctx: &AppContext, frame_pending: Arc<Ato
     let download_mgr = ctx.download_manager.clone();
     let ctx_handle = ctx.clone();
     let mut recovery = PlaybackRecovery::default();
+    let mut stall_tracker = StallTracker::default();
     let mut toast_ticks: u32 = 0;
 
     timer.start(TimerMode::Repeated, Duration::from_millis(100), move || {
@@ -250,19 +342,124 @@ pub fn install_polling(ui: &MainWindow, ctx: &AppContext, frame_pending: Arc<Ato
             );
         }
 
-        // Buffering / cache starvation detection
+        // Buffering / cache starvation detection & diagnostics
         if ui.get_player_media_loaded() {
+            let cur_gen = player.load_generation();
+            if cur_gen != stall_tracker.active_generation {
+                stall_tracker = StallTracker {
+                    active_generation: cur_gen,
+                    ..Default::default()
+                };
+            }
+
             let paused_for_cache = player.get_string("paused-for-cache").as_deref() == Some("yes");
+            let req_id = ctx_handle.session_ctrl.current_request_id();
+
             if paused_for_cache && !player.is_paused() {
                 if ui.get_player_state() != "buffering" {
                     ui.set_player_state("buffering".into());
                 }
-            } else if ui.get_player_state() == "buffering" {
-                ui.set_player_state(if player.is_paused() {
-                    "paused".into()
-                } else {
-                    "playing".into()
-                });
+
+                if stall_tracker.stall_start.is_none() {
+                    let now = Instant::now();
+                    stall_tracker.stall_start = Some(now);
+                    stall_tracker.count += 1;
+
+                    let stats = player.stats();
+                    stall_tracker.stall_start_dropped_frames = stats.dropped_frames.unwrap_or(0);
+                    stall_tracker.stall_start_fw_bytes = stats.cache_forward_bytes.unwrap_or(0);
+                    stall_tracker.stall_start_cache_secs = stats.cache_duration_secs.unwrap_or(0.0);
+                    stall_tracker.stall_start_raw_input_rate = stats.raw_input_rate_bps;
+                    stall_tracker.stall_start_video_bitrate = stats.video_bitrate;
+
+                    let dl_rate_str = match stats.raw_input_rate_bps {
+                        Some(rate) => {
+                            let mbps = (rate * 8.0) / 1_000_000.0;
+                            let mbs = rate / (1024.0 * 1024.0);
+                            format!("{mbps:.2} Mbit/s ({mbs:.2} MB/s)")
+                        }
+                        None => "N/A".to_string(),
+                    };
+                    let vbitrate_str = match stats.video_bitrate {
+                        Some(vb) => format!("{:.2} Mbit/s", vb / 1_000_000.0),
+                        None => "N/A".to_string(),
+                    };
+
+                    crate::log_debug(&format!(
+                        "playback req={req_id}: stall #{} started: pos={:.2}s, video_bitrate={}, dl_rate={}, cache_secs={:.2}s, cache_fw_bytes={}",
+                        stall_tracker.count,
+                        player.position().unwrap_or(0.0),
+                        vbitrate_str,
+                        dl_rate_str,
+                        stall_tracker.stall_start_cache_secs,
+                        stall_tracker.stall_start_fw_bytes,
+                    ));
+                    crate::diagnostics::GLOBAL_LOG.w(
+                        "Player",
+                        &format!(
+                            "Playback stall #{} started (req={}): buffer cache starved (0.0s), dl_rate={}, vbitrate={}",
+                            stall_tracker.count,
+                            req_id,
+                            dl_rate_str,
+                            vbitrate_str,
+                        ),
+                    );
+                }
+            } else {
+                if let Some(start_time) = stall_tracker.stall_start.take() {
+                    let stall_duration = start_time.elapsed();
+                    stall_tracker.total_duration += stall_duration;
+
+                    let stats = player.stats();
+                    let current_dropped = stats.dropped_frames.unwrap_or(0);
+                    let dropped_diff = current_dropped.saturating_sub(stall_tracker.stall_start_dropped_frames);
+                    let current_input_rate = stats.raw_input_rate_bps;
+                    let active_profile = player.buffer_profile();
+
+                    let cause = classify_stall_cause(
+                        start_time,
+                        player.last_seek_time(),
+                        player.last_load_time(),
+                        dropped_diff,
+                        stall_tracker.stall_start_fw_bytes,
+                        stall_tracker.stall_start_cache_secs,
+                        stall_tracker.stall_start_video_bitrate,
+                        stall_tracker.stall_start_raw_input_rate,
+                        current_input_rate,
+                        active_profile,
+                    );
+
+                    let diag_str = cause.as_str().to_string();
+                    player.update_stall_summary(
+                        stall_tracker.count,
+                        stall_tracker.total_duration.as_secs_f64(),
+                        Some(diag_str.clone()),
+                    );
+
+                    crate::log_debug(&format!(
+                        "playback req={req_id}: stall #{} resolved in {:.2}s (total stalled: {:.2}s), cause: {diag_str}",
+                        stall_tracker.count,
+                        stall_duration.as_secs_f64(),
+                        stall_tracker.total_duration.as_secs_f64(),
+                    ));
+                    crate::diagnostics::GLOBAL_LOG.i(
+                        "Player",
+                        &format!(
+                            "Playback stall #{} resolved in {:.2}s (cause: {diag_str}, total stalled: {:.2}s)",
+                            stall_tracker.count,
+                            stall_duration.as_secs_f64(),
+                            stall_tracker.total_duration.as_secs_f64(),
+                        ),
+                    );
+                }
+
+                if ui.get_player_state() == "buffering" {
+                    ui.set_player_state(if player.is_paused() {
+                        "paused".into()
+                    } else {
+                        "playing".into()
+                    });
+                }
             }
         }
 
@@ -295,6 +492,10 @@ pub fn install_polling(ui: &MainWindow, ctx: &AppContext, frame_pending: Arc<Ato
         let paused = player.is_paused() || idle;
         if paused == ui.get_playing() {
             ui.set_playing(!paused);
+        }
+
+        if ui.get_is_switching_movie() && ui.get_player_media_loaded() && ui.get_software_ui_renderer() {
+            ui.set_is_switching_movie(false);
         }
 
         if !paused
@@ -391,6 +592,9 @@ fn handle_event(
             }
             recovery.loaded_at = Some(Instant::now());
             ui.set_player_media_loaded(true);
+            if ui.get_software_ui_renderer() && ui.get_is_switching_movie() {
+                ui.set_is_switching_movie(false);
+            }
             crate::log_debug(&format!(
                 "playback: FileLoaded {width:?}x{height:?}, retry_in_flight={}",
                 recovery.retry_in_flight
@@ -596,18 +800,7 @@ fn handle_event(
                 ui.set_playback_ended_visible(false);
                 ui.set_autoplay_countdown_sec(0);
 
-                let current_id = finished_item.as_ref().map(|it| it.id.as_str());
-                if let Some(next_item) = ctx.get_next_contextual_item(current_id) {
-                    ui.set_status(format!("Playing next: {}", next_item.title).into());
-                    crate::playback::start_item_playback_with_resume_ctx(
-                        ui,
-                        ctx,
-                        next_item,
-                        Some(false),
-                    );
-                } else {
-                    ui.invoke_play_random();
-                }
+                ui.invoke_play_next();
             } else {
                 recovery.retry_at = None;
                 recovery.retry_in_flight = false;
@@ -676,4 +869,154 @@ fn is_transient_network_error(error: &str) -> bool {
         .split(|character: char| !character.is_ascii_digit())
         .filter_map(|part| part.parse::<u16>().ok())
         .any(|status| status == 408 || status == 429 || (500..=599).contains(&status))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use adult_hub_player::BufferProfile;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn test_classify_stall_cause_seek_reopen() {
+        let now = Instant::now();
+        let seek_time = now - Duration::from_millis(2000);
+        let cause = classify_stall_cause(
+            now,
+            Some(seek_time),
+            None,
+            0,
+            0,
+            0.0,
+            Some(20_000_000.0),
+            Some(15_000_000.0),
+            Some(15_000_000.0),
+            BufferProfile::Standard,
+        );
+        assert_eq!(cause, StallCause::SeekOrReopenCost);
+
+        let load_time = now - Duration::from_millis(3000);
+        let cause_load = classify_stall_cause(
+            now,
+            None,
+            Some(load_time),
+            0,
+            0,
+            0.0,
+            Some(20_000_000.0),
+            Some(15_000_000.0),
+            Some(15_000_000.0),
+            BufferProfile::Standard,
+        );
+        assert_eq!(cause_load, StallCause::SeekOrReopenCost);
+    }
+
+    #[test]
+    fn test_classify_stall_cause_decoding_issue() {
+        let now = Instant::now();
+        let cause = classify_stall_cause(
+            now,
+            None,
+            None,
+            7, // 7 dropped frames >= 5
+            0,
+            10.0,
+            Some(20_000_000.0),
+            Some(25_000_000.0),
+            Some(25_000_000.0),
+            BufferProfile::Standard,
+        );
+        assert_eq!(cause, StallCause::DecodingIssue);
+    }
+
+    #[test]
+    fn test_classify_stall_cause_buffer_limit_too_small() {
+        let now = Instant::now();
+        // Standard limit: 160 MB. 85% is 136 MB. 140 MB >= 85%, cache_secs 5.0 < 8.0s
+        let bytes = 140 * 1024 * 1024;
+        let cause = classify_stall_cause(
+            now,
+            None,
+            None,
+            0,
+            bytes,
+            5.0,
+            Some(30_000_000.0),
+            Some(35_000_000.0),
+            Some(35_000_000.0),
+            BufferProfile::Standard,
+        );
+        assert_eq!(cause, StallCause::BufferLimitTooSmall);
+    }
+
+    #[test]
+    fn test_classify_stall_cause_bandwidth_deficit() {
+        let now = Instant::now();
+        // 25 Mbps video bitrate, download rate is only 1 MB/s (8 Mbps) < 0.8 * 25 Mbps (20 Mbps)
+        let cause = classify_stall_cause(
+            now,
+            None,
+            None,
+            0,
+            10 * 1024 * 1024,
+            2.0,
+            Some(25_000_000.0),
+            Some(1_000_000.0), // 8 Mbps raw input rate
+            Some(1_000_000.0),
+            BufferProfile::Standard,
+        );
+        assert_eq!(cause, StallCause::BandwidthDeficit);
+    }
+
+    #[test]
+    fn test_classify_stall_cause_transient_drop() {
+        let now = Instant::now();
+        // Video bitrate is 10 Mbps, normal input rate was 15 Mbps, current input rate recovered to 12 Mbps
+        let cause = classify_stall_cause(
+            now,
+            None,
+            None,
+            0,
+            10 * 1024 * 1024,
+            3.0,
+            Some(10_000_000.0),
+            Some(1_875_000.0), // 15 Mbps
+            Some(1_500_000.0), // 12 Mbps
+            BufferProfile::Standard,
+        );
+        assert_eq!(cause, StallCause::TransientBandwidthDrop);
+    }
+
+    #[test]
+    fn test_classify_stall_cause_missing_bandwidth_does_not_claim_deficit() {
+        let now = Instant::now();
+        // When download speed is not measured (None), it must NOT classify as BandwidthDeficit!
+        let cause_starved = classify_stall_cause(
+            now,
+            None,
+            None,
+            0,
+            0,
+            0.0, // Cache starved
+            Some(28_000_000.0),
+            None, // dl_rate N/A
+            None,
+            BufferProfile::Standard,
+        );
+        assert_eq!(cause_starved, StallCause::WaitingForSource);
+
+        let cause_unknown = classify_stall_cause(
+            now,
+            None,
+            None,
+            0,
+            5 * 1024 * 1024,
+            2.5, // Non-empty cache
+            Some(28_000_000.0),
+            None, // dl_rate N/A
+            None,
+            BufferProfile::Standard,
+        );
+        assert_eq!(cause_unknown, StallCause::Unknown);
+    }
 }

@@ -65,6 +65,8 @@ pub struct AppContext {
     pub shuffle_engine: Arc<crate::shuffle::ShuffleEngine>,
     pub download_manager: Arc<crate::download::DownloadManager>,
     pub active_playback_context: Arc<Mutex<Vec<TvItem>>>,
+    pub current_video_variants: Arc<Mutex<Vec<adult_hub_client::VideoVariantDto>>>,
+    pub active_quality_id: Arc<Mutex<String>>,
 }
 
 impl AppContext {

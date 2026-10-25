@@ -135,6 +135,61 @@ component CategoryMultiSelectChip inherits Rectangle {
     }
 }
 
+component SettingsToggle inherits Rectangle {
+    in property <bool> checked: false;
+    in property <bool> disabled: false;
+    in property <string> accessible-name: "";
+    out property <bool> has-focus: focus-target.has-focus;
+    callback toggled();
+
+    forward-focus: focus-target;
+    accessible-role: switch;
+    accessible-label: root.accessible-name;
+    accessible-checked: root.checked;
+    accessible-action-default => {
+        if (!root.disabled) { root.toggled(); }
+    }
+
+    width: 48px;
+    height: 26px;
+    border-radius: 13px;
+    background: root.disabled ? #171C2688
+        : (root.checked ? (touch.has-hover ? #D81B67 : #BE185D) : (touch.has-hover ? HubTheme.surface-hover : #242836));
+    border-width: root.has-focus ? 1.5px : 1px;
+    border-color: root.has-focus ? HubTheme.focus-ring : (root.checked ? #FF69B488 : HubTheme.separator);
+
+    animate background { duration: 120ms; }
+    animate border-color { duration: 120ms; }
+
+    Rectangle {
+        x: root.checked ? parent.width - self.width - 3px : 3px;
+        y: 3px;
+        width: 20px;
+        height: 20px;
+        border-radius: 10px;
+        background: root.disabled ? HubTheme.text-muted : #FFFFFF;
+        animate x { duration: 140ms; easing: ease-out; }
+    }
+
+    touch := TouchArea {
+        enabled: !root.disabled;
+        clicked => { root.toggled(); }
+    }
+
+    focus-target := FocusScope {
+        width: 0px;
+        height: 0px;
+        enabled: !root.disabled;
+        key-pressed(event) => {
+            if (!root.disabled && (event.text == Key.Space || event.text == Key.Return)) {
+                root.toggled();
+                return accept;
+            }
+            reject
+        }
+    }
+}
+
 component SettingsButton inherits Rectangle {
     in property <string> text;
     in property <string> accessible-name: root.text;
@@ -473,6 +528,7 @@ export component SettingsView inherits Rectangle {
     in property <string> error-message: "";
     in property <string> app-version: "0.1.0";
     in property <string> app-version-details: "";
+    in property <string> build-id: "";
 
     // Authentication & Jellyfin Server state
     in property <bool> is-logged-in: false;
@@ -536,7 +592,9 @@ export component SettingsView inherits Rectangle {
     in-out property <bool> diagnostics-expanded: false;
 
     // Playback Preferences state
+    in property <string> buffer-profile: "standard";
     in property <string> buffer-profile-label: "Buffer: Standard";
+    in property <string> buffer-profile-description: "";
     in property <string> seek-step-label: "Seek: 15s";
     in property <int> seek-step-sec: 15;
     in property <bool> hwdec-active: true;
@@ -607,7 +665,10 @@ export component SettingsView inherits Rectangle {
     callback toggle-phash();
 
     callback cycle-buffer-profile();
+    callback select-buffer-profile(string);
     callback cycle-seek-step();
+    callback select-seek-step(int);
+    callback copy-build-id(string);
     callback toggle-hwdec();
     callback toggle-autoplay();
     callback toggle-low-ram();
@@ -1445,53 +1506,268 @@ export component SettingsView inherits Rectangle {
                                     wrap: word-wrap;
                                 }
 
-                                HorizontalLayout {
-                                    spacing: 12px;
+                                VerticalLayout {
+                                    spacing: 10px;
 
-                                    SettingsButton {
-                                        text: root.buffer-profile-label;
-                                        custom-height: 40px;
-                                        horizontal-stretch: 1;
-                                        clicked => { root.cycle-buffer-profile(); }
+                                    VerticalLayout {
+                                        spacing: 4px;
+
+                                        Text {
+                                            text: "Stream Buffer Profile";
+                                            color: HubTheme.text-primary;
+                                            font-size: 13px;
+                                            font-weight: 600;
+                                        }
+
+                                        Text {
+                                            text: "Allocates demuxer stream cache and readahead. Higher values prevent stalls during 4K streaming and seeking at the expense of RAM.";
+                                            color: HubTheme.text-secondary;
+                                            font-size: HubTheme.metadata-size;
+                                            wrap: word-wrap;
+                                        }
                                     }
 
-                                    SettingsButton {
-                                        text: root.seek-step-label;
-                                        custom-height: 40px;
-                                        horizontal-stretch: 1;
-                                        clicked => { root.cycle-seek-step(); }
+                                    HorizontalLayout {
+                                        spacing: 8px;
+
+                                        SettingsButton {
+                                            text: "Fast Start (48M)";
+                                            active: root.buffer-profile == "fast_start";
+                                            custom-height: 38px;
+                                            horizontal-stretch: 1;
+                                            clicked => { root.select-buffer-profile("fast_start"); }
+                                        }
+
+                                        SettingsButton {
+                                            text: "Standard (160M)";
+                                            active: root.buffer-profile == "standard";
+                                            custom-height: 38px;
+                                            horizontal-stretch: 1;
+                                            clicked => { root.select-buffer-profile("standard"); }
+                                        }
+
+                                        SettingsButton {
+                                            text: "Large 4K (384M)";
+                                            active: root.buffer-profile == "large";
+                                            custom-height: 38px;
+                                            horizontal-stretch: 1;
+                                            clicked => { root.select-buffer-profile("large"); }
+                                        }
+
+                                        SettingsButton {
+                                            text: "Low RAM (24M)";
+                                            active: root.buffer-profile == "low_memory";
+                                            custom-height: 38px;
+                                            horizontal-stretch: 1;
+                                            clicked => { root.select-buffer-profile("low_memory"); }
+                                        }
+                                    }
+
+                                    if root.buffer-profile-description != "" : Rectangle {
+                                        background: #FFFFFF08;
+                                        border-radius: 6px;
+                                        border-width: 1px;
+                                        border-color: #FFFFFF10;
+
+                                        HorizontalLayout {
+                                            padding-left: 12px;
+                                            padding-right: 12px;
+                                            padding-top: 8px;
+                                            padding-bottom: 8px;
+
+                                            Text {
+                                                text: root.buffer-profile-description;
+                                                color: HubTheme.text-secondary;
+                                                font-size: 12px;
+                                                wrap: word-wrap;
+                                            }
+                                        }
                                     }
                                 }
 
-                                HorizontalLayout {
-                                    spacing: 12px;
-
-                                    SettingsButton {
-                                        text: root.hwdec-active ? "Hardware Decode: ON" : "Hardware Decode: OFF";
-                                        active: root.hwdec-active;
-                                        custom-height: 40px;
-                                        horizontal-stretch: 1;
-                                        clicked => { root.toggle-hwdec(); }
-                                    }
-
-                                    SettingsButton {
-                                        text: root.autoplay-active ? "Autoplay Next: ON" : "Autoplay Next: OFF";
-                                        active: root.autoplay-active;
-                                        custom-height: 40px;
-                                        horizontal-stretch: 1;
-                                        clicked => { root.toggle-autoplay(); }
-                                    }
+                                Rectangle {
+                                    height: 1px;
+                                    background: #F3F4F60D;
                                 }
 
                                 HorizontalLayout {
-                                    spacing: 12px;
+                                    spacing: 16px;
+                                    alignment: space-between;
 
-                                    SettingsButton {
-                                        text: root.low-ram-active ? "Low-RAM Mode: ON" : "Low-RAM Mode: OFF";
-                                        active: root.low-ram-active;
-                                        custom-height: 40px;
+                                    VerticalLayout {
+                                        spacing: 4px;
                                         horizontal-stretch: 1;
-                                        clicked => { root.toggle-low-ram(); }
+
+                                        Text {
+                                            text: "Seek Jump Step";
+                                            color: HubTheme.text-primary;
+                                            font-size: 13px;
+                                            font-weight: 600;
+                                        }
+
+                                        Text {
+                                            text: "Jump interval when skipping forward or backward using arrow keys or player seek buttons.";
+                                            color: HubTheme.text-secondary;
+                                            font-size: HubTheme.metadata-size;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+
+                                    VerticalLayout {
+                                        alignment: center;
+
+                                        HorizontalLayout {
+                                            spacing: 6px;
+
+                                            SettingsButton {
+                                                text: "5s";
+                                                active: root.seek-step-sec == 5;
+                                                custom-height: 34px;
+                                                custom-width: 52px;
+                                                clicked => { root.select-seek-step(5); }
+                                            }
+
+                                            SettingsButton {
+                                                text: "10s";
+                                                active: root.seek-step-sec == 10;
+                                                custom-height: 34px;
+                                                custom-width: 52px;
+                                                clicked => { root.select-seek-step(10); }
+                                            }
+
+                                            SettingsButton {
+                                                text: "15s";
+                                                active: root.seek-step-sec == 15;
+                                                custom-height: 34px;
+                                                custom-width: 52px;
+                                                clicked => { root.select-seek-step(15); }
+                                            }
+
+                                            SettingsButton {
+                                                text: "30s";
+                                                active: root.seek-step-sec == 30;
+                                                custom-height: 34px;
+                                                custom-width: 52px;
+                                                clicked => { root.select-seek-step(30); }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Rectangle {
+                                    height: 1px;
+                                    background: #F3F4F60D;
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 16px;
+                                    alignment: space-between;
+
+                                    VerticalLayout {
+                                        spacing: 4px;
+                                        horizontal-stretch: 1;
+
+                                        Text {
+                                            text: "Hardware Video Decoding";
+                                            color: HubTheme.text-primary;
+                                            font-size: 13px;
+                                            font-weight: 600;
+                                        }
+
+                                        Text {
+                                            text: "Offload 4K/60fps H.264, HEVC, and AV1 video decoding to the GPU (auto-safe hardware acceleration).";
+                                            color: HubTheme.text-secondary;
+                                            font-size: HubTheme.metadata-size;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+
+                                    VerticalLayout {
+                                        alignment: center;
+
+                                        SettingsToggle {
+                                            checked: root.hwdec-active;
+                                            accessible-name: "Hardware Video Decoding";
+                                            toggled => { root.toggle-hwdec(); }
+                                        }
+                                    }
+                                }
+
+                                Rectangle {
+                                    height: 1px;
+                                    background: #F3F4F60D;
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 16px;
+                                    alignment: space-between;
+
+                                    VerticalLayout {
+                                        spacing: 4px;
+                                        horizontal-stretch: 1;
+
+                                        Text {
+                                            text: "Autoplay Next Video";
+                                            color: HubTheme.text-primary;
+                                            font-size: 13px;
+                                            font-weight: 600;
+                                        }
+
+                                        Text {
+                                            text: "Automatically play the next item in the channel or playlist when the current video ends.";
+                                            color: HubTheme.text-secondary;
+                                            font-size: HubTheme.metadata-size;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+
+                                    VerticalLayout {
+                                        alignment: center;
+
+                                        SettingsToggle {
+                                            checked: root.autoplay-active;
+                                            accessible-name: "Autoplay Next Video";
+                                            toggled => { root.toggle-autoplay(); }
+                                        }
+                                    }
+                                }
+
+                                Rectangle {
+                                    height: 1px;
+                                    background: #F3F4F60D;
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 16px;
+                                    alignment: space-between;
+
+                                    VerticalLayout {
+                                        spacing: 4px;
+                                        horizontal-stretch: 1;
+
+                                        Text {
+                                            text: "Low-RAM Mode (Catalog & Thumbnails)";
+                                            color: HubTheme.text-primary;
+                                            font-size: 13px;
+                                            font-weight: 600;
+                                        }
+
+                                        Text {
+                                            text: "Reduces app memory by downscaling UI poster thumbnails to 320px. Separate from the player's Low RAM (24M) video buffer.";
+                                            color: HubTheme.text-secondary;
+                                            font-size: HubTheme.metadata-size;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+
+                                    VerticalLayout {
+                                        alignment: center;
+
+                                        SettingsToggle {
+                                            checked: root.low-ram-active;
+                                            accessible-name: "Low-RAM Mode";
+                                            toggled => { root.toggle-low-ram(); }
+                                        }
                                     }
                                 }
                             }
@@ -2343,17 +2619,47 @@ export component SettingsView inherits Rectangle {
                                     font-weight: 700;
                                 }
 
-                                Text {
-                                    text: "Adult Hub Desktop " + root.app-version + " (Desktop Edition)";
-                                    color: HubTheme.text-primary;
-                                    font-size: 14px;
-                                    font-weight: 600;
-                                }
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    alignment: space-between;
 
-                                if root.app-version-details != "" : Text {
-                                    text: root.app-version-details;
-                                    color: HubTheme.text-secondary;
-                                    font-size: 12px;
+                                    VerticalLayout {
+                                        spacing: 4px;
+                                        horizontal-stretch: 1;
+
+                                        Text {
+                                            text: "Adult Hub Desktop " + root.app-version + " (Desktop Edition)";
+                                            color: HubTheme.text-primary;
+                                            font-size: 14px;
+                                            font-weight: 600;
+                                        }
+
+                                        if root.build-id != "" : Text {
+                                            text: "Build ID: " + root.build-id;
+                                            color: HubTheme.text-secondary;
+                                            font-size: 12px;
+                                            wrap: word-wrap;
+                                        }
+
+                                        if root.app-version-details != "" : Text {
+                                            text: root.app-version-details;
+                                            color: HubTheme.text-muted;
+                                            font-size: 11px;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+
+                                    VerticalLayout {
+                                        alignment: center;
+
+                                        SettingsButton {
+                                            text: "Copy Build ID";
+                                            custom-height: 36px;
+                                            clicked => {
+                                                root.copy-build-id(root.build-id != "" ? root.build-id : root.app-version-details);
+                                            }
+                                        }
+                                    }
                                 }
 
                                 HorizontalLayout {
@@ -2430,10 +2736,40 @@ export component SettingsView inherits Rectangle {
                                     font-weight: 700;
                                 }
 
-                                Text {
-                                    text: "Adult Hub Desktop " + root.app-version + " · third-party software notices and licenses.";
-                                    color: HubTheme.text-secondary;
-                                    font-size: HubTheme.metadata-size;
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    alignment: space-between;
+
+                                    VerticalLayout {
+                                        spacing: 4px;
+                                        horizontal-stretch: 1;
+
+                                        Text {
+                                            text: "Adult Hub Desktop " + root.app-version + " · third-party software notices and licenses.";
+                                            color: HubTheme.text-secondary;
+                                            font-size: HubTheme.metadata-size;
+                                            wrap: word-wrap;
+                                        }
+
+                                        if root.build-id != "" : Text {
+                                            text: "Build ID: " + root.build-id;
+                                            color: HubTheme.text-muted;
+                                            font-size: 11px;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+
+                                    VerticalLayout {
+                                        alignment: center;
+
+                                        SettingsButton {
+                                            text: "Copy Build ID";
+                                            custom-height: 34px;
+                                            clicked => {
+                                                root.copy-build-id(root.build-id != "" ? root.build-id : root.app-version-details);
+                                            }
+                                        }
+                                    }
                                 }
 
                                 SettingsButton {

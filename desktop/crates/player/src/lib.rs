@@ -20,6 +20,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 pub const CLIENT_API_VERSION: u64 = 2 << 16;
 
@@ -92,39 +93,92 @@ pub enum BufferProfile {
 }
 
 impl BufferProfile {
+    pub const ALL: [BufferProfile; 4] = [
+        BufferProfile::FastStart,
+        BufferProfile::Standard,
+        BufferProfile::Large,
+        BufferProfile::LowMemory,
+    ];
+
+    pub fn id(&self) -> &'static str {
+        match self {
+            Self::FastStart => "fast_start",
+            Self::Standard => "standard",
+            Self::Large => "large",
+            Self::LowMemory => "low_memory",
+        }
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             Self::FastStart => "Fast Start",
             Self::Standard => "Standard",
-            Self::Large => "Large",
+            Self::Large => "Large (4K)",
             Self::LowMemory => "Low-Memory",
+        }
+    }
+
+    pub fn description(&self) -> &'static str {
+        match self {
+            Self::FastStart => "Quick startup with 48 MB buffer & 15s readahead. Best for rapid browsing on high-speed connections.",
+            Self::Standard => "Balanced 160 MB buffer & 45s readahead (3.5s resume wait). Smooth 1080p and general 4K streaming.",
+            Self::Large => "Deep 384 MB buffer & 90s readahead with 5.5s resume threshold. Resilient against bandwidth dips and 4K seek stalls.",
+            Self::LowMemory => "Minimal 24 MB RAM footprint & 8s readahead. Conserves memory on low-spec systems.",
         }
     }
 
     pub fn demuxer_max_bytes(&self) -> &'static str {
         match self {
-            Self::FastStart => "16M",
-            Self::Standard => "64M",
-            Self::Large => "150M",
-            Self::LowMemory => "8M",
+            Self::FastStart => "48M",
+            Self::Standard => "160M",
+            Self::Large => "384M",
+            Self::LowMemory => "24M",
         }
     }
 
     pub fn demuxer_max_back_bytes(&self) -> &'static str {
         match self {
-            Self::FastStart => "8M",
-            Self::Standard => "32M",
-            Self::Large => "64M",
-            Self::LowMemory => "2M",
+            Self::FastStart => "16M",
+            Self::Standard => "48M",
+            Self::Large => "96M",
+            Self::LowMemory => "8M",
         }
     }
 
     pub fn demuxer_readahead_secs(&self) -> &'static str {
         match self {
-            Self::FastStart => "5",
-            Self::Standard => "20",
-            Self::Large => "60",
-            Self::LowMemory => "3",
+            Self::FastStart => "15",
+            Self::Standard => "45",
+            Self::Large => "90",
+            Self::LowMemory => "8",
+        }
+    }
+
+    pub fn cache_secs(&self) -> &'static str {
+        match self {
+            Self::FastStart => "15",
+            Self::Standard => "45",
+            Self::Large => "90",
+            Self::LowMemory => "8",
+        }
+    }
+
+    pub fn cache_pause_wait(&self) -> &'static str {
+        match self {
+            Self::FastStart => "1.5",
+            Self::Standard => "3.5",
+            Self::Large => "5.5",
+            Self::LowMemory => "1.5",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        match id.trim().to_lowercase().as_str() {
+            "fast_start" | "fast-start" | "faststart" => Some(Self::FastStart),
+            "standard" => Some(Self::Standard),
+            "large" | "4k" => Some(Self::Large),
+            "low_memory" | "low-memory" | "lowmemory" | "low_ram" => Some(Self::LowMemory),
+            _ => None,
         }
     }
 }
@@ -140,14 +194,24 @@ pub struct PlaybackStats {
     pub dropped_frames: Option<u64>,
     pub container_fps: Option<f64>,
     pub video_bitrate: Option<f64>,
+    pub audio_bitrate: Option<f64>,
     pub file_format: Option<String>,
     pub color_primaries: Option<String>,
     pub gamma: Option<String>,
     pub pixelformat: Option<String>,
     pub vo: Option<String>,
     pub cache_duration_secs: Option<f64>,
+    pub cache_forward_bytes: Option<u64>,
+    pub cache_total_bytes: Option<u64>,
+    pub raw_input_rate_bps: Option<f64>,
     pub paused_for_cache: bool,
+    pub buffer_profile_name: Option<String>,
+    pub buffer_profile_details: Option<String>,
+    pub stall_count: u32,
+    pub total_stalled_duration_secs: f64,
+    pub last_stall_diagnosis: Option<String>,
     pub file_size: Option<u64>,
+    pub quality_variant: Option<String>,
 }
 
 pub fn format_file_size(bytes: u64) -> String {
@@ -199,6 +263,10 @@ impl PlaybackStats {
         };
         lines.push(format!("Resolution: {res}"));
 
+        if let Some(ref q) = self.quality_variant {
+            lines.push(format!("Quality Variant: {q}"));
+        }
+
         let vcodec = self.video_codec.as_deref().unwrap_or("Unknown");
         lines.push(format!("Video Codec: {vcodec}"));
 
@@ -231,15 +299,36 @@ impl PlaybackStats {
         lines.push("".to_string());
         lines.push("[ Playback & Buffer ]".to_string());
 
+        if let Some(profile_name) = &self.buffer_profile_name {
+            let details = self.buffer_profile_details.as_deref().unwrap_or("");
+            lines.push(format!("Buffer Profile: {profile_name} ({details})"));
+        }
+
         if let Some(cache_secs) = self.cache_duration_secs {
             let state = if self.paused_for_cache {
                 " (Buffering...)"
             } else {
                 ""
             };
-            lines.push(format!("Buffer Cache: {cache_secs:.1} s{state}"));
+            let fw_str = self
+                .cache_forward_bytes
+                .map(|b| format!(" / {}", format_file_size(b)))
+                .unwrap_or_default();
+            lines.push(format!("Buffer Cache: {cache_secs:.1} s{fw_str}{state}"));
         } else {
             lines.push("Buffer Cache: N/A".to_string());
+        }
+
+        if let Some(rate_bps) = self.raw_input_rate_bps {
+            if rate_bps > 0.0 {
+                let mbps = (rate_bps * 8.0) / 1_000_000.0;
+                let mbs = rate_bps / (1024.0 * 1024.0);
+                lines.push(format!("Download Rate: {mbps:.2} Mbit/s ({mbs:.2} MB/s)"));
+            } else {
+                lines.push("Download Rate: Idle / Cached".to_string());
+            }
+        } else {
+            lines.push("Download Rate: N/A".to_string());
         }
 
         if let Some(fps) = self.container_fps {
@@ -250,7 +339,8 @@ impl PlaybackStats {
 
         if let Some(bitrate) = self.video_bitrate {
             if bitrate > 0.0 {
-                lines.push(format!("Video Bitrate: {:.0} kbit/s", bitrate / 1000.0));
+                let mbps = bitrate / 1_000_000.0;
+                lines.push(format!("Video Bitrate: {mbps:.2} Mbit/s ({:.0} kbit/s)", bitrate / 1000.0));
             } else {
                 lines.push("Video Bitrate: 0 kbit/s (Paused)".to_string());
             }
@@ -260,6 +350,14 @@ impl PlaybackStats {
 
         let dropped = self.dropped_frames.unwrap_or(0);
         lines.push(format!("Dropped Frames: {dropped}"));
+
+        if self.stall_count > 0 {
+            let last_diag = self.last_stall_diagnosis.as_deref().unwrap_or("Buffer starved");
+            lines.push(format!(
+                "Stalls: {} ({:.1} s total) - {last_diag}",
+                self.stall_count, self.total_stalled_duration_secs
+            ));
+        }
 
         if let (Some(primaries), Some(gamma)) = (&self.color_primaries, &self.gamma) {
             lines.push(format!("Color: {primaries} / {gamma} (SDR mapped)"));
@@ -276,6 +374,13 @@ impl PlaybackStats {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct StallSummary {
+    pub stall_count: u32,
+    pub total_stalled_duration_secs: f64,
+    pub last_stall_diagnosis: Option<String>,
+}
+
 pub struct Player {
     api: Arc<sys::MpvApi>,
     handle: *mut sys::mpv_handle,
@@ -284,6 +389,12 @@ pub struct Player {
     quit: Arc<AtomicBool>,
     last_load: Mutex<Option<LoadRequest>>,
     load_generation: AtomicU64,
+    active_profile: Mutex<BufferProfile>,
+    last_seek: Mutex<Option<Instant>>,
+    last_load_time: Mutex<Option<Instant>>,
+    stall_summary: Mutex<StallSummary>,
+    transfer_sampler: Mutex<Option<(Instant, u64, Option<f64>)>>,
+    current_quality: Mutex<Option<String>>,
 }
 
 // SAFETY: libmpv client API is documented as safe to call from multiple threads.
@@ -324,6 +435,7 @@ impl Player {
         let hwdec_mode = std::env::var("ADULT_HUB_HWDEC").unwrap_or_else(|_| "auto-copy".into());
         let ao_mode = std::env::var("ADULT_HUB_AO").ok();
         let ao_pcm_file = std::env::var("ADULT_HUB_AO_PCM_FILE").ok();
+        let initial_profile = BufferProfile::Standard;
         let mut options: Vec<(&str, &str)> = vec![
             ("config", "no"),
             ("load-scripts", "no"),
@@ -341,9 +453,14 @@ impl Player {
             ("target-colorspace-hint", "no"),
             ("target-trc", "srgb"),
             ("cache", "yes"),
-            ("demuxer-max-bytes", "64M"),
-            ("demuxer-max-back-bytes", "32M"),
-            ("demuxer-readahead-secs", "20"),
+            ("cache-pause", "yes"),
+            ("cache-pause-initial", "no"),
+            ("cache-pause-wait", initial_profile.cache_pause_wait()),
+            ("demuxer-max-bytes", initial_profile.demuxer_max_bytes()),
+            ("demuxer-max-back-bytes", initial_profile.demuxer_max_back_bytes()),
+            ("demuxer-readahead-secs", initial_profile.demuxer_readahead_secs()),
+            ("cache-secs", initial_profile.cache_secs()),
+            ("force-seekable", "yes"),
             ("vd-lavc-threads", "0"),
             ("hr-seek", "yes"),
             ("video-sync", "audio"),
@@ -408,6 +525,12 @@ impl Player {
             quit,
             last_load: Mutex::new(None),
             load_generation: AtomicU64::new(0),
+            active_profile: Mutex::new(initial_profile),
+            last_seek: Mutex::new(None),
+            last_load_time: Mutex::new(None),
+            stall_summary: Mutex::new(StallSummary::default()),
+            transfer_sampler: Mutex::new(None),
+            current_quality: Mutex::new(None),
         })
     }
 
@@ -484,6 +607,11 @@ impl Player {
         if request.url.trim().is_empty() {
             return Err(PlayerError::InvalidArgument("empty media URL".into()));
         }
+        *self.last_load_time.lock().unwrap() = Some(Instant::now());
+        self.reset_stall_stats();
+        *self.transfer_sampler.lock().unwrap() = None;
+        let active_prof = *self.active_profile.lock().unwrap();
+        let _ = self.set_buffer_profile(active_prof);
         if !request.headers.is_empty() {
             if let Err(e) =
                 self.set_property_string("http-header-fields", &request.headers.join(","))
@@ -553,11 +681,33 @@ impl Player {
     }
 
     pub fn seek_absolute(&self, seconds: f64) -> Result<()> {
+        *self.last_seek.lock().unwrap() = Some(Instant::now());
         self.set_property_string("time-pos", &format!("{seconds:.3}"))
     }
 
     pub fn seek_relative(&self, seconds: f64) -> Result<()> {
+        *self.last_seek.lock().unwrap() = Some(Instant::now());
         self.command(&["seek", &format!("{seconds:.3}"), "relative"])
+    }
+
+    pub fn last_seek_time(&self) -> Option<Instant> {
+        *self.last_seek.lock().unwrap()
+    }
+
+    pub fn last_load_time(&self) -> Option<Instant> {
+        *self.last_load_time.lock().unwrap()
+    }
+
+    pub fn update_stall_summary(&self, count: u32, total_dur: f64, diag: Option<String>) {
+        let mut s = self.stall_summary.lock().unwrap();
+        s.stall_count = count;
+        s.total_stalled_duration_secs = total_dur;
+        s.last_stall_diagnosis = diag;
+    }
+
+    pub fn reset_stall_stats(&self) {
+        let mut s = self.stall_summary.lock().unwrap();
+        *s = StallSummary::default();
     }
 
     pub fn position(&self) -> Option<f64> {
@@ -654,10 +804,30 @@ impl Player {
     }
 
     pub fn set_buffer_profile(&self, profile: BufferProfile) -> Result<()> {
+        self.set_property_string("cache", "yes")?;
+        self.set_property_string("cache-pause", "yes")?;
+        self.set_property_string("cache-pause-wait", profile.cache_pause_wait())?;
         self.set_property_string("demuxer-max-bytes", profile.demuxer_max_bytes())?;
         self.set_property_string("demuxer-max-back-bytes", profile.demuxer_max_back_bytes())?;
         self.set_property_string("demuxer-readahead-secs", profile.demuxer_readahead_secs())?;
+        self.set_property_string("cache-secs", profile.cache_secs())?;
+        *self.active_profile.lock().unwrap() = profile;
         Ok(())
+    }
+
+    pub fn buffer_profile(&self) -> BufferProfile {
+        *self.active_profile.lock().unwrap()
+    }
+
+    pub fn effective_buffer_params(&self) -> (String, String, String, String, String) {
+        let active = self.buffer_profile();
+        (
+            self.get_string("demuxer-max-bytes").unwrap_or_else(|| active.demuxer_max_bytes().into()),
+            self.get_string("demuxer-max-back-bytes").unwrap_or_else(|| active.demuxer_max_back_bytes().into()),
+            self.get_string("demuxer-readahead-secs").unwrap_or_else(|| active.demuxer_readahead_secs().into()),
+            self.get_string("cache-secs").unwrap_or_else(|| active.cache_secs().into()),
+            self.get_string("cache-pause-wait").unwrap_or_else(|| active.cache_pause_wait().into()),
+        )
     }
 
     pub fn set_hwdec(&self, hwdec: &str) -> Result<()> {
@@ -762,6 +932,43 @@ impl Player {
             .or_else(|| self.get_string("audio-codec"))
             .or_else(|| self.get_string("audio-format"));
 
+        let cache_forward_bytes = self.get_u64("demuxer-cache-state/fw-bytes");
+        let cache_total_bytes = self.get_u64("demuxer-cache-state/total-bytes");
+        let raw_input_rate_bps = self.get_f64("cache-speed")
+            .filter(|&r| r > 0.0)
+            .or_else(|| self.get_f64("demuxer-cache-state/raw-input-rate").filter(|&r| r > 0.0))
+            .or_else(|| {
+                if let Some(total) = cache_total_bytes {
+                    let now = Instant::now();
+                    let mut sampler = self.transfer_sampler.lock().unwrap();
+                    if let Some((last_time, last_bytes, prev_speed)) = *sampler {
+                        let elapsed = now.saturating_duration_since(last_time).as_secs_f64();
+                        if elapsed >= 0.8 {
+                            let speed = if total >= last_bytes {
+                                let delta = (total - last_bytes) as f64;
+                                let rate = delta / elapsed;
+                                if rate > 0.0 { Some(rate) } else { None }
+                            } else {
+                                None
+                            };
+                            *sampler = Some((now, total, speed));
+                            speed
+                        } else {
+                            prev_speed
+                        }
+                    } else {
+                        *sampler = Some((now, total, None));
+                        None
+                    }
+                } else {
+                    None
+                }
+            });
+        let audio_bitrate = self.get_f64("audio-bitrate");
+        let active_prof = self.buffer_profile();
+
+        let stall = self.stall_summary.lock().unwrap().clone();
+
         PlaybackStats {
             video_codec: video_codec.clone(),
             audio_codec,
@@ -774,15 +981,38 @@ impl Player {
                 .and_then(|value| value.parse().ok()),
             container_fps: self.get_f64("container-fps"),
             video_bitrate: self.get_f64("video-bitrate"),
+            audio_bitrate,
             file_format: self.get_string("file-format"),
             color_primaries: self.get_string("video-params/primaries"),
             gamma: self.get_string("video-params/gamma"),
             pixelformat: self.get_string("video-params/pixelformat"),
             vo: self.get_string("current-vo"),
             cache_duration_secs,
+            cache_forward_bytes,
+            cache_total_bytes,
+            raw_input_rate_bps,
             paused_for_cache,
+            buffer_profile_name: Some(active_prof.name().to_string()),
+            buffer_profile_details: Some(format!(
+                "{} / {}s, wait: {}s",
+                active_prof.demuxer_max_bytes(),
+                active_prof.demuxer_readahead_secs(),
+                active_prof.cache_pause_wait()
+            )),
+            stall_count: stall.stall_count,
+            total_stalled_duration_secs: stall.total_stalled_duration_secs,
+            last_stall_diagnosis: stall.last_stall_diagnosis,
             file_size: self.get_u64("file-size"),
+            quality_variant: self.current_quality.lock().unwrap().clone(),
         }
+    }
+
+    pub fn quality_variant(&self) -> Option<String> {
+        self.current_quality.lock().unwrap().clone()
+    }
+
+    pub fn set_quality_variant(&self, variant: Option<String>) {
+        *self.current_quality.lock().unwrap() = variant;
     }
 
     pub fn get_string(&self, name: &str) -> Option<String> {
@@ -919,15 +1149,23 @@ fn event_loop(
                 break;
             }
             sys::MPV_EVENT_FILE_LOADED => {
+                let dwidth = get_u32_handle(&api, handle, "dwidth");
+                let dheight = get_u32_handle(&api, handle, "dheight");
+                let width = get_u32_handle(&api, handle, "width");
+                let height = get_u32_handle(&api, handle, "height");
                 let _ = sender.send(PlayerEvent::FileLoaded {
-                    width: get_u32_handle(&api, handle, "width"),
-                    height: get_u32_handle(&api, handle, "height"),
+                    width: dwidth.or(width),
+                    height: dheight.or(height),
                 });
             }
             sys::MPV_EVENT_VIDEO_RECONFIG | sys::MPV_EVENT_PLAYBACK_RESTART => {
+                let dwidth = get_u32_handle(&api, handle, "dwidth");
+                let dheight = get_u32_handle(&api, handle, "dheight");
+                let width = get_u32_handle(&api, handle, "width");
+                let height = get_u32_handle(&api, handle, "height");
                 let _ = sender.send(PlayerEvent::VideoReconfig {
-                    width: get_u32_handle(&api, handle, "width"),
-                    height: get_u32_handle(&api, handle, "height"),
+                    width: dwidth.or(width),
+                    height: dheight.or(height),
                 });
             }
             sys::MPV_EVENT_END_FILE => {
@@ -1352,24 +1590,38 @@ mod tests {
             vo: Some("gpu".into()),
             container_fps: Some(60.0),
             video_bitrate: Some(5_000_000.0),
+            audio_bitrate: Some(192_000.0),
             dropped_frames: Some(2),
             pixelformat: Some("yuv420p".into()),
             color_primaries: Some("bt709".into()),
             gamma: Some("bt709".into()),
             file_format: Some("mp4".into()),
             cache_duration_secs: Some(14.5),
+            cache_forward_bytes: Some(40_000_000),
+            cache_total_bytes: Some(60_000_000),
+            raw_input_rate_bps: Some(5_000_000.0),
             paused_for_cache: false,
+            buffer_profile_name: Some("Standard".into()),
+            buffer_profile_details: Some("128M / 25s, wait: 2.5s".into()),
+            stall_count: 1,
+            total_stalled_duration_secs: 2.1,
+            last_stall_diagnosis: Some("TransientBandwidthDrop".into()),
             file_size: Some(104_857_600),
+            quality_variant: Some("1080p (Original)".into()),
         };
         let hud = populated.to_hud_text();
         assert!(hud.contains("Resolution: 1920x1080"));
+        assert!(hud.contains("Quality Variant: 1080p (Original)"));
         assert!(hud.contains("Video Codec: h264"));
         assert!(hud.contains("Audio Codec: aac"));
         assert!(hud.contains("Decoder: h264_vaapi (HW: vaapi)"));
         assert!(hud.contains("File size: 100.0 MB"));
+        assert!(hud.contains("Buffer Profile: Standard (128M / 25s, wait: 2.5s)"));
         assert!(hud.contains("Buffer Cache: 14.5 s"));
         assert!(hud.contains("Container FPS: 60.00"));
-        assert!(hud.contains("Video Bitrate: 5000 kbit/s"));
+        assert!(hud.contains("Video Bitrate: 5.00 Mbit/s (5000 kbit/s)"));
+        assert!(hud.contains("Download Rate: 40.00 Mbit/s (4.77 MB/s)"));
+        assert!(hud.contains("Stalls: 1 (2.1 s total) - TransientBandwidthDrop"));
         assert!(hud.contains("Dropped Frames: 2"));
         assert!(hud.contains("Pixel format: yuv420p"));
         assert!(hud.contains("Color: bt709 / bt709 (SDR mapped)"));
@@ -1379,24 +1631,43 @@ mod tests {
     #[test]
     fn buffer_profile_parameters() {
         let fast = BufferProfile::FastStart;
+        assert_eq!(fast.id(), "fast_start");
         assert_eq!(fast.name(), "Fast Start");
-        assert_eq!(fast.demuxer_max_bytes(), "16M");
-        assert_eq!(fast.demuxer_readahead_secs(), "5");
+        assert_eq!(fast.demuxer_max_bytes(), "48M");
+        assert_eq!(fast.demuxer_readahead_secs(), "15");
+        assert_eq!(fast.cache_secs(), "15");
+        assert_eq!(fast.cache_pause_wait(), "1.5");
 
         let std = BufferProfile::Standard;
+        assert_eq!(std.id(), "standard");
         assert_eq!(std.name(), "Standard");
-        assert_eq!(std.demuxer_max_bytes(), "64M");
-        assert_eq!(std.demuxer_readahead_secs(), "20");
+        assert_eq!(std.demuxer_max_bytes(), "160M");
+        assert_eq!(std.demuxer_readahead_secs(), "45");
+        assert_eq!(std.cache_secs(), "45");
+        assert_eq!(std.cache_pause_wait(), "3.5");
 
         let large = BufferProfile::Large;
-        assert_eq!(large.name(), "Large");
-        assert_eq!(large.demuxer_max_bytes(), "150M");
-        assert_eq!(large.demuxer_readahead_secs(), "60");
+        assert_eq!(large.id(), "large");
+        assert_eq!(large.name(), "Large (4K)");
+        assert_eq!(large.demuxer_max_bytes(), "384M");
+        assert_eq!(large.demuxer_readahead_secs(), "90");
+        assert_eq!(large.cache_secs(), "90");
+        assert_eq!(large.cache_pause_wait(), "5.5");
 
         let low = BufferProfile::LowMemory;
+        assert_eq!(low.id(), "low_memory");
         assert_eq!(low.name(), "Low-Memory");
-        assert_eq!(low.demuxer_max_bytes(), "8M");
-        assert_eq!(low.demuxer_readahead_secs(), "3");
+        assert_eq!(low.demuxer_max_bytes(), "24M");
+        assert_eq!(low.demuxer_readahead_secs(), "8");
+        assert_eq!(low.cache_secs(), "8");
+        assert_eq!(low.cache_pause_wait(), "1.5");
+
+        assert_eq!(BufferProfile::from_id("fast_start"), Some(BufferProfile::FastStart));
+        assert_eq!(BufferProfile::from_id("standard"), Some(BufferProfile::Standard));
+        assert_eq!(BufferProfile::from_id("large"), Some(BufferProfile::Large));
+        assert_eq!(BufferProfile::from_id("4k"), Some(BufferProfile::Large));
+        assert_eq!(BufferProfile::from_id("low_memory"), Some(BufferProfile::LowMemory));
+        assert_eq!(BufferProfile::from_id("unknown"), None);
     }
 
     #[test]

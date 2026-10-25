@@ -196,6 +196,16 @@ impl PlaybackSessionController {
         resolver_url: Option<&str>,
         access_token: Option<&str>,
     ) -> Result<(String, PlayMethod), String> {
+        Self::resolve_stream_url_with_variant(item, server_url, resolver_url, access_token, None)
+    }
+
+    pub fn resolve_stream_url_with_variant(
+        item: &TvItem,
+        server_url: Option<&str>,
+        resolver_url: Option<&str>,
+        access_token: Option<&str>,
+        variant: Option<&str>,
+    ) -> Result<(String, PlayMethod), String> {
         if item.id == "sample" {
             return Ok((
                 crate::options::resolve_sample_media(),
@@ -235,7 +245,13 @@ impl PlaybackSessionController {
             } else {
                 format!("telegram:{}", item.id)
             };
-            let url = format!("{resolver}/admin/play/{prov_ref}/stream?mode=proxy");
+            let variant_param = match variant {
+                Some(v) if !v.is_empty() && v != "original" => {
+                    format!("&variant={}", adult_hub_client::urlencoding(v))
+                }
+                _ => String::new(),
+            };
+            let url = format!("{resolver}/admin/play/{prov_ref}/stream?mode=proxy{variant_param}");
             return Ok((url, PlayMethod::DirectStream));
         }
 
@@ -485,5 +501,32 @@ mod tests {
             "http://resolver.local:8080/admin/play/telegram:101/stream?mode=proxy"
         );
         assert_eq!(method, PlayMethod::DirectStream);
+
+        // Variant resolution
+        let (orig_variant_url, _) = PlaybackSessionController::resolve_stream_url_with_variant(
+            &tg_item,
+            None,
+            Some("http://resolver.local:8080"),
+            None,
+            Some("original"),
+        )
+        .unwrap();
+        assert_eq!(
+            orig_variant_url,
+            "http://resolver.local:8080/admin/play/telegram:101/stream?mode=proxy"
+        );
+
+        let (alt_variant_url, _) = PlaybackSessionController::resolve_stream_url_with_variant(
+            &tg_item,
+            None,
+            Some("http://resolver.local:8080"),
+            None,
+            Some("alt_720p"),
+        )
+        .unwrap();
+        assert_eq!(
+            alt_variant_url,
+            "http://resolver.local:8080/admin/play/telegram:101/stream?mode=proxy&variant=alt_720p"
+        );
     }
 }

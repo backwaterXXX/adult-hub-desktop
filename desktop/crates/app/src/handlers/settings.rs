@@ -1001,13 +1001,47 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
             let Some(ui) = weak.upgrade() else { return };
             let current = ui.get_seek_step_sec();
             let next = match current {
+                5 => 10,
                 10 => 15,
                 15 => 30,
-                _ => 10,
+                _ => 5,
             };
             let _ = local_store.set_setting("seek_step_sec", &next.to_string());
             ui.set_seek_step_sec(next);
             ui.set_seek_step_label(format!("Step: {next}s").into());
+        });
+    }
+
+    // 6b. Explicit Seek Step Selection (5s, 10s, 15s, 30s)
+    {
+        let weak = ui.as_weak();
+        let local_store = local_store.clone();
+        ui.on_select_seek_step(move |step| {
+            let Some(ui) = weak.upgrade() else { return };
+            let step = step.clamp(5, 60);
+            let _ = local_store.set_setting("seek_step_sec", &step.to_string());
+            ui.set_seek_step_sec(step);
+            ui.set_seek_step_label(format!("Step: {step}s").into());
+        });
+    }
+
+    // 6c. Copy Build ID to clipboard
+    {
+        let weak = ui.as_weak();
+        ui.on_copy_build_id(move |build_id| {
+            let Some(ui) = weak.upgrade() else { return };
+            match crate::copy_text_to_clipboard(build_id.as_str()) {
+                Ok(()) => {
+                    ui.set_toast_message("Build ID copied to clipboard".into());
+                    ui.set_toast_type("info".into());
+                    ui.set_toast_action_text("".into());
+                    ui.set_toast_visible(true);
+                }
+                Err(err) => {
+                    eprintln!("Failed to copy build ID: {err}");
+                    ui.set_status("Failed to copy build ID to clipboard".into());
+                }
+            }
         });
     }
 

@@ -207,14 +207,61 @@ impl ResolverClient {
         Ok(job_resp)
     }
 
-    pub fn stream_url(base_url: &str, provider_or_id: &str) -> String {
+    pub fn get_video_variants(
+        &self,
+        base_url: &str,
+        provider_or_id: &str,
+    ) -> Result<crate::models::VideoVariantsResponseDto> {
         let ref_id = if provider_or_id.starts_with("telegram:") {
             provider_or_id.to_string()
         } else {
             format!("telegram:{provider_or_id}")
         };
+        let url = format!(
+            "{}/admin/play/{ref_id}/variants",
+            base_url.trim_end_matches('/')
+        );
+        let response = self.client.get(&url).send()?;
+        let status = response.status();
+        let code = status.as_u16();
+
+        if code == 401 || code == 403 {
+            return Err(ResolverError::Auth(code));
+        }
+        if code == 404 {
+            return Err(ResolverError::NotFound);
+        }
+        if !status.is_success() {
+            let body_text = response.text().unwrap_or_default();
+            return Err(ResolverError::Status(code, body_text));
+        }
+
+        let resp: crate::models::VideoVariantsResponseDto = response.json()?;
+        Ok(resp)
+    }
+
+    pub fn stream_url(base_url: &str, provider_or_id: &str) -> String {
+        Self::stream_url_with_variant(base_url, provider_or_id, None)
+    }
+
+    pub fn stream_url_with_variant(
+        base_url: &str,
+        provider_or_id: &str,
+        variant: Option<&str>,
+    ) -> String {
+        let ref_id = if provider_or_id.starts_with("telegram:") {
+            provider_or_id.to_string()
+        } else {
+            format!("telegram:{provider_or_id}")
+        };
+        let variant_query = match variant {
+            Some(v) if !v.is_empty() && v != "original" => {
+                format!("&variant={}", urlencoding(v))
+            }
+            _ => String::new(),
+        };
         format!(
-            "{}/admin/play/{ref_id}/stream?mode=proxy",
+            "{}/admin/play/{ref_id}/stream?mode=proxy{variant_query}",
             base_url.trim_end_matches('/')
         )
     }
@@ -326,5 +373,27 @@ mod tests {
         assert!(!ResolverError::Auth(403).is_retryable());
         assert!(!ResolverError::NotFound.is_retryable());
         assert!(!ResolverError::Conflict.is_retryable());
+    }
+
+    #[test]
+    fn stream_url_formatting_with_and_without_variant() {
+        let base = "http://example.com/resolver";
+        let default_url = ResolverClient::stream_url(base, "-100123:456:789");
+        assert_eq!(
+            default_url,
+            "http://example.com/resolver/admin/play/telegram:-100123:456:789/stream?mode=proxy"
+        );
+
+        let orig_url = ResolverClient::stream_url_with_variant(base, "-100123:456:789", Some("original"));
+        assert_eq!(
+            orig_url,
+            "http://example.com/resolver/admin/play/telegram:-100123:456:789/stream?mode=proxy"
+        );
+
+        let alt_url = ResolverClient::stream_url_with_variant(base, "telegram:-100123:456:789", Some("alt_5002"));
+        assert_eq!(
+            alt_url,
+            "http://example.com/resolver/admin/play/telegram:-100123:456:789/stream?mode=proxy&variant=alt_5002"
+        );
     }
 }

@@ -14,7 +14,7 @@ pub use models::*;
 pub use policy::{ServiceUrl, ServiceUrlPolicy, ServiceUrlValidation};
 pub use resolver::{ResolverClient, ResolverError};
 
-pub(crate) fn urlencoding(input: &str) -> String {
+pub fn urlencoding(input: &str) -> String {
     let mut encoded = String::new();
     for b in input.bytes() {
         match b {
