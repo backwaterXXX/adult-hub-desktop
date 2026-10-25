@@ -18,7 +18,8 @@ mod thumbnails;
 mod updater;
 
 use adult_hub_client::{
-    JellyfinClient, ResolverClient, ServiceUrlPolicy, ServiceUrlValidation, discover_servers,
+    JellyfinClient, ResolverClient, ServiceUrlPolicy, ServiceUrlValidation, TvItem,
+    discover_servers,
 };
 use adult_hub_player::Player;
 use adult_hub_storage::{CredentialStore, LocalStore, Session, default_db_path};

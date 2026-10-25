@@ -1449,7 +1449,7 @@ export component MainWindow inherits Window {
     in-out property <string> player-selected-quality-id: "original";
     in-out property <string> player-selected-quality-label: "Original";
     in-out property <[VideoQualityOption]> player-quality-options: [];
-    property <bool> has-home-content: root.home-resume-items.length > 0
+    out property <bool> has-home-content: root.home-resume-items.length > 0
         || root.home-history-items.length > 0
         || root.home-latest-items.length > 0
         || root.home-random-items.length > 0
