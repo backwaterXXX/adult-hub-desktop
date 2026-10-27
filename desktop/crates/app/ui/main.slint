@@ -1070,6 +1070,7 @@ component PlayerTimeline inherits Rectangle {
     callback seek(float);
     callback activity();
     callback dragging(bool);
+    callback escape-pressed();
 
     out property <bool> has-focus: focus-scope.has-focus;
     forward-focus: focus-scope;
@@ -1206,6 +1207,10 @@ component PlayerTimeline inherits Rectangle {
         enabled: root.enabled;
         key-pressed(event) => {
             root.activity();
+            if (event.text == Key.Escape) {
+                root.escape-pressed();
+                return accept;
+            }
             if (event.text == Key.LeftArrow) {
                 root.seek(Math.max(0.0, root.value - 10.0));
                 return accept;
@@ -1234,11 +1239,13 @@ component HomeFeaturedHero inherits Rectangle {
     callback play(string);
     callback open-detail(string);
 
-    property <bool> has-graphic: root.has-item && root.item.has_thumbnail;
+    property <bool> has-graphic: root.has-item && root.item.has_thumbnail
+        && (root.item.thumbnail_state == "ready" || root.item.thumbnail_state == "")
+        && root.item.thumbnail.width > 0 && root.item.thumbnail.height > 0;
+    property <bool> is-wide: root.width >= 720px;
 
     // With artwork the hero is a fixed cinematic band; without artwork it
-    // shrinks to the content instead of showing a huge empty banner, and it
-    // never grows with the window height.
+    // shrinks to the natural content height instead of showing an empty banner.
     preferred-height: root.has-graphic
         ? ((root.is-resume && root.item.progress > 0.0) ? 280px : 248px)
         : hero-content.preferred-height;
@@ -1247,7 +1254,7 @@ component HomeFeaturedHero inherits Rectangle {
     background: HubTheme.surface-raised;
     clip: true;
 
-    // Right-aligned backdrop artwork with cinematic fade
+    // Right-aligned backdrop artwork with cinematic fade (only when valid artwork exists)
     if root.has-graphic : Rectangle {
         x: parent.width - self.width;
         y: 0px;
@@ -1270,139 +1277,302 @@ component HomeFeaturedHero inherits Rectangle {
         }
     }
 
-    // Left content area - strictly starts at left edge
+    // Shimmer line at bottom when thumbnail is actively loading
+    if root.has-item && root.item.thumbnail_state == "loading" : Rectangle {
+        x: 0px;
+        y: parent.height - 3px;
+        width: 100%;
+        height: 3px;
+        background: HubTheme.separator;
+        Rectangle {
+            x: 0px;
+            width: parent.width * 0.45;
+            height: 100%;
+            background: HubTheme.accent;
+        }
+    }
+
+    // Content area: starts cleanly at left edge with consistent padding
     hero-content := VerticalLayout {
         x: 0px;
         padding-left: root.has-graphic ? 28px : 24px;
         padding-right: 24px;
         padding-top: 24px;
         padding-bottom: 24px;
-        spacing: 10px;
-        alignment: start;
         width: root.has-graphic ? min(parent.width * 0.65, 620px) : parent.width;
         height: root.has-graphic ? parent.height : self.preferred-height;
 
-        // Eyebrow row with discrete indicator
-        HorizontalLayout {
-            height: 24px;
-            spacing: 8px;
-            alignment: start;
+        // Wide layout without graphic: information on left, actions on right
+        if !root.has-graphic && root.is-wide : HorizontalLayout {
+            width: 100%;
+            spacing: 24px;
 
-            Rectangle {
-                height: 22px;
-                border-radius: 4px;
-                background: root.is-resume ? #C2185B28 : #272A32;
-                border-width: 1px;
-                border-color: root.is-resume ? HubTheme.accent-outline : HubTheme.separator;
+            info-col := VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: 8px;
+
+                // Eyebrow row with discrete indicator
                 HorizontalLayout {
-                    padding-left: 8px;
-                    padding-right: 8px;
-                    alignment: center;
-                    Text {
-                        text: root.is-resume ? "CONTINUE WATCHING" : "FEATURED";
-                        color: root.is-resume ? HubTheme.accent-text : HubTheme.text-secondary;
-                        font-size: 10px;
-                        font-weight: 700;
+                    width: 100%;
+                    height: 24px;
+                    spacing: 8px;
+                    alignment: start;
+
+                    Rectangle {
+                        height: 22px;
+                        border-radius: 4px;
+                        background: root.is-resume ? #C2185B28 : #272A32;
+                        border-width: 1px;
+                        border-color: root.is-resume ? HubTheme.accent-outline : HubTheme.separator;
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            alignment: center;
+                            Text {
+                                text: root.is-resume ? "CONTINUE WATCHING" : "FEATURED";
+                                color: root.is-resume ? HubTheme.accent-text : HubTheme.text-secondary;
+                                font-size: 10px;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    if root.item.studio != "" : Text {
+                        text: "· " + root.item.studio;
+                        color: HubTheme.text-muted;
+                        font-size: 12px;
                         vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+
+                // Title: bold, natural height, max 2 lines with elide, occupying full info column width
+                Text {
+                    width: 100%;
+                    text: root.item.title;
+                    color: HubTheme.text-primary;
+                    font-size: 24px;
+                    font-weight: 700;
+                    horizontal-alignment: left;
+                    vertical-alignment: top;
+                    wrap: word-wrap;
+                    overflow: elide;
+                    max-lines: 2;
+                }
+
+                // Metadata row: duration, year, genre spanning full available info width
+                HorizontalLayout {
+                    width: 100%;
+                    spacing: 8px;
+                    alignment: start;
+
+                    if root.item.duration != "" : Text {
+                        text: root.item.duration;
+                        color: HubTheme.text-secondary;
+                        font-size: HubTheme.body-size;
+                        font-weight: 500;
+                        vertical-alignment: center;
+                    }
+
+                    if root.item.year != "" : Text {
+                        text: "· " + root.item.year;
+                        color: HubTheme.text-secondary;
+                        font-size: HubTheme.body-size;
+                        vertical-alignment: center;
+                    }
+
+                    if root.item.genre != "" : Text {
+                        text: "· " + root.item.genre;
+                        color: HubTheme.text-muted;
+                        font-size: HubTheme.body-size;
+                        vertical-alignment: center;
+                        wrap: no-wrap;
+                        overflow: elide;
+                    }
+                }
+
+                // Progress bar for resume item: left-aligned 240px without constraining parent info-col
+                if root.is-resume && root.item.progress > 0.0 && root.item.progress < 0.95 : VerticalLayout {
+                    spacing: 4px;
+                    alignment: start;
+
+                    Text {
+                        text: "Resume playback · " + round(root.item.progress * 100.0) + "% completed";
+                        color: HubTheme.accent-text;
+                        font-size: 11px;
+                        font-weight: 600;
+                    }
+
+                    Rectangle {
+                        width: 240px;
+                        height: 4px;
+                        border-radius: 2px;
+                        background: #30333C;
+                        Rectangle {
+                            x: 0px;
+                            y: 0px;
+                            width: parent.width * max(0.0, min(1.0, root.item.progress));
+                            height: 100%;
+                            border-radius: 2px;
+                            background: HubTheme.accent;
+                        }
                     }
                 }
             }
 
-            if root.item.studio != "" : Text {
-                text: "· " + root.item.studio;
-                color: HubTheme.text-muted;
-                font-size: 12px;
-                vertical-alignment: center;
-                overflow: elide;
-            }
-        }
+            // Action buttons on the right side: natural width, zero stretch
+            actions-col := VerticalLayout {
+                horizontal-stretch: 0;
+                alignment: center;
 
-        // Title: bold, left-aligned, max 2 lines with elide
-        Text {
-            text: root.item.title;
-            color: HubTheme.text-primary;
-            font-size: 24px;
-            font-weight: 700;
-            horizontal-alignment: left;
-            vertical-alignment: top;
-            wrap: word-wrap;
-            overflow: elide;
-            width: 100%;
-            height: 58px;
-        }
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: end;
 
-        // Metadata row: duration, year, genre
-        HorizontalLayout {
-            height: 18px;
-            spacing: 8px;
-            alignment: start;
+                    TvPrimaryButton {
+                        text: root.is-resume ? "Resume" : "Play";
+                        custom-height: 40px;
+                        clicked => { root.play(root.item.id); }
+                    }
 
-            if root.item.duration != "" : Text {
-                text: root.item.duration;
-                color: HubTheme.text-secondary;
-                font-size: HubTheme.body-size;
-                font-weight: 500;
-                vertical-alignment: center;
-            }
-
-            if root.item.year != "" : Text {
-                text: "· " + root.item.year;
-                color: HubTheme.text-secondary;
-                font-size: HubTheme.body-size;
-                vertical-alignment: center;
-            }
-
-            if root.item.genre != "" : Text {
-                text: "· " + root.item.genre;
-                color: HubTheme.text-muted;
-                font-size: HubTheme.body-size;
-                vertical-alignment: center;
-                overflow: elide;
-            }
-        }
-
-        // Progress bar for resume item - separated from interactive timeline
-        if root.is-resume && root.item.progress > 0.0 && root.item.progress < 0.95 : VerticalLayout {
-            spacing: 4px;
-
-            Text {
-                text: "Resume playback · " + round(root.item.progress * 100.0) + "% completed";
-                color: HubTheme.accent-text;
-                font-size: 11px;
-                font-weight: 600;
-            }
-
-            Rectangle {
-                width: 240px;
-                height: 4px;
-                border-radius: 2px;
-                background: #30333C;
-                Rectangle {
-                    x: 0px;
-                    y: 0px;
-                    width: parent.width * max(0.0, min(1.0, root.item.progress));
-                    height: 100%;
-                    border-radius: 2px;
-                    background: HubTheme.accent;
+                    TvSecondaryButton {
+                        text: "Details";
+                        custom-height: 40px;
+                        clicked => { root.open-detail(root.item.id); }
+                    }
                 }
             }
         }
 
-        // Action buttons row
-        HorizontalLayout {
-            spacing: 12px;
+        // Layout with graphic OR narrow layout without graphic: stacked vertically
+        if root.has-graphic || !root.is-wide : VerticalLayout {
+            width: 100%;
+            spacing: 10px;
             alignment: start;
 
-            TvPrimaryButton {
-                text: root.is-resume ? "Resume" : "Play";
-                custom-height: 40px;
-                clicked => { root.play(root.item.id); }
+            // Eyebrow row with discrete indicator
+            HorizontalLayout {
+                height: 24px;
+                spacing: 8px;
+                alignment: start;
+
+                Rectangle {
+                    height: 22px;
+                    border-radius: 4px;
+                    background: root.is-resume ? #C2185B28 : #272A32;
+                    border-width: 1px;
+                    border-color: root.is-resume ? HubTheme.accent-outline : HubTheme.separator;
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        alignment: center;
+                        Text {
+                            text: root.is-resume ? "CONTINUE WATCHING" : "FEATURED";
+                            color: root.is-resume ? HubTheme.accent-text : HubTheme.text-secondary;
+                            font-size: 10px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                if root.item.studio != "" : Text {
+                    text: "· " + root.item.studio;
+                    color: HubTheme.text-muted;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
             }
 
-            TvSecondaryButton {
-                text: "Details";
-                custom-height: 40px;
-                clicked => { root.open-detail(root.item.id); }
+            // Title: bold, left-aligned, max 2 lines with elide, natural height
+            Text {
+                text: root.item.title;
+                color: HubTheme.text-primary;
+                font-size: 24px;
+                font-weight: 700;
+                horizontal-alignment: left;
+                vertical-alignment: top;
+                wrap: word-wrap;
+                overflow: elide;
+                max-lines: 2;
+                width: 100%;
+            }
+
+            // Metadata row: duration, year, genre
+            HorizontalLayout {
+                height: 18px;
+                spacing: 8px;
+                alignment: start;
+
+                if root.item.duration != "" : Text {
+                    text: root.item.duration;
+                    color: HubTheme.text-secondary;
+                    font-size: HubTheme.body-size;
+                    font-weight: 500;
+                    vertical-alignment: center;
+                }
+
+                if root.item.year != "" : Text {
+                    text: "· " + root.item.year;
+                    color: HubTheme.text-secondary;
+                    font-size: HubTheme.body-size;
+                    vertical-alignment: center;
+                }
+
+                if root.item.genre != "" : Text {
+                    text: "· " + root.item.genre;
+                    color: HubTheme.text-muted;
+                    font-size: HubTheme.body-size;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+
+            // Progress bar for resume item
+            if root.is-resume && root.item.progress > 0.0 && root.item.progress < 0.95 : VerticalLayout {
+                spacing: 4px;
+
+                Text {
+                    text: "Resume playback · " + round(root.item.progress * 100.0) + "% completed";
+                    color: HubTheme.accent-text;
+                    font-size: 11px;
+                    font-weight: 600;
+                }
+
+                Rectangle {
+                    width: 240px;
+                    height: 4px;
+                    border-radius: 2px;
+                    background: #30333C;
+                    Rectangle {
+                        x: 0px;
+                        y: 0px;
+                        width: parent.width * max(0.0, min(1.0, root.item.progress));
+                        height: 100%;
+                        border-radius: 2px;
+                        background: HubTheme.accent;
+                    }
+                }
+            }
+
+            // Action buttons row
+            HorizontalLayout {
+                spacing: 12px;
+                alignment: start;
+
+                TvPrimaryButton {
+                    text: root.is-resume ? "Resume" : "Play";
+                    custom-height: 40px;
+                    clicked => { root.play(root.item.id); }
+                }
+
+                TvSecondaryButton {
+                    text: "Details";
+                    custom-height: 40px;
+                    clicked => { root.open-detail(root.item.id); }
+                }
             }
         }
     }
@@ -1680,6 +1850,19 @@ export component MainWindow inherits Window {
         root.card-zoom-changed(root.card-zoom);
     }
     in-out property <bool> text-input-focused <=> KeyboardState.text-input-focused;
+    public function focus-keys() {
+        keys.focus();
+    }
+    changed active-screen => {
+        KeyboardState.text-input-focused = false;
+        if (root.active-screen == "player") {
+            keys.focus();
+        }
+    }
+    changed is-fullscreen => {
+        KeyboardState.text-input-focused = false;
+        keys.focus();
+    }
     function set-card-zoom(value: float) {
         root.card-zoom = max(0.6, min(1.6, value));
     }
@@ -2181,6 +2364,9 @@ export component MainWindow inherits Window {
         }
 
         key-pressed(event) => {
+            if (root.active-screen == "player") {
+                KeyboardState.text-input-focused = false;
+            }
             if (KeyboardState.text-input-focused && event.text != Key.Escape) {
                 return reject;
             }
@@ -2255,7 +2441,9 @@ export component MainWindow inherits Window {
                     }
                     return accept;
                 }
-                if (root.active-screen == "player" && root.player-media-loaded) {
+                if (root.active-screen == "player") {
+                    root.player-controls-visible = true;
+                    player-controls-hide-timer.restart();
                     root.seek-with-acceleration(-1);
                     return accept;
                 }
@@ -2273,7 +2461,9 @@ export component MainWindow inherits Window {
                     }
                     return accept;
                 }
-                if (root.active-screen == "player" && root.player-media-loaded) {
+                if (root.active-screen == "player") {
+                    root.player-controls-visible = true;
+                    player-controls-hide-timer.restart();
                     root.seek-with-acceleration(1);
                     return accept;
                 }
@@ -2291,7 +2481,9 @@ export component MainWindow inherits Window {
                     }
                     return accept;
                 }
-                if (root.active-screen == "player" && root.player-media-loaded) {
+                if (root.active-screen == "player") {
+                    root.player-controls-visible = true;
+                    player-controls-hide-timer.restart();
                     root.adjust-volume(5.0);
                     return accept;
                 }
@@ -2309,7 +2501,9 @@ export component MainWindow inherits Window {
                     }
                     return accept;
                 }
-                if (root.active-screen == "player" && root.player-media-loaded) {
+                if (root.active-screen == "player") {
+                    root.player-controls-visible = true;
+                    player-controls-hide-timer.restart();
                     root.adjust-volume(-5.0);
                     return accept;
                 }
@@ -2326,8 +2520,10 @@ export component MainWindow inherits Window {
             }
 
             // Player controls are active only for a loaded source.
-            if (root.active-screen == "player" && root.player-media-loaded) {
+            if (root.active-screen == "player" && (root.player-media-loaded || root.has-active-media)) {
             if (event.text == Key.Space) {
+                root.player-controls-visible = true;
+                player-controls-hide-timer.restart();
                 root.toggle-play();
                 return accept;
             }
@@ -2430,6 +2626,10 @@ export component MainWindow inherits Window {
                 if (root.detail-visible) {
                     root.detail-more-actions-visible = false;
                     root.close-item-detail();
+                    return accept;
+                }
+                if (root.is-fullscreen) {
+                    root.toggle-fullscreen();
                     return accept;
                 }
                 root.escape-pressed();
@@ -4662,6 +4862,7 @@ export component MainWindow inherits Window {
                         accessible-action-default => { root.toggle-play(); }
                         TouchArea {
                             clicked => {
+                                keys.focus();
                                 if (root.player-volume-flyout-open) {
                                     root.player-volume-flyout-open = false;
                                 }
@@ -4676,6 +4877,7 @@ export component MainWindow inherits Window {
                         width: 100%;
                         height: parent.height - root.player-control-band-height;
                         clicked => {
+                            keys.focus();
                             if (root.player-quality-panel-open || root.player-more-controls-visible || root.download-panel-open || root.player-volume-flyout-open) {
                                 root.player-quality-panel-open = false;
                                 root.player-more-controls-visible = false;
@@ -4726,6 +4928,7 @@ export component MainWindow inherits Window {
                             EventResult.accept
                         }
                         clicked => {
+                            keys.focus();
                             root.player-controls-visible = true;
                             player-controls-hide-timer.restart();
                         }
@@ -4972,6 +5175,7 @@ export component MainWindow inherits Window {
                             EventResult.accept
                         }
                         clicked => {
+                            keys.focus();
                             if (root.player-quality-panel-open || root.player-more-controls-visible || root.download-panel-open || root.player-volume-flyout-open) {
                                 root.player-quality-panel-open = false;
                                 root.player-more-controls-visible = false;
@@ -4996,6 +5200,13 @@ export component MainWindow inherits Window {
                             enabled: root.player-media-loaded;
                             value: root.position;
                             maximum: Math.max(0.001, root.duration);
+                            escape-pressed => {
+                                if (root.is-fullscreen) {
+                                    root.toggle-fullscreen();
+                                } else {
+                                    root.escape-pressed();
+                                }
+                            }
                             activity => {
                                 if (root.player-volume-flyout-open) {
                                     root.player-volume-flyout-open = false;
@@ -5012,6 +5223,7 @@ export component MainWindow inherits Window {
                                 if (!active) { player-controls-hide-timer.restart(); }
                             }
                             seek(value) => {
+                                keys.focus();
                                 if (root.player-volume-flyout-open) {
                                     root.player-volume-flyout-open = false;
                                 }
@@ -5065,6 +5277,7 @@ export component MainWindow inherits Window {
                                         }
                                     }
                                     clicked => {
+                                        keys.focus();
                                         if (root.player-volume-flyout-open) {
                                             root.player-volume-flyout-open = false;
                                         }
@@ -5086,6 +5299,12 @@ export component MainWindow inherits Window {
                                             player-controls-hide-timer.restart();
                                             root.seek-with-acceleration(-1);
                                             return accept;
+                                        }
+                                        if (event.text == Key.Escape) {
+                                            if (root.is-fullscreen) {
+                                                root.toggle-fullscreen();
+                                                return accept;
+                                            }
                                         }
                                         reject
                                     }
@@ -5123,6 +5342,7 @@ export component MainWindow inherits Window {
                                         }
                                     }
                                     clicked => {
+                                        keys.focus();
                                         if (root.player-volume-flyout-open) {
                                             root.player-volume-flyout-open = false;
                                         }
@@ -5143,6 +5363,24 @@ export component MainWindow inherits Window {
                                             root.player-controls-visible = true;
                                             player-controls-hide-timer.restart();
                                             root.toggle-play();
+                                            return accept;
+                                        }
+                                        if (event.text == Key.Escape) {
+                                            if (root.is-fullscreen) {
+                                                root.toggle-fullscreen();
+                                                return accept;
+                                            }
+                                        }
+                                        if (event.text == Key.LeftArrow) {
+                                            root.player-controls-visible = true;
+                                            player-controls-hide-timer.restart();
+                                            root.seek-with-acceleration(-1);
+                                            return accept;
+                                        }
+                                        if (event.text == Key.RightArrow) {
+                                            root.player-controls-visible = true;
+                                            player-controls-hide-timer.restart();
+                                            root.seek-with-acceleration(1);
                                             return accept;
                                         }
                                         reject
@@ -5190,6 +5428,7 @@ export component MainWindow inherits Window {
                                         }
                                     }
                                     clicked => {
+                                        keys.focus();
                                         if (root.player-volume-flyout-open) {
                                             root.player-volume-flyout-open = false;
                                         }
@@ -5211,6 +5450,12 @@ export component MainWindow inherits Window {
                                             player-controls-hide-timer.restart();
                                             root.seek-with-acceleration(1);
                                             return accept;
+                                        }
+                                        if (event.text == Key.Escape) {
+                                            if (root.is-fullscreen) {
+                                                root.toggle-fullscreen();
+                                                return accept;
+                                            }
                                         }
                                         reject
                                     }
@@ -5988,6 +6233,7 @@ export component MainWindow inherits Window {
                                         }
                                     }
                                     clicked => {
+                                        keys.focus();
                                         if (root.player-volume-flyout-open) {
                                             root.player-volume-flyout-open = false;
                                         }
@@ -6006,6 +6252,24 @@ export component MainWindow inherits Window {
                                                 root.player-volume-flyout-open = false;
                                             }
                                             root.toggle-fullscreen();
+                                            return accept;
+                                        }
+                                        if (event.text == Key.Escape) {
+                                            if (root.is-fullscreen) {
+                                                root.toggle-fullscreen();
+                                                return accept;
+                                            }
+                                        }
+                                        if (event.text == Key.LeftArrow) {
+                                            root.player-controls-visible = true;
+                                            player-controls-hide-timer.restart();
+                                            root.seek-with-acceleration(-1);
+                                            return accept;
+                                        }
+                                        if (event.text == Key.RightArrow) {
+                                            root.player-controls-visible = true;
+                                            player-controls-hide-timer.restart();
+                                            root.seek-with-acceleration(1);
                                             return accept;
                                         }
                                         reject
@@ -7210,137 +7474,74 @@ export component MainWindow inherits Window {
                         }
 
                         // Similar Titles (Left-aligned header with chevrons on right)
-                        if root.detail-similar-items.length > 0 : VerticalLayout {
-                            spacing: HubTheme.space-3;
+                        if root.detail-similar-items.length > 0 : similar-box := Rectangle {
+                            height: similar-section.preferred-height;
+                            background: transparent;
 
-                            HorizontalLayout {
-                                alignment: start;
+                            property <length> similar-card-gap: 14px;
+                            property <length> similar-target-width: 200px;
+                            property <int> similar-cols: max(1, floor((similar-scroll.width + self.similar-card-gap) / (self.similar-target-width + self.similar-card-gap)));
+                            property <length> similar-card-width: max(180px, min(220px, (similar-scroll.width - (self.similar-cols - 1) * self.similar-card-gap) / self.similar-cols));
+                            property <length> similar-artwork-height: self.similar-card-width * 0.5625;
+                            property <length> similar-card-height: self.similar-artwork-height + 50px;
+
+                            similar-section := VerticalLayout {
                                 spacing: HubTheme.space-3;
-                                Text {
-                                    text: "Similar Titles";
-                                    color: HubTheme.text-secondary;
-                                    font-size: 13px;
-                                    font-weight: 700;
-                                    vertical-alignment: center;
-                                }
-
-                                Rectangle { horizontal-stretch: 1; }
 
                                 HorizontalLayout {
-                                    spacing: 6px;
-                                    IconButton {
-                                        icon: @image-url("../../../assets/icons/chevron-left.svg");
-                                        accessible-name: "Scroll similar titles left";
-                                        clicked => {
-                                            similar-scroll.content-x = Math.min(0px, similar-scroll.content-x + 360px);
-                                        }
+                                    alignment: start;
+                                    spacing: HubTheme.space-3;
+                                    Text {
+                                        text: "Similar Titles";
+                                        color: HubTheme.text-secondary;
+                                        font-size: 13px;
+                                        font-weight: 700;
+                                        vertical-alignment: center;
                                     }
-                                    IconButton {
-                                        icon: @image-url("../../../assets/icons/chevron-right.svg");
-                                        accessible-name: "Scroll similar titles right";
-                                        clicked => {
-                                            similar-scroll.content-x = similar-scroll.content-x - 360px;
+
+                                    Rectangle { horizontal-stretch: 1; }
+
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        IconButton {
+                                            icon: @image-url("../../../assets/icons/chevron-left.svg");
+                                            accessible-name: "Scroll similar titles left";
+                                            clicked => {
+                                                similar-scroll.content-x = Math.min(0px, similar-scroll.content-x + (similar-box.similar-card-width + similar-box.similar-card-gap) * similar-box.similar-cols);
+                                            }
+                                        }
+                                        IconButton {
+                                            icon: @image-url("../../../assets/icons/chevron-right.svg");
+                                            accessible-name: "Scroll similar titles right";
+                                            clicked => {
+                                                let max-scroll = 0px - max(0px, (root.detail-similar-items.length * (similar-box.similar-card-width + similar-box.similar-card-gap)) - similar-scroll.width);
+                                                similar-scroll.content-x = Math.max(max-scroll, similar-scroll.content-x - (similar-box.similar-card-width + similar-box.similar-card-gap) * similar-box.similar-cols);
+                                            }
                                         }
                                     }
                                 }
-                            }
 
-                            similar-scroll := ScrollView {
-                                height: 160px;
-                                vertical-scrollbar-policy: ScrollBarPolicy.always-off;
-                                horizontal-scrollbar-policy: ScrollBarPolicy.as-needed;
-                                mouse-drag-pan-enabled: true;
+                                similar-scroll := ScrollView {
+                                    height: similar-box.similar-card-height + 12px;
+                                    vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+                                    horizontal-scrollbar-policy: ScrollBarPolicy.as-needed;
+                                    mouse-drag-pan-enabled: true;
 
-                                HorizontalLayout {
-                                    spacing: 14px;
-                                    for sim in root.detail-similar-items : Rectangle {
-                                        width: 180px;
-                                        height: 152px;
-                                        background: transparent;
-
-                                        VerticalLayout {
-                                            spacing: 6px;
-                                            // Thumbnail container
-                                            Rectangle {
-                                                width: 180px;
-                                                height: 102px;
-                                                border-radius: 8px;
-                                                background: #1a1a22;
-                                                border-width: 1px;
-                                                border-color: sim-t-fs.has-hover || sim-focus.has-focus ? HubTheme.accent : #FFFFFF20;
-                                                clip: true;
-
-                                                if sim.has-thumbnail : Image {
-                                                    source: sim.thumbnail;
-                                                    width: 100%;
-                                                    height: 100%;
-                                                    image-fit: cover;
-                                                }
-                                                if !sim.has-thumbnail : Rectangle {
-                                                    width: 100%;
-                                                    height: 100%;
-                                                    background: #2a202c;
-                                                    Image {
-                                                        source: @image-url("../../../assets/icons/play.svg");
-                                                        width: 24px;
-                                                        height: 24px;
-                                                        image-fit: contain;
-                                                    }
-                                                }
-                                            }
-
-                                            // Title below thumbnail: max 2 lines, ellipsis, fixed height
-                                            Text {
-                                                width: 180px;
-                                                height: 38px;
-                                                text: sim.title;
-                                                color: sim-t-fs.has-hover || sim-focus.has-focus ? HubTheme.text-primary : HubTheme.text-secondary;
-                                                font-size: 12px;
-                                                font-weight: 600;
-                                                wrap: word-wrap;
-                                                overflow: elide;
-                                                vertical-alignment: top;
-                                                horizontal-alignment: left;
-                                            }
-                                        }
-
-                                        // Tooltip on hover / focus
-                                        if (sim-t-fs.has-hover || sim-focus.has-focus) : Rectangle {
-                                            y: -28px;
-                                            x: 0px;
-                                            height: 24px;
-                                            width: max(180px, sim-tip.preferred-width + 16px);
-                                            border-radius: 4px;
-                                            background: #14141cf5;
-                                            border-width: 1px;
-                                            border-color: #BE185D88;
-                                            z: 50;
-
-                                            sim-tip := Text {
-                                                x: 8px;
-                                                y: 4px;
-                                                text: sim.title;
-                                                color: #FFFFFF;
-                                                font-size: 11px;
-                                                font-weight: 600;
-                                                vertical-alignment: center;
-                                            }
-                                        }
-
-                                        sim-t-fs := TouchArea {
-                                            clicked => { root.open-item-detail(sim.id); }
-                                        }
-
-                                        sim-focus := FocusScope {
-                                            width: 0px;
-                                            height: 0px;
-                                            key-pressed(event) => {
-                                                if (event.text == Key.Space || event.text == Key.Return) {
-                                                    root.open-item-detail(sim.id);
-                                                    return accept;
-                                                }
-                                                reject
-                                            }
+                                    HorizontalLayout {
+                                        width: root.detail-similar-items.length * (similar-box.similar-card-width + similar-box.similar-card-gap);
+                                        spacing: similar-box.similar-card-gap;
+                                        for sim[idx] in root.detail-similar-items : VideoCard {
+                                            item: sim;
+                                            card-width: similar-box.similar-card-width;
+                                            fixed-width: true;
+                                            compact: true;
+                                            card-index: idx;
+                                            total-cards: root.detail-similar-items.length;
+                                            carousel-scroll: similar-scroll.content-x;
+                                            screen-id: root.detail-id;
+                                            open-detail => { root.open-item-detail(sim.id); }
+                                            play => { root.play-item(sim.id); }
+                                            thumbnail-retry(item) => { root.retry-thumbnail(item); }
                                         }
                                     }
                                 }
@@ -7376,24 +7577,30 @@ export component MainWindow inherits Window {
                                         alignment: start;
                                         Text {
                                             text: "Technical Information";
-                                            color: tech-focus.has-focus ? HubTheme.text-primary : HubTheme.text-secondary;
+                                            color: (tech-touch-fs.has-hover || tech-focus.has-focus) ? HubTheme.text-primary : HubTheme.text-secondary;
                                             font-size: 13px;
                                             font-weight: 700;
                                             vertical-alignment: center;
                                         }
-                                        Image {
-                                            source: root.detail-tech-expanded
-                                                ? @image-url("../../../assets/icons/chevron-down.svg")
-                                                : @image-url("../../../assets/icons/chevron-right.svg");
+                                        Rectangle {
                                             width: 14px;
-                                            height: 14px;
-                                            colorize: HubTheme.text-muted;
-                                            vertical-alignment: center;
-                                            image-fit: contain;
+                                            Image {
+                                                y: (parent.height - self.height) / 2;
+                                                source: root.detail-tech-expanded
+                                                    ? @image-url("../../../assets/icons/chevron-down.svg")
+                                                    : @image-url("../../../assets/icons/chevron-right.svg");
+                                                width: 14px;
+                                                height: 14px;
+                                                colorize: (tech-touch-fs.has-hover || tech-focus.has-focus) ? HubTheme.text-primary : HubTheme.text-muted;
+                                                image-fit: contain;
+                                            }
                                         }
                                     }
 
                                     tech-touch-fs := TouchArea {
+                                        width: 100%;
+                                        height: 100%;
+                                        mouse-cursor: pointer;
                                         clicked => { root.detail-tech-expanded = !root.detail-tech-expanded; }
                                     }
                                     tech-focus := FocusScope {

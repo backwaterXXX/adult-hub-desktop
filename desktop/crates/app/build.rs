@@ -107,7 +107,10 @@ fn resolve_commit_hash() -> String {
         }
     }
 
-    if let Ok(output) = Command::new("git").args(["rev-parse", "--short=8", "HEAD"]).output() {
+    if let Ok(output) = Command::new("git")
+        .args(["rev-parse", "--short=8", "HEAD"])
+        .output()
+    {
         if output.status.success() {
             if let Ok(s) = String::from_utf8(output.stdout) {
                 let trimmed = s.trim();
@@ -202,15 +205,30 @@ fn main() {
         "cargo:rustc-env=ADULT_HUB_DIRTY={}",
         if dirty { "1" } else { "0" }
     );
-    let pkg_version = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.2.23".into());
+    let manifest_dir = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
+    let pkg_version = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| {
+        let cargo_toml = manifest_dir.join("../../Cargo.toml");
+        if let Ok(content) = std::fs::read_to_string(&cargo_toml) {
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("version = \"") {
+                    if let Some(ver) = trimmed
+                        .strip_prefix("version = \"")
+                        .and_then(|s| s.strip_suffix('"'))
+                    {
+                        return ver.to_string();
+                    }
+                }
+            }
+        }
+        "0.2.25".into()
+    });
     let build_date_compact = build_date.replace('-', "");
     let build_id = std::env::var("ADULT_HUB_BUILD_ID")
         .ok()
         .filter(|s| !s.trim().is_empty() && s != "unknown" && !s.contains("unknown"))
         .unwrap_or_else(|| {
-            format!(
-                "{pkg_version}-{commit_hash}-{build_date_compact}{dirty_suffix}"
-            )
+            format!("{pkg_version}-{commit_hash}-{build_date_compact}{dirty_suffix}")
         });
     println!("cargo:rustc-env=ADULT_HUB_BUILD_ID={build_id}");
 
@@ -222,13 +240,11 @@ fn main() {
     // the runtime window icon from the same asset in main.rs.
     let target = std::env::var("TARGET").unwrap_or_default();
     if target.contains("windows") {
-        let manifest_dir = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
         let icon = manifest_dir.join("../../assets/adult-hub-desktop.ico");
         let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
         let resource_script = out_dir.join("adult-hub-icon.rc");
         let resource_object = out_dir.join("adult-hub-icon.o");
         let icon_path = icon.to_string_lossy().replace('\\', "/");
-        let pkg_version = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.1.0".into());
         let version_parts: Vec<&str> = pkg_version.split('.').collect();
         let major: u16 = version_parts
             .first()
@@ -237,11 +253,12 @@ fn main() {
         let minor: u16 = version_parts
             .get(1)
             .and_then(|s| s.parse().ok())
-            .unwrap_or(1);
+            .unwrap_or(0);
         let patch: u16 = version_parts
             .get(2)
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
+        let win_version = format!("{major}.{minor}.{patch}.0");
 
         let rc_content = format!(
             r#"1 ICON "{icon_path}"
@@ -261,12 +278,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Adult Hub\0"
             VALUE "FileDescription", "Adult Hub Desktop\0"
-            VALUE "FileVersion", "{pkg_version}.0\0"
+            VALUE "FileVersion", "{win_version}\0"
             VALUE "InternalName", "adult-hub-desktop\0"
             VALUE "LegalCopyright", "Copyright (C) 2026 Adult Hub\0"
             VALUE "OriginalFilename", "adult-hub-desktop.exe\0"
             VALUE "ProductName", "Adult Hub Desktop\0"
-            VALUE "ProductVersion", "{pkg_version}\0"
+            VALUE "ProductVersion", "{win_version}\0"
             VALUE "SpecialBuild", "{build_id}\0"
             VALUE "Comments", "Build ID: {build_id}\0"
         END

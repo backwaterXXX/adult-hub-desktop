@@ -355,6 +355,7 @@ pub fn start_item_playback_with_resume(
                         ui.set_player_title(crate::catalog::display_title(&item).into());
                         ui.set_player_subtitle(format_player_subtitle(&item).into());
                         ui.set_active_screen("player".into());
+                        ui.invoke_focus_keys();
                         show_error(ui, err.clone());
                         ui.set_toast_message(err.into());
                         ui.set_toast_type("error".into());
@@ -390,6 +391,7 @@ pub fn start_item_playback_with_resume(
                     ui.set_player_title(crate::catalog::display_title(&item).into());
                     ui.set_player_subtitle(format_player_subtitle(&item).into());
                     ui.set_active_screen("player".into());
+                    ui.invoke_focus_keys();
                     show_error(ui, format!("Could not resolve Jellyfin playback: {err}"));
                     return;
                 }
@@ -463,6 +465,7 @@ pub fn start_item_playback_with_resume(
     ui.set_status(format!("Loading: {}", item.title).into());
     ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
     ui.set_active_screen("player".into());
+    ui.invoke_focus_keys();
 
     // 5. Start player & session reporting
     let start_pos_opt = if start_pos_secs > 0.0 {
@@ -616,6 +619,7 @@ pub fn start_item_playback_with_resume_ctx(
         ctx.push_nav_destination(crate::handlers::browsing::current_nav_destination(ui, ctx));
     }
     ui.set_active_screen("player".into());
+    ui.invoke_focus_keys();
 
     // 3. Resolve stream URL in background thread
     let weak_ui = ui.as_weak();

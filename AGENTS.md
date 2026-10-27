@@ -16,8 +16,12 @@ RUSTC="$RUSTC_BIN" "$CARGO_BIN" build --manifest-path desktop/Cargo.toml --targe
 
 For the complete Windows EXE package, run `AH_DIRECT_BUILD=1
 scripts/package-windows.sh`. This uses the active Rust toolchain directly and
-avoids the optional Docker `dev/run.sh` build path. The packaging script still
-increments the patch version unless `SKIP_VERSION_BUMP=1` is set. Keep builds
+avoids the optional Docker `dev/run.sh` build path. The packaging script
+increments the patch version in `desktop/Cargo.toml` and `desktop/Cargo.lock`
+automatically once per build run (with re-entrancy protection). Delivered
+builds must NEVER pass `SKIP_VERSION_BUMP=1`, ensuring each delivered release
+gets a distinct patch version. `SKIP_VERSION_BUMP=1` is reserved strictly for
+intermediate compiler checks or CI where tags are pre-determined. Keep builds
 in the foreground so their exit status and compiler output stay attached to
 the agent session.
 

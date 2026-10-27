@@ -12,8 +12,11 @@ MPV_DLL="${CACHE_DIR}/libmpv-2.dll"
 EXE_PATH="${ROOT_DIR}/desktop/target/${TARGET}/release/adult-hub-desktop.exe"
 
 # 1. Automatically increment patch version once per application build
-if [[ "${SKIP_VERSION_BUMP:-0}" != "1" && "${CI:-false}" != "true" && "${GITHUB_ACTIONS:-false}" != "true" ]]; then
+# Clean up re-entrancy marker on exit so future runs in the same shell still bump
+trap 'unset ADULT_HUB_VERSION_BUMPED 2>/dev/null || true' EXIT
+if [[ "${SKIP_VERSION_BUMP:-0}" != "1" && "${ADULT_HUB_VERSION_BUMPED:-0}" != "1" && "${CI:-false}" != "true" && "${GITHUB_ACTIONS:-false}" != "true" ]]; then
     "${ROOT_DIR}/scripts/bump-version.sh"
+    export ADULT_HUB_VERSION_BUMPED=1
 fi
 
 VERSION=$(grep -m 1 '^version = ' "${ROOT_DIR}/desktop/Cargo.toml" | sed -E 's/version = "([^"]+)"/\1/')
@@ -45,6 +48,8 @@ if [[ ! -s "${MPV_DLL}" ]]; then
     rm -f "${archive}"
 fi
 
+"${ROOT_DIR}/scripts/warn-target-size.sh"
+
 echo "==> Building the Windows executable (${TARGET})..."
 if [[ "${AH_DIRECT_BUILD:-0}" == "1" ]]; then
     # Some agent shells wrap cargo and try to write launch state under the
@@ -72,8 +77,20 @@ else
     fi
 fi
 
-cp "${EXE_PATH}" "${BIN_DIR}/adult-hub-desktop.exe"
-cp "${MPV_DLL}" "${BIN_DIR}/libmpv-2.dll"
+"${ROOT_DIR}/scripts/warn-target-size.sh"
+
+if [[ ! -f "${EXE_PATH}" ]]; then
+    echo "Error: Expected build output ${EXE_PATH} does not exist!" >&2
+    exit 1
+fi
+mkdir -p "${BIN_DIR}"
+rm -f "${BIN_DIR}/adult-hub-desktop.exe" 2>/dev/null || true
+cp -f "${EXE_PATH}" "${BIN_DIR}/adult-hub-desktop.exe"
+cp -f "${MPV_DLL}" "${BIN_DIR}/libmpv-2.dll"
+if ! cmp -s "${EXE_PATH}" "${BIN_DIR}/adult-hub-desktop.exe"; then
+    echo "Error: Copy failed or ${BIN_DIR}/adult-hub-desktop.exe is out of sync with ${EXE_PATH}!" >&2
+    exit 1
+fi
 
 echo ""
 echo "============================================================"

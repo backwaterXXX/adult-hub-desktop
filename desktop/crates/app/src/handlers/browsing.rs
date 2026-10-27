@@ -1505,6 +1505,7 @@ pub fn restore_nav_destination(
                 .is_some_and(|playing| playing.id == id);
             if matches_loaded && ui.get_has_active_media() {
                 ui.set_active_screen("player".into());
+                ui.invoke_focus_keys();
             } else if let Some(item) = ctx.find_catalog_item(&id) {
                 crate::playback::start_item_playback_ctx(ui, ctx, item);
             } else {

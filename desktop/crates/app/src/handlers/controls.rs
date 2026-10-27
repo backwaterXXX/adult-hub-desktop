@@ -369,7 +369,9 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
         let seek_feedback_generation = seek_feedback_generation.clone();
         ui.on_seek_with_acceleration(move |direction| {
             let Some(ui) = weak.upgrade() else { return };
-            if !ui.get_player_media_loaded() || !matches!(direction, -1 | 1) {
+            if (!ui.get_player_media_loaded() && !ui.get_has_active_media())
+                || !matches!(direction, -1 | 1)
+            {
                 return;
             }
             let Some(player) = &player else { return };
@@ -1026,8 +1028,9 @@ pub fn install_fullscreen(ui: &MainWindow) {
 
         Rc::new(move || {
             let Some(ui) = ui_weak.upgrade() else { return };
-            let current_fs = fullscreen.get();
-            let next_fs = !current_fs;
+            let is_currently_fs =
+                fullscreen.get() || ui.get_is_fullscreen() || ui.window().is_fullscreen();
+            let next_fs = !is_currently_fs;
 
             if next_fs {
                 // Entering fullscreen
@@ -1124,11 +1127,15 @@ pub fn install_fullscreen(ui: &MainWindow) {
                                             h,
                                             SWP_FRAMECHANGED | SWP_NOOWNERZORDER | SWP_SHOWWINDOW,
                                         );
+                                        windows_sys::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd);
+                                        windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus(hwnd);
                                     }
                                 }
                             }
                         }
                     }
+
+                    window.focus_window();
 
                     // Diagnostic logging immediately after applying state change
                     let actual_winit = window.fullscreen().is_some();
@@ -1156,6 +1163,7 @@ pub fn install_fullscreen(ui: &MainWindow) {
 
                 // Immediate frame redraw during pause or playing
                 ui.window().request_redraw();
+                ui.invoke_focus_keys();
             } else {
                 // Exiting fullscreen
                 crate::log_debug("fullscreen: exiting fullscreen mode");
@@ -1216,9 +1224,15 @@ pub fn install_fullscreen(ui: &MainWindow) {
                                         }
                                     }
                                 }
+                                unsafe {
+                                    windows_sys::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd);
+                                    windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus(hwnd);
+                                }
                             }
                         }
                     }
+
+                    window.focus_window();
 
                     if was_maximized.get() {
                         crate::log_debug("fullscreen: restoring previous maximized state");
@@ -1268,6 +1282,7 @@ pub fn install_fullscreen(ui: &MainWindow) {
 
                 // Immediate frame redraw during pause or playing
                 ui.window().request_redraw();
+                ui.invoke_focus_keys();
             }
         })
     };
@@ -1306,7 +1321,7 @@ pub fn install_fullscreen(ui: &MainWindow) {
                 ui.set_download_panel_open(false);
                 return;
             }
-            if fullscreen.get() {
+            if fullscreen.get() || ui.get_is_fullscreen() || ui.window().is_fullscreen() {
                 toggle();
             } else {
                 ui.invoke_navigate_back();

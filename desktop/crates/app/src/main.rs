@@ -3274,4 +3274,56 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn similar_cards_responsive_columns_calculation() {
+        let compute_cols_and_width = |container_width: f32| -> (usize, f32) {
+            let gap = 14.0_f32;
+            let target_width = 200.0_f32;
+            let cols = ((container_width + gap) / (target_width + gap)).floor().max(1.0) as usize;
+            let raw_card_width = (container_width - ((cols - 1) as f32 * gap)) / cols as f32;
+            let card_width = raw_card_width.clamp(180.0, 220.0);
+            (cols, card_width)
+        };
+
+        // Window ~1180px: content width ~910px (after 220px nav sidebar + 48px padding)
+        let (cols_1180, width_1180) = compute_cols_and_width(910.0);
+        assert_eq!(cols_1180, 4, "1180x790 window should show exactly 4 columns in similar titles, not 6");
+        assert!(width_1180 >= 180.0 && width_1180 <= 220.0, "card width must be between 180 and 220px: {width_1180}");
+
+        // Maximized 1920px window: content width ~1650px
+        let (cols_1920, width_1920) = compute_cols_and_width(1650.0);
+        assert_eq!(cols_1920, 7);
+        assert!(width_1920 >= 180.0 && width_1920 <= 220.0);
+
+        // Narrow window 700px: content width ~450px
+        let (cols_narrow, width_narrow) = compute_cols_and_width(450.0);
+        assert_eq!(cols_narrow, 2);
+        assert!(width_narrow >= 180.0 && width_narrow <= 220.0);
+    }
+
+    #[test]
+    fn tooltip_positioning_and_decoupled_width() {
+        let compute_tooltip_x = |card_index: i32, total_cards: i32, card_width: f32, tooltip_width: f32| -> f32 {
+            if card_index == 0 {
+                0.0
+            } else if total_cards > 0 && card_index == total_cards - 1 {
+                card_width - tooltip_width
+            } else {
+                (card_width - tooltip_width) / 2.0
+            }
+        };
+
+        let card_w = 217.0_f32;
+        let tooltip_w = 320.0_f32; // preferred decoupled width (280-360px)
+
+        // First card: starts at left edge of card (0.0)
+        assert_eq!(compute_tooltip_x(0, 4, card_w, tooltip_w), 0.0);
+
+        // Last card: aligns right edge with card
+        assert_eq!(compute_tooltip_x(3, 4, card_w, tooltip_w), card_w - tooltip_w);
+
+        // Middle card: centered over card
+        assert_eq!(compute_tooltip_x(1, 4, card_w, tooltip_w), (card_w - tooltip_w) / 2.0);
+    }
 }

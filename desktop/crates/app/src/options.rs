@@ -208,9 +208,15 @@ mod tests {
     #[test]
     fn version_and_build_id_metadata() {
         let pkg_ver = env!("CARGO_PKG_VERSION");
-        assert_eq!(pkg_ver, "0.2.23");
+        assert!(!pkg_ver.is_empty());
+        let parts: Vec<&str> = pkg_ver.split('.').collect();
+        assert_eq!(parts.len(), 3, "version must be major.minor.patch semver");
+        for part in &parts {
+            assert!(part.chars().all(|c| c.is_ascii_digit()), "version parts must be numeric");
+        }
         let build_id = env!("ADULT_HUB_BUILD_ID");
-        assert!(build_id.starts_with("0.2.23-"), "build_id was: {build_id}");
+        let expected_prefix = format!("{pkg_ver}-");
+        assert!(build_id.starts_with(&expected_prefix), "build_id was: {build_id}");
         assert!(!build_id.is_empty());
         let build_date = env!("ADULT_HUB_BUILD_DATE");
         assert!(!build_date.is_empty());

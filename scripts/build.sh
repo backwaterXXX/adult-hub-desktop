@@ -13,6 +13,12 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="${1:---windows}"
 
+# Automatically increment patch version once per application build run
+if [[ "${SKIP_VERSION_BUMP:-0}" != "1" && "${ADULT_HUB_VERSION_BUMPED:-0}" != "1" && "${CI:-false}" != "true" && "${GITHUB_ACTIONS:-false}" != "true" ]]; then
+    "${ROOT_DIR}/scripts/bump-version.sh"
+    export ADULT_HUB_VERSION_BUMPED=1
+fi
+
 case "${TARGET}" in
     --windows|windows|win)
         "${ROOT_DIR}/scripts/package-windows.sh"
