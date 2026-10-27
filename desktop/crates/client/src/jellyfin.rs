@@ -61,7 +61,13 @@ pub struct GetItemsQuery<'a> {
     pub is_unplayed: bool,
     pub include_item_types: Option<&'a str>,
     pub person_types: Option<&'a str>,
+    /// Overrides the `Fields=` list. `Some("")` omits the parameter entirely
+    /// (server defaults only); `None` keeps the full desktop field set.
+    pub fields: Option<&'a str>,
 }
+
+const DEFAULT_ITEM_FIELDS: &str =
+    "ProviderIds,Overview,Genres,Studios,People,MediaSources,ChildCount,Path,IsPlaceHolder,CommunityRating";
 
 impl JellyfinClient {
     pub fn new(device_id: impl Into<String>) -> Self {
@@ -374,12 +380,16 @@ impl JellyfinClient {
         let base = Self::clean_url(base_url);
         let include_item_types = query.include_item_types.unwrap_or("Movie,Video");
         let mut url = format!(
-            "{base}/Users/{}/Items?StartIndex={}&Limit={}&Recursive=true&IncludeItemTypes={}&EnableImages=true&EnableImageTypes=Primary,Thumb,Backdrop&ImageTypeLimit=1&Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources,ChildCount,Path,IsPlaceHolder,CommunityRating",
+            "{base}/Users/{}/Items?StartIndex={}&Limit={}&Recursive=true&IncludeItemTypes={}&EnableImages=true&EnableImageTypes=Primary,Thumb,Backdrop&ImageTypeLimit=1",
             crate::urlencoding(user_id),
             query.start_index,
             query.limit,
             crate::urlencoding(include_item_types)
         );
+        let fields = query.fields.unwrap_or(DEFAULT_ITEM_FIELDS);
+        if !fields.is_empty() {
+            url.push_str(&format!("&Fields={}", crate::urlencoding(fields)));
+        }
         if let Some(pid) = query.parent_id {
             url.push_str(&format!("&ParentId={}", crate::urlencoding(pid)));
         }
@@ -1229,11 +1239,9 @@ mod tests {
             play_method: crate::models::PlayMethod::DirectPlay,
         };
         // Non-UUID ID must return Ok(()) without attempting network connection
-        assert!(
-            client
-                .report_playback_start("http://invalid.local", "token", &start_info)
-                .is_ok()
-        );
+        assert!(client
+            .report_playback_start("http://invalid.local", "token", &start_info)
+            .is_ok());
 
         let progress_info = PlaybackProgressInfo {
             item_id: "telegram:123456".into(),
@@ -1247,11 +1255,9 @@ mod tests {
             playback_order: "Default".into(),
             play_method: crate::models::PlayMethod::DirectPlay,
         };
-        assert!(
-            client
-                .report_playback_progress("http://invalid.local", "token", &progress_info)
-                .is_ok()
-        );
+        assert!(client
+            .report_playback_progress("http://invalid.local", "token", &progress_info)
+            .is_ok());
 
         let stop_info = PlaybackStopInfo {
             item_id: "telegram:123456".into(),
@@ -1260,11 +1266,9 @@ mod tests {
             play_session_id: None,
             failed: false,
         };
-        assert!(
-            client
-                .report_playback_stopped("http://invalid.local", "token", &stop_info)
-                .is_ok()
-        );
+        assert!(client
+            .report_playback_stopped("http://invalid.local", "token", &stop_info)
+            .is_ok());
     }
 
     #[test]

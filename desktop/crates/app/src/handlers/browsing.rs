@@ -897,135 +897,21 @@ fn get_catalog_page(
         }
         performers_page
     } else if !query.trim().is_empty() {
-        let movie_query = GetItemsQuery {
-            start_index,
-            limit: CATALOG_PAGE_SIZE,
-            sort_by: filters.sort_by(),
-            sort_descending: filters.descending,
-            is_unplayed: filters.unwatched,
-            is_favorite: filters.favorites_only.then_some(true),
-            genre: (!filters.genre.is_empty()).then_some(filters.genre.as_str()),
-            studio: (!filters.studio.is_empty()).then_some(filters.studio.as_str()),
-            person: (!filters.performer.is_empty()).then_some(filters.performer.as_str()),
-            search_term: Some(query),
-            ..Default::default()
-        };
-        let people_query = GetItemsQuery {
-            parent_id: None,
-            start_index: 0,
-            limit: 30,
-            sort_by: "SortName",
-            search_term: Some(query),
-            include_item_types: Some("Person"),
-            person_types: Some("Actor"),
-            ..Default::default()
-        };
-        let studio_query = GetItemsQuery {
-            parent_id: None,
-            start_index: 0,
-            limit: 30,
-            sort_by: "SortName",
-            search_term: Some(query),
-            include_item_types: Some("Studio"),
-            ..Default::default()
-        };
-        let tag_query = GetItemsQuery {
-            parent_id: None,
-            start_index: 0,
-            limit: 30,
-            sort_by: "SortName",
-            search_term: Some(query),
-            include_item_types: Some("Genre"),
-            ..Default::default()
-        };
-        let resolver_base_url = local_store
-            .get_setting("resolver_base_url")
-            .ok()
-            .flatten()
-            .or_else(|| local_store.get_setting("resolver_url").ok().flatten())
-            .unwrap_or_else(|| session.server_url.clone());
+        let movie_query =
+            search_movie_query(query, start_index, &filters, selected_library_id.as_deref());
+        let resolver_base_url = resolver_base_url_for(local_store, session);
 
-        let (movie_result, people_result, studio_result, tag_result, channel_result) =
-            std::thread::scope(|scope| {
-                let movie_task = scope.spawn(|| {
-                    jellyfin.get_items(
-                        &session.server_url,
-                        &session.user_id,
-                        &session.access_token,
-                        &movie_query,
-                    )
-                });
-                let people_task = (start_index == 0).then(|| {
-                    scope.spawn(|| {
-                        jellyfin.get_items(
-                            &session.server_url,
-                            &session.user_id,
-                            &session.access_token,
-                            &people_query,
-                        )
-                    })
-                });
-                let studio_task = (start_index == 0).then(|| {
-                    scope.spawn(|| {
-                        jellyfin.get_items(
-                            &session.server_url,
-                            &session.user_id,
-                            &session.access_token,
-                            &studio_query,
-                        )
-                    })
-                });
-                let tag_task = (start_index == 0).then(|| {
-                    scope.spawn(|| {
-                        jellyfin.get_items(
-                            &session.server_url,
-                            &session.user_id,
-                            &session.access_token,
-                            &tag_query,
-                        )
-                    })
-                });
-                let channel_task = (start_index == 0).then(|| {
-                    scope.spawn(|| resolver.search(&resolver_base_url, query, "telegram"))
-                });
-
-                let movie_result = movie_task
-                    .join()
-                    .map_err(|_| JellyfinError::Api("Library search worker panicked".into()))?;
-                let people_result = people_task
-                    .map(|task| {
-                        task.join().map_err(|_| {
-                            JellyfinError::Api("Performer search worker panicked".into())
-                        })
-                    })
-                    .transpose()?;
-                let studio_result = studio_task
-                    .map(|task| {
-                        task.join()
-                            .map_err(|_| JellyfinError::Api("Studio search worker panicked".into()))
-                    })
-                    .transpose()?;
-                let tag_result = tag_task
-                    .map(|task| {
-                        task.join()
-                            .map_err(|_| JellyfinError::Api("Tag search worker panicked".into()))
-                    })
-                    .transpose()?;
-                let channel_result = channel_task
-                    .map(|task| {
-                        task.join().map_err(|_| {
-                            JellyfinError::Api("Channel search worker panicked".into())
-                        })
-                    })
-                    .transpose()?;
-                Ok::<_, JellyfinError>((
-                    movie_result,
-                    people_result,
-                    studio_result,
-                    tag_result,
-                    channel_result,
-                ))
-            })?;
+        let movie_result = jellyfin.get_items(
+            &session.server_url,
+            &session.user_id,
+            &session.access_token,
+            &movie_query,
+        );
+        let supplements = if start_index == 0 {
+            fetch_search_supplements(jellyfin, resolver, session, query, &resolver_base_url)
+        } else {
+            SearchSupplements::default()
+        };
 
         let mut successful_sources = 0;
         let mut movie_page = match movie_result {
@@ -1045,121 +931,17 @@ fn get_catalog_page(
                 }
             }
         };
-        let people_page = match people_result {
-            Some(Ok(page)) => {
-                successful_sources += 1;
-                Some(page)
-            }
-            Some(Err(_)) => {
-                crate::diagnostics::GLOBAL_LOG.w(
-                    "Search",
-                    "Jellyfin performer search failed; preserving results from other sources",
-                );
-                None
-            }
-            None => None,
-        };
-        let studio_page = match studio_result {
-            Some(Ok(page)) => {
-                successful_sources += 1;
-                Some(page)
-            }
-            Some(Err(_)) => {
-                crate::diagnostics::GLOBAL_LOG.w(
-                    "Search",
-                    "Jellyfin studio search failed; preserving results from other sources",
-                );
-                None
-            }
-            None => None,
-        };
-        let tag_page = match tag_result {
-            Some(Ok(page)) => {
-                successful_sources += 1;
-                Some(page)
-            }
-            Some(Err(_)) => {
-                crate::diagnostics::GLOBAL_LOG.w(
-                    "Search",
-                    "Jellyfin tag search failed; preserving results from other sources",
-                );
-                None
-            }
-            None => None,
-        };
-        let channel_videos = match channel_result {
-            Some(Ok(videos)) => {
-                successful_sources += 1;
-                Some(videos)
-            }
-            Some(Err(_)) => {
-                crate::diagnostics::GLOBAL_LOG.w(
-                    "Search",
-                    "Resolver channel search failed; preserving results from other sources",
-                );
-                None
-            }
-            None => None,
-        };
+        successful_sources += supplements.people.is_some() as usize
+            + supplements.studios.is_some() as usize
+            + supplements.tags.is_some() as usize
+            + supplements.channels.is_some() as usize;
         if successful_sources == 0 {
             return Err(JellyfinError::Api("All search sources failed".into()));
         }
 
-        if let Some(mut people_page) = people_page {
-            let people_count = people_page.items.len();
-            supplemental_count += people_count;
-            supplemental_total += people_count;
-            for person in &mut people_page.items {
-                person.genres.push("__adult_hub_performer".into());
-            }
-            movie_page.items.extend(people_page.items);
-            movie_page.total_record_count += people_count;
-        }
-        if let Some(mut studio_page) = studio_page {
-            let studio_count = studio_page.items.len();
-            supplemental_count += studio_count;
-            supplemental_total += studio_count;
-            for studio in &mut studio_page.items {
-                studio.genres.push("__adult_hub_studio".into());
-            }
-            movie_page.items.extend(studio_page.items);
-            movie_page.total_record_count += studio_count;
-        }
-        if let Some(mut tag_page) = tag_page {
-            let tag_count = tag_page.items.len();
-            supplemental_count += tag_count;
-            supplemental_total += tag_count;
-            for tag in &mut tag_page.items {
-                tag.genres.push("__adult_hub_genre".into());
-            }
-            movie_page.items.extend(tag_page.items);
-            movie_page.total_record_count += tag_count;
-        }
-        if let Some(videos) = channel_videos {
-            let mut channel_items = videos.into_iter().map(TvItem::from).collect::<Vec<_>>();
-            let mut seen_channel_items = std::collections::HashSet::new();
-            channel_items.retain(|item| seen_channel_items.insert(item.id.clone()));
-            let hidden_channels = local_store.get_hidden_channels().unwrap_or_default();
-            channel_items.retain(|item| {
-                !item.provider_video_id.as_ref().is_some_and(|id| {
-                    id.split(':').next().is_some_and(|channel| {
-                        hidden_channels
-                            .iter()
-                            .any(|hidden| channel.eq_ignore_ascii_case(hidden))
-                    })
-                })
-            });
-            let channel_count = channel_items.len();
-            supplemental_count += channel_count;
-            supplemental_total += channel_count;
-            for channel_item in &mut channel_items {
-                channel_item
-                    .genres
-                    .push("__adult_hub_channel_search".into());
-            }
-            movie_page.items.extend(channel_items);
-            movie_page.total_record_count += channel_count;
-        }
+        let added = merge_search_supplements(&mut movie_page, supplements, local_store);
+        supplemental_count += added;
+        supplemental_total += added;
         movie_page
     } else {
         match category {
@@ -1305,6 +1087,295 @@ fn get_catalog_page(
         has_more,
         supplemental_total,
     })
+}
+
+// Search runs in two stages: the movie page renders as soon as the fast
+// Jellyfin query lands, and the slower performer/studio/tag/channel hits are
+// appended afterwards. The field list omits server-side expensive extras
+// (ChildCount, Path, IsPlaceHolder) that catalog cards never read.
+const SEARCH_MOVIE_FIELDS: &str =
+    "ProviderIds,Overview,Genres,Studios,People,MediaSources,CommunityRating";
+const SEARCH_SUPPLEMENT_FIELDS: &str = "ProviderIds,Overview,ChildCount";
+const CHANNEL_SEARCH_TIMEOUT: Duration = Duration::from_secs(8);
+
+fn search_movie_query<'a>(
+    query: &'a str,
+    start_index: usize,
+    filters: &'a CatalogFilters,
+    parent_id: Option<&'a str>,
+) -> GetItemsQuery<'a> {
+    GetItemsQuery {
+        parent_id,
+        start_index,
+        limit: CATALOG_PAGE_SIZE,
+        sort_by: filters.sort_by(),
+        sort_descending: filters.descending,
+        is_unplayed: filters.unwatched,
+        is_favorite: filters.favorites_only.then_some(true),
+        genre: (!filters.genre.is_empty()).then_some(filters.genre.as_str()),
+        studio: (!filters.studio.is_empty()).then_some(filters.studio.as_str()),
+        person: (!filters.performer.is_empty()).then_some(filters.performer.as_str()),
+        search_term: Some(query),
+        fields: Some(SEARCH_MOVIE_FIELDS),
+        ..Default::default()
+    }
+}
+
+fn search_supplement_query<'a>(
+    query: &'a str,
+    include_item_types: &'a str,
+    person_types: Option<&'a str>,
+) -> GetItemsQuery<'a> {
+    GetItemsQuery {
+        parent_id: None,
+        start_index: 0,
+        limit: 30,
+        sort_by: "SortName",
+        search_term: Some(query),
+        include_item_types: Some(include_item_types),
+        person_types,
+        fields: Some(SEARCH_SUPPLEMENT_FIELDS),
+        ..Default::default()
+    }
+}
+
+fn resolver_base_url_for(local_store: &LocalStore, session: &Session) -> String {
+    local_store
+        .get_setting("resolver_base_url")
+        .ok()
+        .flatten()
+        .or_else(|| local_store.get_setting("resolver_url").ok().flatten())
+        .unwrap_or_else(|| session.server_url.clone())
+}
+
+#[derive(Default)]
+struct SearchSupplements {
+    people: Option<TvItemsPage>,
+    studios: Option<TvItemsPage>,
+    tags: Option<TvItemsPage>,
+    channels: Option<Vec<TvItem>>,
+}
+
+fn fetch_search_supplements(
+    jellyfin: &JellyfinClient,
+    resolver: &ResolverClient,
+    session: &Session,
+    query: &str,
+    resolver_base_url: &str,
+) -> SearchSupplements {
+    let people_query = search_supplement_query(query, "Person", Some("Actor"));
+    let studio_query = search_supplement_query(query, "Studio", None);
+    let tag_query = search_supplement_query(query, "Genre", None);
+    std::thread::scope(|scope| {
+        let people_task = scope.spawn(|| {
+            jellyfin
+                .get_items(
+                    &session.server_url,
+                    &session.user_id,
+                    &session.access_token,
+                    &people_query,
+                )
+                .map_err(|_| {
+                    crate::diagnostics::GLOBAL_LOG.w(
+                        "Search",
+                        "Jellyfin performer search failed; preserving results from other sources",
+                    );
+                })
+                .ok()
+        });
+        let studio_task = scope.spawn(|| {
+            jellyfin
+                .get_items(
+                    &session.server_url,
+                    &session.user_id,
+                    &session.access_token,
+                    &studio_query,
+                )
+                .map_err(|_| {
+                    crate::diagnostics::GLOBAL_LOG.w(
+                        "Search",
+                        "Jellyfin studio search failed; preserving results from other sources",
+                    );
+                })
+                .ok()
+        });
+        let tag_task = scope.spawn(|| {
+            jellyfin
+                .get_items(
+                    &session.server_url,
+                    &session.user_id,
+                    &session.access_token,
+                    &tag_query,
+                )
+                .map_err(|_| {
+                    crate::diagnostics::GLOBAL_LOG.w(
+                        "Search",
+                        "Jellyfin tag search failed; preserving results from other sources",
+                    );
+                })
+                .ok()
+        });
+        let channel_task = scope.spawn(|| {
+            resolver
+                .search_with_timeout(resolver_base_url, query, "telegram", CHANNEL_SEARCH_TIMEOUT)
+                .map(|videos| videos.into_iter().map(TvItem::from).collect::<Vec<_>>())
+                .map_err(|_| {
+                    crate::diagnostics::GLOBAL_LOG.w(
+                        "Search",
+                        "Resolver channel search failed; preserving results from other sources",
+                    );
+                })
+                .ok()
+        });
+        SearchSupplements {
+            people: people_task.join().ok().flatten(),
+            studios: studio_task.join().ok().flatten(),
+            tags: tag_task.join().ok().flatten(),
+            channels: channel_task.join().ok().flatten(),
+        }
+    })
+}
+
+/// Appends marked performer/studio/tag/channel items after the movie page,
+/// mirroring the ordering and hidden-channel rules the combined search used
+/// before the two-stage split. Returns the number of items appended.
+fn merge_search_supplements(
+    movie_page: &mut TvItemsPage,
+    supplements: SearchSupplements,
+    local_store: &LocalStore,
+) -> usize {
+    let mut added = 0;
+    if let Some(mut people_page) = supplements.people {
+        let people_count = people_page.items.len();
+        added += people_count;
+        for person in &mut people_page.items {
+            person.genres.push("__adult_hub_performer".into());
+        }
+        movie_page.items.extend(people_page.items);
+        movie_page.total_record_count += people_count;
+    }
+    if let Some(mut studio_page) = supplements.studios {
+        let studio_count = studio_page.items.len();
+        added += studio_count;
+        for studio in &mut studio_page.items {
+            studio.genres.push("__adult_hub_studio".into());
+        }
+        movie_page.items.extend(studio_page.items);
+        movie_page.total_record_count += studio_count;
+    }
+    if let Some(mut tag_page) = supplements.tags {
+        let tag_count = tag_page.items.len();
+        added += tag_count;
+        for tag in &mut tag_page.items {
+            tag.genres.push("__adult_hub_genre".into());
+        }
+        movie_page.items.extend(tag_page.items);
+        movie_page.total_record_count += tag_count;
+    }
+    if let Some(channel_items) = supplements.channels {
+        let mut channel_items = channel_items;
+        let mut seen_channel_items = std::collections::HashSet::new();
+        channel_items.retain(|item| seen_channel_items.insert(item.id.clone()));
+        let hidden_channels = local_store.get_hidden_channels().unwrap_or_default();
+        channel_items.retain(|item| {
+            !item.provider_video_id.as_ref().is_some_and(|id| {
+                id.split(':').next().is_some_and(|channel| {
+                    hidden_channels
+                        .iter()
+                        .any(|hidden| channel.eq_ignore_ascii_case(hidden))
+                })
+            })
+        });
+        let channel_count = channel_items.len();
+        added += channel_count;
+        for channel_item in &mut channel_items {
+            channel_item
+                .genres
+                .push("__adult_hub_channel_search".into());
+        }
+        movie_page.items.extend(channel_items);
+        movie_page.total_record_count += channel_count;
+    }
+    added
+}
+
+/// Stage A of catalog search: the movies-only page, restricted to the selected
+/// library and without the supplemental fan-out.
+fn get_search_movies_page_at(
+    jellyfin: &JellyfinClient,
+    session: &Session,
+    local_store: &LocalStore,
+    query: &str,
+    filters: &CatalogFilters,
+    start_index: usize,
+) -> std::result::Result<CatalogPage, JellyfinError> {
+    let parent_id = local_store
+        .get_setting("selected_library_id")
+        .ok()
+        .flatten();
+    let page = jellyfin.get_items(
+        &session.server_url,
+        &session.user_id,
+        &session.access_token,
+        &search_movie_query(query, start_index, filters, parent_id.as_deref()),
+    )?;
+    let server_count = page.items.len();
+    let total_count = page.total_record_count;
+    let items = page
+        .items
+        .into_iter()
+        .filter(|item| filters.accepts(item))
+        .collect::<Vec<_>>();
+    let next_start = start_index + server_count;
+    Ok(CatalogPage {
+        items,
+        next_start,
+        total_count,
+        has_more: next_start < total_count,
+        supplemental_total: 0,
+    })
+}
+
+fn get_search_movies_page_with_empty_fetch(
+    jellyfin: &JellyfinClient,
+    session: &Session,
+    local_store: &LocalStore,
+    query: &str,
+    filters: &CatalogFilters,
+) -> std::result::Result<CatalogPage, JellyfinError> {
+    let mut page = get_search_movies_page_at(jellyfin, session, local_store, query, filters, 0)?;
+    for _ in 0..3 {
+        if !filter_catalog_items(page.items.clone(), local_store).is_empty() || !page.has_more {
+            break;
+        }
+        let previous_start = page.next_start;
+        let next_page = get_search_movies_page_at(
+            jellyfin,
+            session,
+            local_store,
+            query,
+            filters,
+            previous_start,
+        )?;
+        if next_page.next_start <= previous_start {
+            page.has_more = false;
+            break;
+        }
+        let mut seen = page
+            .items
+            .iter()
+            .map(|item| item.id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        page.items.extend(
+            next_page
+                .items
+                .into_iter()
+                .filter(|item| seen.insert(item.id.clone())),
+        );
+        page.next_start = next_page.next_start;
+        page.has_more = next_page.has_more;
+    }
+    Ok(page)
 }
 
 fn get_catalog_page_with_empty_page_fetch(
@@ -3091,125 +3162,225 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     .get_search_history_context(search_context, 8)
                     .unwrap_or_default();
 
-                let mut is_unauth = false;
-                let mut search_error_message = String::new();
-                let mut image_auth = None;
-                let (raw_items, next_start, total_count, has_more, supplemental_total) =
-                    if let Some(session) = credential_store.get().ok().flatten() {
-                        image_auth =
-                            Some((session.server_url.clone(), session.access_token.clone()));
-                        match get_catalog_page_with_empty_page_fetch(
-                            &jellyfin,
-                            &resolver,
-                            &session,
-                            &local_store,
-                            "Latest",
-                            &query,
-                            0,
-                            filters.clone(),
-                            false,
-                        ) {
-                            Ok(page) => (
-                                page.items,
-                                page.next_start,
-                                page.total_count,
-                                page.has_more,
-                                page.supplemental_total,
-                            ),
-                            Err(error) => {
-                                is_unauth = error.is_unauthorized();
-                                search_error_message = if is_unauth {
-                                    "Your Jellyfin session expired. Sign in again and retry."
-                                } else {
-                                    "Could not reach Jellyfin. Check the connection and retry."
-                                }
-                                .into();
-                                (Vec::new(), 0, 0, false, 0)
-                            }
-                        }
-                    } else {
-                        search_error_message =
-                            "Connect Jellyfin before searching your library.".into();
-                        (Vec::new(), 0, 0, false, 0)
-                    };
-                let raw_items = filter_catalog_items(raw_items, &local_store);
-                let (movie_count, performer_count, studio_count, tag_count, channel_count) =
-                    search_result_counts(&raw_items);
-                let image_server = image_auth.as_ref().map(|(server, _)| server.clone());
-                let token_for_refresh = image_auth.map(|(_, token)| token);
+                let session = credential_store.get().ok().flatten();
+                let image_server = session.as_ref().map(|session| session.server_url.clone());
+                let token_for_refresh =
+                    session.as_ref().map(|session| session.access_token.clone());
 
-                slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = weak.upgrade() {
-                        if !catalog_generation_is_current(&catalog_generation, request_id) {
+                // Two-stage publish: the first call renders the movie page as
+                // soon as stage A lands; the second re-renders once the slower
+                // performer/studio/tag/channel sources have appended.
+                let publish = {
+                    let weak = weak.clone();
+                    let query = query.clone();
+                    let local_store = local_store.clone();
+                    let filters = filters.clone();
+                    let catalog_paging = catalog_paging.clone();
+                    let cached_catalog = cached_catalog.clone();
+                    let catalog_generation = catalog_generation.clone();
+                    let recent_queries = recent_queries.clone();
+                    let image_server = image_server.clone();
+                    let token_for_refresh = token_for_refresh.clone();
+                    move |items: Vec<TvItem>,
+                          next_start: usize,
+                          total_count: usize,
+                          has_more: bool,
+                          supplemental_total: usize,
+                          search_error_message: String,
+                          is_unauth: bool| {
+                        let filtered = filter_catalog_items(items, &local_store);
+                        let (movie_count, performer_count, studio_count, tag_count, channel_count) =
+                            search_result_counts(&filtered);
+                        let weak = weak.clone();
+                        let query = query.clone();
+                        let local_store = local_store.clone();
+                        let filters = filters.clone();
+                        let catalog_paging = catalog_paging.clone();
+                        let cached_catalog = cached_catalog.clone();
+                        let catalog_generation = catalog_generation.clone();
+                        let recent_queries = recent_queries.clone();
+                        let image_server = image_server.clone();
+                        let token_for_refresh = token_for_refresh.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            let Some(ui) = weak.upgrade() else { return };
+                            if !catalog_generation_is_current(&catalog_generation, request_id) {
+                                return;
+                            }
+                            *catalog_paging.lock().unwrap() = CatalogPageState {
+                                category: "Latest".into(),
+                                query,
+                                library_id: local_store
+                                    .get_setting("selected_library_id")
+                                    .ok()
+                                    .flatten()
+                                    .unwrap_or_default(),
+                                next_start,
+                                has_more,
+                                loading_more: false,
+                                filters,
+                                supplemental_total,
+                            };
+                            *cached_catalog.lock().unwrap() = filtered.clone();
+                            let cards = filtered
+                                .iter()
+                                .map(|item| {
+                                    image_server.as_ref().map_or_else(
+                                        || tv_item_to_card(item),
+                                        |server| tv_item_to_card_for_server(item, server),
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+                            set_catalog(&ui, cards.clone());
+                            set_recent_searches(&ui, recent_queries);
+                            ui.set_search_movie_count(movie_count as i32);
+                            ui.set_search_performer_count(performer_count as i32);
+                            ui.set_search_studio_count(studio_count as i32);
+                            ui.set_search_tag_count(tag_count as i32);
+                            ui.set_search_channel_count(channel_count as i32);
+                            ui.set_search_error_message(search_error_message.into());
+                            ui.set_search_all_has_more(has_more);
+                            ui.set_search_all_total_count(total_count as i32);
+                            ui.set_catalog_has_more(has_more);
+                            ui.set_catalog_total_count(total_count as i32);
+                            ui.set_is_loading_more(false);
+                            ui.set_is_loading_catalog(false);
+                            ui.set_status("Ready".into());
+                            ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
+                            if let Some(token) = token_for_refresh {
+                                let model = ui.get_catalog_items();
+                                let cards = (0..model.row_count())
+                                    .filter_map(|index| model.row_data(index))
+                                    .collect::<Vec<_>>();
+                                refresh_catalog_thumbnails_async(
+                                    ui.as_weak(),
+                                    cards,
+                                    token,
+                                    cached_catalog.clone(),
+                                    Some((catalog_generation.clone(), request_id)),
+                                );
+                            }
+                            if is_unauth {
+                                ui.set_is_logged_in(false);
+                                ui.set_login_modal_visible(true);
+                                ui.set_login_modal_message(
+                                    "Session expired (401 Unauthorized). Please sign in again."
+                                        .into(),
+                                );
+                                ui.set_toast_message("Session expired. Please reconnect.".into());
+                                ui.set_toast_type("warning".into());
+                                ui.set_toast_action_text("Sign In".into());
+                                ui.set_toast_visible(true);
+                            }
+                        });
+                    }
+                };
+
+                let Some(session) = session else {
+                    publish(
+                        Vec::new(),
+                        0,
+                        0,
+                        false,
+                        0,
+                        "Connect Jellyfin before searching your library.".into(),
+                        false,
+                    );
+                    return;
+                };
+
+                let stage_a = get_search_movies_page_with_empty_fetch(
+                    &jellyfin,
+                    &session,
+                    &local_store,
+                    &query,
+                    &filters,
+                );
+                let mut page = match stage_a {
+                    Ok(page) => page,
+                    Err(error) => {
+                        let is_unauth = error.is_unauthorized();
+                        let message: String = if is_unauth {
+                            "Your Jellyfin session expired. Sign in again and retry."
+                        } else {
+                            "Could not reach Jellyfin. Check the connection and retry."
+                        }
+                        .into();
+                        if is_unauth {
+                            publish(Vec::new(), 0, 0, false, 0, message, true);
                             return;
                         }
-                        *catalog_paging.lock().unwrap() = CatalogPageState {
-                            category: "Latest".into(),
-                            query,
-                            library_id: local_store
-                                .get_setting("selected_library_id")
-                                .ok()
-                                .flatten()
-                                .unwrap_or_default(),
-                            next_start,
-                            has_more,
-                            loading_more: false,
-                            filters,
-                            supplemental_total,
+                        // Jellyfin is unreachable, but the Resolver may still
+                        // answer for channel results.
+                        let mut partial = TvItemsPage {
+                            items: Vec::new(),
+                            total_record_count: 0,
+                            start_index: 0,
                         };
-                        *cached_catalog.lock().unwrap() = raw_items.clone();
-                        let cards = raw_items
-                            .iter()
-                            .map(|item| {
-                                image_server.as_ref().map_or_else(
-                                    || tv_item_to_card(item),
-                                    |server| tv_item_to_card_for_server(item, server),
-                                )
-                            })
-                            .collect::<Vec<_>>();
-                        set_catalog(&ui, cards);
-                        set_recent_searches(&ui, recent_queries);
-                        ui.set_search_movie_count(movie_count as i32);
-                        ui.set_search_performer_count(performer_count as i32);
-                        ui.set_search_studio_count(studio_count as i32);
-                        ui.set_search_tag_count(tag_count as i32);
-                        ui.set_search_channel_count(channel_count as i32);
-                        ui.set_search_error_message(search_error_message.into());
-                        ui.set_search_all_has_more(has_more);
-                        ui.set_search_all_total_count(total_count as i32);
-                        ui.set_catalog_has_more(has_more);
-                        ui.set_catalog_total_count(total_count as i32);
-                        ui.set_is_loading_more(false);
-                        ui.set_is_loading_catalog(false);
-                        ui.set_status("Ready".into());
-                        ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
-                        if let Some(token) = token_for_refresh {
-                            let model = ui.get_catalog_items();
-                            let cards = (0..model.row_count())
-                                .filter_map(|index| model.row_data(index))
-                                .collect::<Vec<_>>();
-                            refresh_catalog_thumbnails_async(
-                                ui.as_weak(),
-                                cards,
-                                token,
-                                cached_catalog.clone(),
-                                Some((catalog_generation.clone(), request_id)),
-                            );
-                        }
-                        if is_unauth {
-                            ui.set_is_logged_in(false);
-                            ui.set_login_modal_visible(true);
-                            ui.set_login_modal_message(
-                                "Session expired (401 Unauthorized). Please sign in again.".into(),
-                            );
-                            ui.set_toast_message("Session expired. Please reconnect.".into());
-                            ui.set_toast_type("warning".into());
-                            ui.set_toast_action_text("Sign In".into());
-                            ui.set_toast_visible(true);
-                        }
+                        let supplemental_total = merge_search_supplements(
+                            &mut partial,
+                            fetch_search_supplements(
+                                &jellyfin,
+                                &resolver,
+                                &session,
+                                &query,
+                                &resolver_base_url_for(&local_store, &session),
+                            ),
+                            &local_store,
+                        );
+                        publish(
+                            partial.items,
+                            0,
+                            0,
+                            false,
+                            supplemental_total,
+                            message,
+                            false,
+                        );
+                        return;
                     }
-                })
-                .ok();
+                };
+                let raw_movies = page.items.clone();
+                publish(
+                    std::mem::take(&mut page.items),
+                    page.next_start,
+                    page.total_count,
+                    page.has_more,
+                    0,
+                    String::new(),
+                    false,
+                );
+
+                if query.trim().is_empty()
+                    || search_debounce_generation.load(Ordering::SeqCst) != debounce_id
+                {
+                    return;
+                }
+                let supplements = fetch_search_supplements(
+                    &jellyfin,
+                    &resolver,
+                    &session,
+                    &query,
+                    &resolver_base_url_for(&local_store, &session),
+                );
+                let mut merged = TvItemsPage {
+                    items: raw_movies,
+                    total_record_count: page.total_count,
+                    start_index: 0,
+                };
+                let supplemental_total =
+                    merge_search_supplements(&mut merged, supplements, &local_store);
+                if supplemental_total == 0 {
+                    return;
+                }
+                publish(
+                    merged.items,
+                    page.next_start,
+                    merged.total_record_count,
+                    page.has_more,
+                    supplemental_total,
+                    String::new(),
+                    false,
+                );
             });
         });
     }
@@ -3989,7 +4160,9 @@ mod tests {
         // searches. The transition touches no storage, and an in-memory store
         // proves the history rows survive the reset.
         let store = LocalStore::open_in_memory().unwrap();
-        store.add_search_query_context("movies", "qa-no-results-982731").unwrap();
+        store
+            .add_search_query_context("movies", "qa-no-results-982731")
+            .unwrap();
         store.add_search_query_context("movies", "dragon").unwrap();
         let _cleared = CatalogSearchState::cleared();
         let history = store.get_search_history_context("movies", 10).unwrap();

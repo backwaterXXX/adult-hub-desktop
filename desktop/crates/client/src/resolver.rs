@@ -119,6 +119,31 @@ impl ResolverClient {
         Ok(res)
     }
 
+    /// Like [`search`](Self::search), but overrides the client-wide 30 s
+    /// timeout so a hanging Resolver cannot stall a search stage.
+    pub fn search_with_timeout(
+        &self,
+        base_url: &str,
+        query: &str,
+        provider: &str,
+        timeout: Duration,
+    ) -> Result<Vec<VideoDto>> {
+        let url = format!(
+            "{}/admin/api/search?q={}&provider={}",
+            base_url.trim_end_matches('/'),
+            urlencoding(query.trim()),
+            urlencoding(provider.trim())
+        );
+        let res: Vec<VideoDto> = self
+            .client
+            .get(&url)
+            .timeout(timeout)
+            .send()?
+            .error_for_status()?
+            .json()?;
+        Ok(res)
+    }
+
     pub fn get_performer_bio(&self, base_url: &str, name: &str) -> Result<PerformerBioDto> {
         let url = format!(
             "{}/admin/api/performer-bio?name={}",
@@ -384,13 +409,18 @@ mod tests {
             "http://example.com/resolver/admin/play/telegram:-100123:456:789/stream?mode=proxy"
         );
 
-        let orig_url = ResolverClient::stream_url_with_variant(base, "-100123:456:789", Some("original"));
+        let orig_url =
+            ResolverClient::stream_url_with_variant(base, "-100123:456:789", Some("original"));
         assert_eq!(
             orig_url,
             "http://example.com/resolver/admin/play/telegram:-100123:456:789/stream?mode=proxy"
         );
 
-        let alt_url = ResolverClient::stream_url_with_variant(base, "telegram:-100123:456:789", Some("alt_5002"));
+        let alt_url = ResolverClient::stream_url_with_variant(
+            base,
+            "telegram:-100123:456:789",
+            Some("alt_5002"),
+        );
         assert_eq!(
             alt_url,
             "http://example.com/resolver/admin/play/telegram:-100123:456:789/stream?mode=proxy&variant=alt_5002"
