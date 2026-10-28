@@ -435,6 +435,7 @@ export component Tab inherits Rectangle {
 
 export component SectionHeader inherits HorizontalLayout {
     in property <string> title;
+    in property <string> counter-text: "";
     in property <string> action-label: "See all";
     in property <bool> show-scroll-controls: false;
     in property <bool> scroll-left-disabled: true;
@@ -451,6 +452,13 @@ export component SectionHeader inherits HorizontalLayout {
         color: HubTheme.text-primary;
         font-size: HubTheme.section-title-size;
         font-weight: 600;
+        vertical-alignment: center;
+    }
+
+    if root.counter-text != "" : Text {
+        text: root.counter-text;
+        color: HubTheme.text-muted;
+        font-size: HubTheme.metadata-size;
         vertical-alignment: center;
     }
 

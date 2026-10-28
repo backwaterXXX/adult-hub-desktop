@@ -80,7 +80,9 @@ export component VideoCard inherits Rectangle {
     out property <bool> is-title-truncated: root.item.title != "" && (
         measure-text.preferred-height > 42px || measure-text.min-width > root.title-available-width
     );
-    property <bool> is-card-active: touch.has-hover || root.is-focused || root.has-focus;
+    // Hover is mouse-only; keyboard focus is a distinct outline (border ring)
+    // without the hover fill, so the two states never look alike.
+    property <bool> is-card-active: touch.has-hover;
     property <bool> tooltip-active: false;
     property <bool> scroll-reset: false;
 
@@ -125,7 +127,7 @@ export component VideoCard inherits Rectangle {
     max-width: root.fixed-width ? root.card-width : 10000px;
     height: root.artwork-height + (root.compact ? 50px : 70px);
     border-radius: HubTheme.card-radius;
-    background: (touch.has-hover || play-touch.has-hover) ? HubTheme.surface-raised : ((root.is-focused || root.has-focus) ? #FFFFFF08 : transparent);
+    background: (touch.has-hover || play-touch.has-hover) ? HubTheme.surface-raised : transparent;
     border-width: (root.is-focused || root.has-focus) ? 2px : (touch.has-hover ? 1px : 0px);
     border-color: (root.is-focused || root.has-focus) ? HubTheme.focus-ring : HubTheme.separator;
 

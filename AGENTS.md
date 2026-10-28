@@ -50,3 +50,10 @@ To publish a release that clients can update to:
 Never commit the signing key or ship a manifest the client cannot verify:
 unsigned or mismatched-key releases are invisible to the updater.
 
+## Prywatne testy interfejsu graficznego
+
+- W przypadku Adult Hub i innych treści dla dorosłych nigdy nie wyświetlaj interfejsu ani treści na fizycznym ekranie HDMI, w sesji użytkownika, przez SSH X11 forwarding lub MobaXterm. Nie używaj odziedziczonego `DISPLAY`, istniejących serwerów X11 ani istniejących ekranów wirtualnych, w szczególności `:10`; nie zakładaj, że numer ekranu identyfikuje bezpieczną sesję.
+- Gdy test GUI jest potrzebny, utwórz nową, prywatną instancję Xvfb wyłącznie dla tego testu, z automatycznie przydzielonym wolnym numerem ekranu (`-displayfd`), bez nasłuchu TCP (`-nolisten tcp`) i z osobnym plikiem autoryzacji X (`-auth`) w katalogu tymczasowym o uprawnieniach 0700. Utwórz losowy cookie przez `xauth`, nie wypisuj go ani nie ujawniaj zawartości pliku autoryzacji. Upewnij się, że aplikacja i narzędzia testowe używają wyłącznie jawnie ustawionych `DISPLAY` i `XAUTHORITY` tej instancji. Nie używaj `xhost +`, VNC ani innego udostępniania obrazu.
+- Przed uruchomieniem aplikacji zweryfikuj połączenie z nową instancją i przerwij test, jeśli nie można potwierdzić izolacji. Nie używaj w zamian istniejącego ekranu ani HDMI. Jeśli sandbox uniemożliwia utworzenie gniazda X11, użyj właściwej procedury zgody na uruchomienie poza sandboxem; nie omijaj jej.
+- Zrzuty i inne materiały z testów przechowuj tylko w prywatnym katalogu tymczasowym, nie pokazuj ich w rozmowie ani użytkownikowi, chyba że użytkownik wyraźnie o to poprosi. Po testach zakończ uruchomione przez siebie procesy i usuń katalog tymczasowy, plik autoryzacji oraz zrzuty. Nie przerywaj ani nie usuwaj zasobów innych sesji.
+- Sam Xvfb służący testowi nie zajmuje kolejki ciężkich zadań przez cały czas działania; kompilacje, duże zestawy testów i inne ciężkie zadania nadal uruchamiaj przez `ai-build` zgodnie z poniższymi zasadami.

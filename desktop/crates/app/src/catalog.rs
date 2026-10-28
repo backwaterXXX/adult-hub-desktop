@@ -613,6 +613,7 @@ fn update_catalog_thumbnail(
         }
         rows.set_row_data(row_index, row);
     }
+    sync_search_sections(ui);
 }
 
 fn update_channel_thumbnail(
@@ -698,6 +699,42 @@ fn update_thumbnail_state(
         }
         rows.set_row_data(row_index, row);
     }
+    if !channel {
+        sync_search_sections(ui);
+    }
+}
+
+/// Mirror the current catalogue cards into the per-type "All" search sections
+/// whenever a card changes in place (thumbnail arrivals). The section models
+/// are separate from catalog-items, so without this the All tab keeps
+/// placeholders after the rest of the UI has loaded its artwork.
+pub fn sync_search_sections(ui: &MainWindow) {
+    if !(ui.get_is_catalog_search_results() && ui.get_search_results_filter() == "all") {
+        return;
+    }
+    let items = ui.get_catalog_items();
+    let mut movies = Vec::new();
+    let mut performers = Vec::new();
+    let mut studios = Vec::new();
+    let mut tags = Vec::new();
+    let mut channels = Vec::new();
+    for index in 0..items.row_count() {
+        let Some(card) = items.row_data(index) else {
+            continue;
+        };
+        match card.provider.as_str() {
+            "performer" => performers.push(card),
+            "studio" => studios.push(card),
+            "genre" | "category" => tags.push(card),
+            "telegram" => channels.push(card),
+            _ => movies.push(card),
+        }
+    }
+    ui.set_search_movies_section(Rc::new(slint::VecModel::from(movies)).into());
+    ui.set_search_performers_section(Rc::new(slint::VecModel::from(performers)).into());
+    ui.set_search_studios_section(Rc::new(slint::VecModel::from(studios)).into());
+    ui.set_search_tags_section(Rc::new(slint::VecModel::from(tags)).into());
+    ui.set_search_channels_section(Rc::new(slint::VecModel::from(channels)).into());
 }
 
 pub fn retry_thumbnail_async(
@@ -1125,11 +1162,11 @@ pub fn tv_item_to_card(item: &TvItem) -> VideoCardData {
         is_played,
         provider: provider.into(),
         is_favorite: item.is_favorite,
-        studio: if item
-            .genres
-            .iter()
-            .any(|tag| tag == "__adult_hub_performer" || tag == "__adult_hub_studio" || tag == "__adult_hub_genre")
-        {
+        studio: if item.genres.iter().any(|tag| {
+            tag == "__adult_hub_performer"
+                || tag == "__adult_hub_studio"
+                || tag == "__adult_hub_genre"
+        }) {
             item.child_count
                 .filter(|count| *count > 0)
                 .map(|count| {
@@ -2056,9 +2093,8 @@ mod tests {
             let n = ((avail + gap) / (eff_min + gap)).floor() as i32;
             n.clamp(1, 8)
         };
-        let calc_card_w = |avail: f32, cols: i32| -> f32 {
-            (avail - (cols - 1) as f32 * gap) / cols as f32
-        };
+        let calc_card_w =
+            |avail: f32, cols: i32| -> f32 { (avail - (cols - 1) as f32 * gap) / cols as f32 };
 
         let visible_width = 1180.0f32;
 

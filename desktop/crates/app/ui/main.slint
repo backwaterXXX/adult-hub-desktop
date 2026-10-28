@@ -3,7 +3,7 @@ import { VideoCard, VideoCardData, VideoCardRowData } from "VideoCard.slint";
 import { DashboardShelf, PerformerCard, StudioCard, CategoryCard, VideoCardGrid } from "DashboardShelf.slint";
 import { Toast } from "Toast.slint";
 import { HubTheme, KeyboardState } from "theme.slint";
-import { Button, IconButton, FilterIconButton, LoadingState, PageHeader, AccentSpinner } from "common-controls.slint";
+import { Button, IconButton, FilterIconButton, LoadingState, PageHeader, AccentSpinner, SectionHeader } from "common-controls.slint";
 import { SettingsView, DiscoveredServerItem, HomeCategoryOption, LibraryOptionData } from "SettingsView.slint";
 export { DiscoveredServerItem, HomeCategoryOption, LibraryOptionData }
 export { VideoCardData, VideoCardRowData }
@@ -442,16 +442,20 @@ component DarkLineEdit inherits Rectangle {
     in property <bool> password-field: false;
     in property <bool> enabled: true;
     in property <int> focus-request-id: 0;
+    in property <bool> clearable: false;
+    in property <string> clear-tooltip: "Clear search";
     out property <bool> has-focus: input.has-focus;
     callback edited(string);
     callback accepted(string);
+    callback cleared();
 
     height: 40px;
     border-radius: HubTheme.control-radius;
     background: root.enabled ? HubTheme.surface : HubTheme.surface-hover;
     border-width: 1px;
     border-color: input.has-focus ? HubTheme.focus-ring : HubTheme.separator;
-    clip: true;
+    // No clip: the clear-button tooltip needs to render above the field;
+    // text and placeholder keep 12px padding so nothing reaches the corners.
     animate border-color { duration: 120ms; }
 
     changed focus-request-id => {
@@ -460,10 +464,12 @@ component DarkLineEdit inherits Rectangle {
         }
     }
 
+    property <bool> show-clear: root.clearable && root.text != "" && !root.password-field;
+
     input := TextInput {
         x: 12px;
         y: 0px;
-        width: parent.width - 24px;
+        width: parent.width - (root.show-clear ? 44px : 24px);
         height: parent.height;
         enabled: root.enabled;
         text <=> root.text;
@@ -489,6 +495,55 @@ component DarkLineEdit inherits Rectangle {
         font-size: 15px;
         vertical-alignment: center;
         overflow: elide;
+    }
+
+    if root.show-clear : Rectangle {
+        x: parent.width - 34px;
+        y: (parent.height - 26px) / 2;
+        width: 26px;
+        height: 26px;
+        border-radius: 13px;
+        background: clear-touch.has-hover ? HubTheme.surface-hover : transparent;
+        accessible-role: button;
+        accessible-label: root.clear-tooltip;
+        accessible-action-default => { root.cleared(); }
+        animate background { duration: 120ms; }
+
+        Image {
+            source: @image-url("../../../assets/icons/close.svg");
+            width: 14px;
+            height: 14px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            image-fit: contain;
+            opacity: 0.85;
+        }
+
+        if clear-touch.has-hover : Rectangle {
+            y: -34px;
+            x: (parent.width - self.width) / 2 - 4px;
+            height: 24px;
+            width: clear-tip-text.preferred-width + 16px;
+            border-radius: 4px;
+            background: #14141cf5;
+            border-width: 1px;
+            border-color: #BE185D88;
+            z: 100;
+
+            clear-tip-text := Text {
+                x: 8px;
+                y: 4px;
+                text: root.clear-tooltip;
+                color: #FFFFFF;
+                font-size: 11px;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+        }
+
+        clear-touch := TouchArea {
+            clicked => { root.cleared(); }
+        }
     }
 }
 
@@ -1243,6 +1298,9 @@ component HomeFeaturedHero inherits Rectangle {
         && (root.item.thumbnail_state == "ready" || root.item.thumbnail_state == "")
         && root.item.thumbnail.width > 0 && root.item.thumbnail.height > 0;
     property <bool> is-wide: root.width >= 720px;
+    // Artwork column is part of the hero geometry, not an overlay constraint:
+    // the text column is sized against it below.
+    property <length> graphic-w: min(root.width * 0.62, 540px);
 
     // With artwork the hero is a fixed cinematic band; without artwork it
     // shrinks to the natural content height instead of showing an empty banner.
@@ -1255,10 +1313,10 @@ component HomeFeaturedHero inherits Rectangle {
     clip: true;
 
     // Right-aligned backdrop artwork with cinematic fade (only when valid artwork exists)
-    if root.has-graphic : Rectangle {
+    if root.has-graphic : graphic-panel := Rectangle {
         x: parent.width - self.width;
         y: 0px;
-        width: min(parent.width * 0.62, 540px);
+        width: root.graphic-w;
         height: 100%;
         clip: true;
 
@@ -1299,11 +1357,19 @@ component HomeFeaturedHero inherits Rectangle {
         padding-right: 24px;
         padding-top: 24px;
         padding-bottom: 24px;
-        width: root.has-graphic ? min(parent.width * 0.65, 620px) : parent.width;
+        // Text column: the full width when there is no artwork; with artwork
+        // it keeps the cinematic 65% split, never collapses below a readable
+        // width, and keeps growing with the window instead of a fixed cap.
+        // The upper bound only stops text from running into the transparent
+        // end of the artwork fade.
+        width: root.has-graphic
+            ? min(max(root.width * 0.65, min(root.width, 360px)),
+                  root.width - root.graphic-w + 200px)
+            : root.width;
         height: root.has-graphic ? parent.height : self.preferred-height;
 
         // Wide layout without graphic: information on left, actions on right
-        if !root.has-graphic && root.is-wide : HorizontalLayout {
+        if !root.has-graphic && root.is-wide : hero-horiz := HorizontalLayout {
             width: 100%;
             spacing: 24px;
 
@@ -1404,18 +1470,24 @@ component HomeFeaturedHero inherits Rectangle {
                         font-weight: 600;
                     }
 
-                    Rectangle {
-                        width: 240px;
-                        height: 4px;
-                        border-radius: 2px;
-                        background: #30333C;
+                    // The bar keeps its own compact width inside a start-aligned
+                    // row, so it can never size (or cap) the text column.
+                    HorizontalLayout {
+                        alignment: start;
+
                         Rectangle {
-                            x: 0px;
-                            y: 0px;
-                            width: parent.width * max(0.0, min(1.0, root.item.progress));
-                            height: 100%;
+                            width: 240px;
+                            height: 4px;
                             border-radius: 2px;
-                            background: HubTheme.accent;
+                            background: #30333C;
+                            Rectangle {
+                                x: 0px;
+                                y: 0px;
+                                width: parent.width * max(0.0, min(1.0, root.item.progress));
+                                height: 100%;
+                                border-radius: 2px;
+                                background: HubTheme.accent;
+                            }
                         }
                     }
                 }
@@ -1541,18 +1613,24 @@ component HomeFeaturedHero inherits Rectangle {
                     font-weight: 600;
                 }
 
-                Rectangle {
-                    width: 240px;
-                    height: 4px;
-                    border-radius: 2px;
-                    background: #30333C;
+                // Compact bar in a start-aligned row: it never sizes the
+                // column that holds the title above.
+                HorizontalLayout {
+                    alignment: start;
+
                     Rectangle {
-                        x: 0px;
-                        y: 0px;
-                        width: parent.width * max(0.0, min(1.0, root.item.progress));
-                        height: 100%;
+                        width: 240px;
+                        height: 4px;
                         border-radius: 2px;
-                        background: HubTheme.accent;
+                        background: #30333C;
+                        Rectangle {
+                            x: 0px;
+                            y: 0px;
+                            width: parent.width * max(0.0, min(1.0, root.item.progress));
+                            height: 100%;
+                            border-radius: 2px;
+                            background: HubTheme.accent;
+                        }
                     }
                 }
             }
@@ -1630,6 +1708,272 @@ component CatalogGridCard inherits Rectangle {
         play => { root.play(root.card.id); }
         open-detail => { root.open-detail(root.card.id); }
         thumbnail-retry(item) => { root.retry-thumbnail(item); }
+    }
+}
+
+// Sectioned rendering of mixed search results ("All" tab). Each result type
+// gets its own header, counter, single-type grid capped at two full rows, and
+// a "Show all" action that switches to the typed tab. Incomplete last rows
+// stay left-aligned; single results never stretch.
+component SearchResultsSections inherits ScrollView {
+    in property <[VideoCardData]> movies;
+    in property <[VideoCardData]> performers;
+    in property <[VideoCardData]> studios;
+    in property <[VideoCardData]> tags;
+    in property <[VideoCardData]> channels;
+    in property <int> movie-count: 0;
+    in property <int> movie-total: 0;
+    in property <int> performer-count: 0;
+    in property <int> performer-total: 0;
+    in property <int> studio-count: 0;
+    in property <int> studio-total: 0;
+    in property <int> tag-count: 0;
+    in property <int> tag-total: 0;
+    in property <int> channel-count: 0;
+    in property <int> channel-total: 0;
+    in property <length> avail-width: 800px;
+    in property <float> zoom: 1.0;
+    in property <bool> has-more: false;
+    in property <bool> busy: false;
+    callback show-type(string);
+    callback load-more();
+    callback play(string);
+    callback open-detail(string);
+    callback open-performer(string);
+    callback open-studio(string);
+    callback open-category(string);
+    callback retry-thumbnail(VideoCardData);
+
+    property <int> video-cols: HubGrid.zoomed-columns(root.avail-width, root.zoom,
+        HubGrid.video-min-card(1.0), 160px);
+    property <length> video-w: HubGrid.card-width(root.avail-width, root.video-cols);
+    property <int> performer-cols: HubGrid.zoomed-columns(root.avail-width, root.zoom,
+        HubGrid.performer-min-card(1.0), 150px);
+    property <length> performer-w: HubGrid.card-width(root.avail-width, root.performer-cols);
+    property <int> tile-cols: HubGrid.zoomed-columns(root.avail-width, root.zoom, 220px, 180px);
+    property <length> tile-w: HubGrid.card-width(root.avail-width, root.tile-cols);
+
+    // Counters state "shown of matches" explicitly so a page limit can never
+    // read as a total.
+    pure function counter-label(count: int, total: int) -> string {
+        if count == 1 {
+            return total > count ? "1 of " + total + " results" : "1 result";
+        }
+        return total > count ? count + " of " + total + " results" : count + " results";
+    }
+
+    // `visible` does not remove a flex item from the layout, so overflow cards
+    // would still reserve rows and leave a tall blank gap under each section.
+    // Clip the grid to its row budget instead: the extra cards keep their
+    // layout slots but never paint, and the scroll height stays accurate.
+    pure function rows-height(count: int, cols: int, row-h: length) -> length {
+        return count > cols ? 2 * row-h + HubGrid.gap() : row-h;
+    }
+
+    property <length> video-row-h: root.video-w * 0.5625 + 70px;
+    property <length> performer-row-h: root.performer-w * 1.35 + 58px;
+
+    // Scroll-driven paging, mirroring the catalogue ListView prefetch: the
+    // section grids hide overflow rows, so the next page must arrive before
+    // the user reaches the bottom of the scrollable content.
+    changed content-y => {
+        let prefetch = 2 * (HubGrid.catalog-row-height(root.avail-width, root.video-cols, "Latest")
+            + HubGrid.gap());
+        if root.has-more
+            && !root.busy
+            && (-self.content-y + self.visible-height >= self.content-height - prefetch) {
+            root.load-more();
+        }
+    }
+
+    VerticalLayout {
+        spacing: 22px;
+        padding-bottom: 24px;
+
+        if root.movies.length > 0 : VerticalLayout {
+            spacing: 10px;
+
+            SectionHeader {
+                title: "Movies";
+                action-label: "Show all";
+                counter-text: root.counter-label(root.movie-count, root.movie-total);
+                action => { root.show-type("movies"); }
+            }
+
+            Rectangle {
+                height: root.rows-height(root.movies.length, root.video-cols, root.video-row-h);
+                clip: true;
+
+                FlexboxLayout {
+                    width: 100%;
+                    height: 100%;
+                    flex-wrap: wrap;
+                    alignment: start;
+                    spacing-horizontal: HubGrid.gap();
+                    spacing-vertical: HubGrid.gap();
+
+                    for movie[movie-index] in root.movies : CatalogGridCard {
+                        visible: movie-index < root.video-cols * 2;
+                        card: movie;
+                        card-width: root.video-w;
+                        open-performer(name) => { root.open-performer(name); }
+                        open-studio(name) => { root.open-studio(name); }
+                        open-category(name) => { root.open-category(name); }
+                        play(id) => { root.play(id); }
+                        open-detail(id) => { root.open-detail(id); }
+                        retry-thumbnail(item) => { root.retry-thumbnail(item); }
+                    }
+                }
+            }
+        }
+
+        if root.performers.length > 0 : VerticalLayout {
+            spacing: 10px;
+
+            SectionHeader {
+                title: "Performers";
+                action-label: "Show all";
+                counter-text: root.counter-label(root.performer-count, root.performer-total);
+                action => { root.show-type("performers"); }
+            }
+
+            Rectangle {
+                height: root.performer-row-h;
+                clip: true;
+
+                FlexboxLayout {
+                    width: 100%;
+                    height: 100%;
+                    flex-wrap: wrap;
+                    alignment: start;
+                    spacing-horizontal: HubGrid.gap();
+                    spacing-vertical: HubGrid.gap();
+
+                    for performer[performer-index] in root.performers : CatalogGridCard {
+                        visible: performer-index < root.performer-cols;
+                        card: performer;
+                        card-width: root.performer-w;
+                        open-performer(name) => { root.open-performer(name); }
+                        open-studio(name) => { root.open-studio(name); }
+                        open-category(name) => { root.open-category(name); }
+                        play(id) => { root.play(id); }
+                        open-detail(id) => { root.open-detail(id); }
+                        retry-thumbnail(item) => { root.retry-thumbnail(item); }
+                    }
+                }
+            }
+        }
+
+        if root.studios.length > 0 : VerticalLayout {
+            spacing: 10px;
+
+            SectionHeader {
+                title: "Studios";
+                action-label: "Show all";
+                counter-text: root.counter-label(root.studio-count, root.studio-total);
+                action => { root.show-type("studios"); }
+            }
+
+            Rectangle {
+                height: root.rows-height(root.studios.length, root.tile-cols, 72px);
+                clip: true;
+
+                FlexboxLayout {
+                    width: 100%;
+                    height: 100%;
+                    flex-wrap: wrap;
+                    alignment: start;
+                    spacing-horizontal: HubGrid.gap();
+                    spacing-vertical: HubGrid.gap();
+
+                    for studio[studio-index] in root.studios : CatalogGridCard {
+                        visible: studio-index < root.tile-cols * 2;
+                        card: studio;
+                        card-width: root.tile-w;
+                        open-performer(name) => { root.open-performer(name); }
+                        open-studio(name) => { root.open-studio(name); }
+                        open-category(name) => { root.open-category(name); }
+                        play(id) => { root.play(id); }
+                        open-detail(id) => { root.open-detail(id); }
+                        retry-thumbnail(item) => { root.retry-thumbnail(item); }
+                    }
+                }
+            }
+        }
+
+        if root.tags.length > 0 : VerticalLayout {
+            spacing: 10px;
+
+            SectionHeader {
+                title: "Tags";
+                action-label: "Show all";
+                counter-text: root.counter-label(root.tag-count, root.tag-total);
+                action => { root.show-type("tags"); }
+            }
+
+            Rectangle {
+                height: root.rows-height(root.tags.length, root.tile-cols, 56px);
+                clip: true;
+
+                FlexboxLayout {
+                    width: 100%;
+                    height: 100%;
+                    flex-wrap: wrap;
+                    alignment: start;
+                    spacing-horizontal: HubGrid.gap();
+                    spacing-vertical: HubGrid.gap();
+
+                    for tag[tag-index] in root.tags : CatalogGridCard {
+                        visible: tag-index < root.tile-cols * 2;
+                        card: tag;
+                        card-width: root.tile-w;
+                        open-performer(name) => { root.open-performer(name); }
+                        open-studio(name) => { root.open-studio(name); }
+                        open-category(name) => { root.open-category(name); }
+                        play(id) => { root.play(id); }
+                        open-detail(id) => { root.open-detail(id); }
+                        retry-thumbnail(item) => { root.retry-thumbnail(item); }
+                    }
+                }
+            }
+        }
+
+        if root.channels.length > 0 : VerticalLayout {
+            spacing: 10px;
+
+            SectionHeader {
+                title: "Channel videos";
+                action-label: "Show all";
+                counter-text: root.counter-label(root.channel-count, root.channel-total);
+                action => { root.show-type("channels"); }
+            }
+
+            Rectangle {
+                height: root.rows-height(root.channels.length, root.video-cols, root.video-row-h);
+                clip: true;
+
+                FlexboxLayout {
+                    width: 100%;
+                    height: 100%;
+                    flex-wrap: wrap;
+                    alignment: start;
+                    spacing-horizontal: HubGrid.gap();
+                    spacing-vertical: HubGrid.gap();
+
+                    for channel[channel-index] in root.channels : CatalogGridCard {
+                        visible: channel-index < root.video-cols * 2;
+                        card: channel;
+                        card-width: root.video-w;
+                        open-performer(name) => { root.open-performer(name); }
+                        open-studio(name) => { root.open-studio(name); }
+                        open-category(name) => { root.open-category(name); }
+                        play(id) => { root.play(id); }
+                        open-detail(id) => { root.open-detail(id); }
+                        retry-thumbnail(item) => { root.retry-thumbnail(item); }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1930,6 +2274,22 @@ export component MainWindow inherits Window {
     in-out property <int> search-studio-count: 0;
     in-out property <int> search-tag-count: 0;
     in-out property <int> search-channel-count: 0;
+    // Per-type server-reported match totals (>= loaded counts when known).
+    // Chips show loaded counts with a "+" when more matches exist than are loaded.
+    in-out property <int> search-movie-total: 0;
+    in-out property <int> search-performer-total: 0;
+    in-out property <int> search-studio-total: 0;
+    in-out property <int> search-tag-total: 0;
+    in-out property <int> search-channel-total: 0;
+    // Capped per-type card lists rendered as sections in the "All" tab
+    // (Rust caps each list; full lists live in the typed tabs).
+    in-out property <[VideoCardData]> search-movies-section: [];
+    in-out property <[VideoCardData]> search-performers-section: [];
+    in-out property <[VideoCardData]> search-studios-section: [];
+    in-out property <[VideoCardData]> search-tags-section: [];
+    in-out property <[VideoCardData]> search-channels-section: [];
+    property <int> search-results-total: root.search-movie-count + root.search-performer-count
+        + root.search-studio-count + root.search-tag-count + root.search-channel-count;
     in-out property <string> active-category: "Latest";
     // The video filter panel only describes video lists. Categories, Studios
     // and Performers have their own controls and must never inherit an
@@ -2470,7 +2830,11 @@ export component MainWindow inherits Window {
             }
             if (event.text == Key.UpArrow) {
                 if (root.active-screen == "browse") {
-                    if (root.focused-card-index >= root.catalog-column-count) {
+                    if (root.focused-card-index < 0) {
+                        if (root.catalog-items.length > 0) {
+                            root.focused-card-index = 0;
+                        }
+                    } else if (root.focused-card-index >= root.catalog-column-count) {
                         root.focused-card-index -= root.catalog-column-count;
                     }
                     return accept;
@@ -2490,7 +2854,11 @@ export component MainWindow inherits Window {
             }
             if (event.text == Key.DownArrow) {
                 if (root.active-screen == "browse") {
-                    if (root.focused-card-index + root.catalog-column-count < root.catalog-items.length) {
+                    if (root.focused-card-index < 0) {
+                        if (root.catalog-items.length > 0) {
+                            root.focused-card-index = 0;
+                        }
+                    } else if (root.focused-card-index + root.catalog-column-count < root.catalog-items.length) {
                         root.focused-card-index += root.catalog-column-count;
                     }
                     return accept;
@@ -3307,7 +3675,9 @@ export component MainWindow inherits Window {
                                 || (root.is-catalog-search-results && root.search-error-message != ""))
                             ? ""
                             : (root.catalog-total-count > root.catalog-items.length
-                                ? (root.catalog-items.length + " of " + root.catalog-total-count + " " + self.count-noun)
+                                ? (root.catalog-items.length
+                                    + (root.is-catalog-search-results ? " loaded of " : " of ")
+                                    + root.catalog-total-count + " " + self.count-noun)
                                 : (root.catalog-items.length == 1
                                     ? ("1 " + (self.count-noun == "videos"
                                         ? "video"
@@ -3406,6 +3776,12 @@ export component MainWindow inherits Window {
                                 root.search-catalog(text);
                                 keys.focus();
                             }
+                            clearable: true;
+                            cleared => {
+                                root.search-query = "";
+                                root.clear-catalog-search();
+                                keys.focus();
+                            }
                         }
                         Button {
                             text: "Search";
@@ -3421,15 +3797,6 @@ export component MainWindow inherits Window {
                             active-filter-count: root.catalog-active-filter-count;
                             tooltip-text: root.catalog-filters-expanded ? "Hide filters" : (root.catalog-active-filter-count > 0 ? ("Filters (" + root.catalog-active-filter-count + ")") : "Filters");
                             clicked => { root.catalog-filters-expanded = !root.catalog-filters-expanded; }
-                        }
-                        if root.search-query != "" : TvSecondaryButton {
-                            text: "Clear query";
-                            custom-height: 40px;
-                            clicked => {
-                                root.search-query = "";
-                                root.search-catalog("");
-                                keys.focus();
-                            }
                         }
                     }
                 }
@@ -3838,57 +4205,60 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                if root.is-catalog-search-results && root.search-query != "" && root.search-query == root.search-applied-query && !root.is-loading-catalog : HorizontalLayout {
+                // Result tabs stay visible while the field text diverges from
+                // the applied query: they describe the results currently shown.
+                if root.is-catalog-search-results && root.search-applied-query != ""
+                    && !root.is-loading-catalog
+                    && root.search-results-total > 0 : HorizontalLayout {
                     spacing: 8px;
                     height: 36px;
-                    alignment: center;
+                    alignment: start;
 
                     Text {
-                        text: "RESULTS";
+                        text: "RESULTS FOR \"" + root.search-applied-query + "\"";
                         color: #77737e;
                         font-size: 12px;
                         font-weight: 800;
                         letter-spacing: 1px;
                         vertical-alignment: center;
+                        overflow: elide;
                     }
 
                     TvChoiceChip {
-                        text: "All  " + (root.search-movie-count + root.search-performer-count + root.search-studio-count + root.search-tag-count + root.search-channel-count);
+                        text: "All  " + root.search-results-total + (root.search-all-total-count > root.search-results-total ? "+" : "");
                         selected: root.search-results-filter == "all";
                         clicked => { root.filter-search-results("all"); }
                     }
 
                     if root.search-movie-count > 0 : TvChoiceChip {
-                        text: "Movies  " + root.search-movie-count;
+                        text: "Movies  " + root.search-movie-count + (root.search-movie-total > root.search-movie-count ? "+" : "");
                         selected: root.search-results-filter == "movies";
                         clicked => { root.filter-search-results("movies"); }
                     }
 
                     if root.search-performer-count > 0 : TvChoiceChip {
-                        text: "Performers  " + root.search-performer-count;
+                        text: "Performers  " + root.search-performer-count + (root.search-performer-total > root.search-performer-count ? "+" : "");
                         selected: root.search-results-filter == "performers";
                         clicked => { root.filter-search-results("performers"); }
                     }
 
                     if root.search-studio-count > 0 : TvChoiceChip {
-                        text: "Studios  " + root.search-studio-count;
+                        text: "Studios  " + root.search-studio-count + (root.search-studio-total > root.search-studio-count ? "+" : "");
                         selected: root.search-results-filter == "studios";
                         clicked => { root.filter-search-results("studios"); }
                     }
 
                     if root.search-tag-count > 0 : TvChoiceChip {
-                        text: "Tags  " + root.search-tag-count;
+                        text: "Tags  " + root.search-tag-count + (root.search-tag-total > root.search-tag-count ? "+" : "");
                         selected: root.search-results-filter == "tags";
                         clicked => { root.filter-search-results("tags"); }
                     }
 
                     if root.search-channel-count > 0 : TvChoiceChip {
-                        text: "Channels  " + root.search-channel-count;
+                        text: "Channel videos  " + root.search-channel-count + (root.search-channel-total > root.search-channel-count ? "+" : "");
                         selected: root.search-results-filter == "channels";
                         clicked => { root.filter-search-results("channels"); }
                     }
-
-                    Rectangle { horizontal-stretch: 1; }
                 }
 
                 // Video Catalog Cards (Android TV Leanback Grid)
@@ -4019,7 +4389,7 @@ export component MainWindow inherits Window {
                     }
 
                     // 3. Truly empty state (no filters active)
-                    if (!root.is-catalog-search-results || root.search-error-message == "") && root.catalog-active-filter-count == 0 && (!root.is-catalog-search-results || root.search-query == "") && (root.active-category != "Performers" || (root.performer-search-query == "" && root.performer-letter == "" && !root.performers-photo-only)) : VerticalLayout {
+                    if (!root.is-catalog-search-results || root.search-error-message == "") && root.catalog-active-filter-count == 0 && (!root.is-catalog-search-results || root.search-applied-query == "") && (root.active-category != "Performers" || (root.performer-search-query == "" && root.performer-letter == "" && !root.performers-photo-only)) : VerticalLayout {
                         alignment: center;
                         spacing: 8px;
                         Text {
@@ -4073,7 +4443,8 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                if !root.is-loading-catalog && root.catalog-rows.length > 0 : catalog-list := ListView {
+                if !root.is-loading-catalog && root.catalog-rows.length > 0
+                    && !(root.is-catalog-search-results && root.search-results-filter == "all") : catalog-list := ListView {
                     vertical-stretch: 1;
                     content-y <=> root.catalog-scroll-y;
 
@@ -4137,6 +4508,47 @@ export component MainWindow inherits Window {
                         if row.has-6 : CatalogGridCard { card: row.card-6; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.search-query = ""; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
                         if row.has-7 : CatalogGridCard { card: row.card-7; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.search-query = ""; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
                     }
+                }
+
+                // Sectioned "All" search view: one grid per result type with
+                // its own header and counter, replacing the mixed catalogue
+                // rows only while the All tab is active.
+                if root.is-catalog-search-results && root.search-results-filter == "all"
+                    && !root.is-loading-catalog && root.catalog-items.length > 0 : SearchResultsSections {
+                    vertical-stretch: 1;
+                    movies: root.search-movies-section;
+                    performers: root.search-performers-section;
+                    studios: root.search-studios-section;
+                    tags: root.search-tags-section;
+                    channels: root.search-channels-section;
+                    movie-count: root.search-movie-count;
+                    movie-total: root.search-movie-total;
+                    performer-count: root.search-performer-count;
+                    performer-total: root.search-performer-total;
+                    studio-count: root.search-studio-count;
+                    studio-total: root.search-studio-total;
+                    tag-count: root.search-tag-count;
+                    tag-total: root.search-tag-total;
+                    channel-count: root.search-channel-count;
+                    channel-total: root.search-channel-total;
+                    avail-width: root.catalog-content-width;
+                    zoom: root.card-zoom;
+                    has-more: root.catalog-has-more;
+                    busy: root.is-loading-more || root.is-loading-catalog;
+                    show-type(kind) => { root.filter-search-results(kind); }
+                    load-more => { root.load-more-catalog(); }
+                    play(id) => { root.play-item(id); }
+                    open-detail(id) => { root.open-item-detail(id); }
+                    open-performer(name) => { root.open-performer-profile(name); }
+                    open-studio(name) => { root.open-studio-profile(name); }
+                    open-category(name) => {
+                        root.active-category = "Latest";
+                        root.catalog-category-drilldown = true;
+                        root.catalog-genre-query = name;
+                        root.search-query = "";
+                        root.set-catalog-text-filter("genre", name);
+                    }
+                    retry-thumbnail(item) => { root.retry-thumbnail(item); }
                 }
 
                 // Page-load indicator at the end of the list. Occupies height

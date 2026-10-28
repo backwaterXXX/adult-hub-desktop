@@ -119,6 +119,33 @@ fn search_result_counts(items: &[TvItem]) -> (usize, usize, usize, usize, usize)
     (movies, performers, studios, tags, channels)
 }
 
+/// Split the flat search result list into the per-type sections shown by the
+/// "All" tab. Classification uses the card's provider, which tv_item_to_card
+/// derives from the same `__adult_hub_*` markers that search_result_counts
+/// reads on the TvItem side, so sections and counters always agree.
+fn set_search_sections(ui: &MainWindow, cards: &[VideoCardData]) {
+    let mut movies = Vec::new();
+    let mut performers = Vec::new();
+    let mut studios = Vec::new();
+    let mut tags = Vec::new();
+    let mut channels = Vec::new();
+    for card in cards {
+        match card.provider.as_str() {
+            "performer" => performers.push(card.clone()),
+            "studio" => studios.push(card.clone()),
+            "genre" | "category" => tags.push(card.clone()),
+            "telegram" => channels.push(card.clone()),
+            _ => movies.push(card.clone()),
+        }
+    }
+    let to_model = |items: Vec<VideoCardData>| Rc::new(slint::VecModel::from(items)).into();
+    ui.set_search_movies_section(to_model(movies));
+    ui.set_search_performers_section(to_model(performers));
+    ui.set_search_studios_section(to_model(studios));
+    ui.set_search_tags_section(to_model(tags));
+    ui.set_search_channels_section(to_model(channels));
+}
+
 fn set_home_shelves(ui: &MainWindow, shelves: &[Vec<VideoCardData>]) {
     let to_model = |items: &[VideoCardData]| Rc::new(slint::VecModel::from(items.to_vec())).into();
     ui.set_home_resume_items(to_model(
@@ -418,6 +445,18 @@ struct CatalogPageState {
     supplemental_total: usize,
 }
 
+/// Server-reported match totals per result type for a search. Zero means
+/// "unknown" and falls back to the loaded count at publish time. Channels
+/// are returned in full by the Resolver, so their loaded count is the total.
+#[derive(Clone, Copy, Default)]
+struct SearchTypeTotals {
+    movie: usize,
+    performer: usize,
+    studio: usize,
+    tag: usize,
+    channel: usize,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct CatalogFilters {
     sort: u8,
@@ -456,6 +495,11 @@ struct CatalogViewSnapshot {
     search_studio_count: i32,
     search_tag_count: i32,
     search_channel_count: i32,
+    search_movie_total: i32,
+    search_performer_total: i32,
+    search_studio_total: i32,
+    search_tag_total: i32,
+    search_channel_total: i32,
     search_all_has_more: bool,
     search_all_total_count: i32,
 }
@@ -660,6 +704,11 @@ fn save_catalog_view(
         search_studio_count: ui.get_search_studio_count(),
         search_tag_count: ui.get_search_tag_count(),
         search_channel_count: ui.get_search_channel_count(),
+        search_movie_total: ui.get_search_movie_total(),
+        search_performer_total: ui.get_search_performer_total(),
+        search_studio_total: ui.get_search_studio_total(),
+        search_tag_total: ui.get_search_tag_total(),
+        search_channel_total: ui.get_search_channel_total(),
         search_all_has_more: ui.get_search_all_has_more(),
         search_all_total_count: ui.get_search_all_total_count(),
     };
@@ -700,8 +749,14 @@ fn restore_catalog_view(
     ui.set_search_studio_count(snapshot.search_studio_count);
     ui.set_search_tag_count(snapshot.search_tag_count);
     ui.set_search_channel_count(snapshot.search_channel_count);
+    ui.set_search_movie_total(snapshot.search_movie_total);
+    ui.set_search_performer_total(snapshot.search_performer_total);
+    ui.set_search_studio_total(snapshot.search_studio_total);
+    ui.set_search_tag_total(snapshot.search_tag_total);
+    ui.set_search_channel_total(snapshot.search_channel_total);
     ui.set_search_all_has_more(snapshot.search_all_has_more);
     ui.set_search_all_total_count(snapshot.search_all_total_count);
+    set_search_sections(ui, &snapshot.cards);
     ui.set_catalog_anchor_index(snapshot.anchor_index);
     ui.set_catalog_anchor_screen_y(snapshot.anchor_screen_y);
     ui.set_catalog_anchor_pending(!snapshot.cards.is_empty());
@@ -1154,6 +1209,33 @@ struct SearchSupplements {
     studios: Option<TvItemsPage>,
     tags: Option<TvItemsPage>,
     channels: Option<Vec<TvItem>>,
+}
+
+impl SearchSupplements {
+    /// Match totals the supplement sources report. Channels arrive in full
+    /// from the Resolver (hidden channels are dropped at merge), so the
+    /// loaded count *is* the total and stays 0 here for the publish fallback.
+    fn totals(&self) -> SearchTypeTotals {
+        SearchTypeTotals {
+            movie: 0,
+            performer: self
+                .people
+                .as_ref()
+                .map(|page| page.total_record_count)
+                .unwrap_or(0),
+            studio: self
+                .studios
+                .as_ref()
+                .map(|page| page.total_record_count)
+                .unwrap_or(0),
+            tag: self
+                .tags
+                .as_ref()
+                .map(|page| page.total_record_count)
+                .unwrap_or(0),
+            channel: 0,
+        }
+    }
 }
 
 fn fetch_search_supplements(
@@ -3130,8 +3212,15 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             ui.set_search_results_filter("all".into());
             ui.set_search_movie_count(0);
             ui.set_search_performer_count(0);
+            ui.set_search_studio_count(0);
+            ui.set_search_tag_count(0);
             ui.set_search_channel_count(0);
-            ui.set_focused_card_index(0);
+            ui.set_search_movie_total(0);
+            ui.set_search_performer_total(0);
+            ui.set_search_studio_total(0);
+            ui.set_search_tag_total(0);
+            ui.set_search_channel_total(0);
+            ui.set_focused_card_index(-1);
             let search_context = active_search_context(&ui);
             let debounce_id = search_debounce_generation.fetch_add(1, Ordering::SeqCst) + 1;
             let weak = weak.clone();
@@ -3149,6 +3238,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             ui.set_catalog_total_count(0);
             ui.set_catalog_more_error("".into());
             set_catalog(&ui, Vec::new());
+            set_search_sections(&ui, &[]);
 
             std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(300));
@@ -3183,7 +3273,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     let token_for_refresh = token_for_refresh.clone();
                     move |items: Vec<TvItem>,
                           next_start: usize,
-                          total_count: usize,
+                          totals: SearchTypeTotals,
                           has_more: bool,
                           supplemental_total: usize,
                           search_error_message: String,
@@ -3191,6 +3281,18 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                         let filtered = filter_catalog_items(items, &local_store);
                         let (movie_count, performer_count, studio_count, tag_count, channel_count) =
                             search_result_counts(&filtered);
+                        let totals = SearchTypeTotals {
+                            movie: totals.movie.max(movie_count),
+                            performer: totals.performer.max(performer_count),
+                            studio: totals.studio.max(studio_count),
+                            tag: totals.tag.max(tag_count),
+                            channel: totals.channel.max(channel_count),
+                        };
+                        let aggregate = totals.movie
+                            + totals.performer
+                            + totals.studio
+                            + totals.tag
+                            + totals.channel;
                         let weak = weak.clone();
                         let query = query.clone();
                         let local_store = local_store.clone();
@@ -3231,17 +3333,23 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                                 })
                                 .collect::<Vec<_>>();
                             set_catalog(&ui, cards.clone());
+                            set_search_sections(&ui, &cards);
                             set_recent_searches(&ui, recent_queries);
                             ui.set_search_movie_count(movie_count as i32);
                             ui.set_search_performer_count(performer_count as i32);
                             ui.set_search_studio_count(studio_count as i32);
                             ui.set_search_tag_count(tag_count as i32);
                             ui.set_search_channel_count(channel_count as i32);
+                            ui.set_search_movie_total(totals.movie as i32);
+                            ui.set_search_performer_total(totals.performer as i32);
+                            ui.set_search_studio_total(totals.studio as i32);
+                            ui.set_search_tag_total(totals.tag as i32);
+                            ui.set_search_channel_total(totals.channel as i32);
                             ui.set_search_error_message(search_error_message.into());
                             ui.set_search_all_has_more(has_more);
-                            ui.set_search_all_total_count(total_count as i32);
+                            ui.set_search_all_total_count(aggregate as i32);
                             ui.set_catalog_has_more(has_more);
-                            ui.set_catalog_total_count(total_count as i32);
+                            ui.set_catalog_total_count(aggregate as i32);
                             ui.set_is_loading_more(false);
                             ui.set_is_loading_catalog(false);
                             ui.set_status("Ready".into());
@@ -3279,7 +3387,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     publish(
                         Vec::new(),
                         0,
-                        0,
+                        SearchTypeTotals::default(),
                         false,
                         0,
                         "Connect Jellyfin before searching your library.".into(),
@@ -3306,7 +3414,15 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                         }
                         .into();
                         if is_unauth {
-                            publish(Vec::new(), 0, 0, false, 0, message, true);
+                            publish(
+                                Vec::new(),
+                                0,
+                                SearchTypeTotals::default(),
+                                false,
+                                0,
+                                message,
+                                true,
+                            );
                             return;
                         }
                         // Jellyfin is unreachable, but the Resolver may still
@@ -3316,21 +3432,20 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                             total_record_count: 0,
                             start_index: 0,
                         };
-                        let supplemental_total = merge_search_supplements(
-                            &mut partial,
-                            fetch_search_supplements(
-                                &jellyfin,
-                                &resolver,
-                                &session,
-                                &query,
-                                &resolver_base_url_for(&local_store, &session),
-                            ),
-                            &local_store,
+                        let supplements = fetch_search_supplements(
+                            &jellyfin,
+                            &resolver,
+                            &session,
+                            &query,
+                            &resolver_base_url_for(&local_store, &session),
                         );
+                        let totals = supplements.totals();
+                        let supplemental_total =
+                            merge_search_supplements(&mut partial, supplements, &local_store);
                         publish(
                             partial.items,
                             0,
-                            0,
+                            totals,
                             false,
                             supplemental_total,
                             message,
@@ -3343,7 +3458,10 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 publish(
                     std::mem::take(&mut page.items),
                     page.next_start,
-                    page.total_count,
+                    SearchTypeTotals {
+                        movie: page.total_count,
+                        ..Default::default()
+                    },
                     page.has_more,
                     0,
                     String::new(),
@@ -3362,6 +3480,8 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     &query,
                     &resolver_base_url_for(&local_store, &session),
                 );
+                let mut totals = supplements.totals();
+                totals.movie = page.total_count;
                 let mut merged = TvItemsPage {
                     items: raw_movies,
                     total_record_count: page.total_count,
@@ -3375,7 +3495,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 publish(
                     merged.items,
                     page.next_start,
-                    merged.total_record_count,
+                    totals,
                     page.has_more,
                     supplemental_total,
                     String::new(),
@@ -3445,15 +3565,20 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             drop(paging);
 
             ui.set_search_results_filter(kind.clone());
-            ui.set_catalog_total_count(if kind == "all" {
-                ui.get_search_all_total_count()
-            } else {
-                filtered.len() as i32
-            });
+            let per_type_total = match kind.as_str() {
+                "movies" => ui.get_search_movie_total(),
+                "performers" => ui.get_search_performer_total(),
+                "studios" => ui.get_search_studio_total(),
+                "tags" => ui.get_search_tag_total(),
+                "channels" => ui.get_search_channel_total(),
+                _ => ui.get_search_all_total_count(),
+            };
+            ui.set_catalog_total_count(per_type_total.max(filtered.len() as i32));
             ui.set_catalog_has_more(has_more);
             ui.set_is_loading_more(false);
-            ui.set_focused_card_index(0);
+            ui.set_focused_card_index(-1);
             set_catalog(&ui, cards.clone());
+            set_search_sections(&ui, &cards);
 
             if let Some(session) = session {
                 let filtered_items = Arc::new(Mutex::new(filtered));
@@ -3580,6 +3705,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             ui.set_catalog_total_count(0);
             ui.set_catalog_more_error("".into());
             set_catalog(&ui, Vec::new());
+            set_search_sections(&ui, &[]);
             let loading_msg = match cat.as_str() {
                 "Performers" => "Loading performers…",
                 "Studios" => "Loading studios…",
@@ -3952,6 +4078,16 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                             };
                             ui.set_catalog_anchor_pending(true);
                             append_catalog_page(&ui, cards.clone());
+                            let mut reported_total = if !is_search && (is_studios || !page.has_more)
+                            {
+                                // Studios are aggregated client-side; the raw
+                                // server total is not comparable with the cards
+                                // (see first-page counter), so report the
+                                // honest loaded count while paging continues.
+                                cards.len() as i32
+                            } else {
+                                (page.total_count + supplemental_total) as i32
+                            };
                             if is_search {
                                 let (
                                     movie_count,
@@ -3966,22 +4102,25 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                                 ui.set_search_tag_count(tag_count as i32);
                                 ui.set_search_channel_count(channel_count as i32);
                                 ui.set_search_all_has_more(page.has_more);
-                                ui.set_search_all_total_count(
-                                    (page.total_count + supplemental_total) as i32,
+                                ui.set_search_movie_total(
+                                    ui.get_search_movie_total().max(page.total_count as i32),
                                 );
+                                let aggregate = ui.get_search_movie_total()
+                                    + ui.get_search_performer_total()
+                                    + ui.get_search_studio_total()
+                                    + ui.get_search_tag_total()
+                                    + ui.get_search_channel_total();
+                                ui.set_search_all_total_count(aggregate);
+                                reported_total = aggregate;
+                                let model = ui.get_catalog_items();
+                                let all_cards = (0..model.row_count())
+                                    .filter_map(|index| model.row_data(index))
+                                    .collect::<Vec<_>>();
+                                set_search_sections(&ui, &all_cards);
                             }
                             ui.set_catalog_has_more(page.has_more);
                             ui.set_catalog_more_error("".into());
-                            let reported_total = if !page.has_more || is_studios {
-                                // Studios are aggregated client-side; the raw
-                                // server total is not comparable with the cards
-                                // (see first-page counter), so report the
-                                // honest loaded count while paging continues.
-                                cards.len()
-                            } else {
-                                page.total_count + supplemental_total
-                            };
-                            ui.set_catalog_total_count(reported_total as i32);
+                            ui.set_catalog_total_count(reported_total);
                             ui.set_is_loading_more(false);
                             refresh_catalog_thumbnails_async(
                                 ui.as_weak(),
@@ -4215,6 +4354,11 @@ mod tests {
                 search_studio_count: 0,
                 search_tag_count: 0,
                 search_channel_count: 0,
+                search_movie_total: 0,
+                search_performer_total: 0,
+                search_studio_total: 0,
+                search_tag_total: 0,
+                search_channel_total: 0,
                 search_all_has_more: false,
                 search_all_total_count: 0,
             }

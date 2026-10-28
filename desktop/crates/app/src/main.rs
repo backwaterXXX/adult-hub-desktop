@@ -599,9 +599,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let weak = ui.as_weak();
         ui.on_activate_focused_card(move || {
             let Some(ui) = weak.upgrade() else { return };
-            let idx = ui.get_focused_card_index() as usize;
+            let idx = ui.get_focused_card_index();
+            if idx < 0 {
+                return;
+            }
             let items = ui.get_catalog_items();
-            if let Some(card) = items.row_data(idx) {
+            if let Some(card) = items.row_data(idx as usize) {
                 ui.invoke_play_item(card.id);
             }
         });
