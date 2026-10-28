@@ -727,7 +727,7 @@ fn restore_catalog_view(
     ui.set_search_query(snapshot.search_query.into());
     ui.set_search_applied_query(snapshot.search_applied_query.into());
     ui.set_search_error_message(snapshot.search_error.into());
-    ui.set_search_results_filter(snapshot.search_results_filter.into());
+    ui.set_search_results_filter(snapshot.search_results_filter.clone().into());
     ui.set_search_movie_count(snapshot.search_movie_count);
     ui.set_search_performer_count(snapshot.search_performer_count);
     ui.set_search_studio_count(snapshot.search_studio_count);
