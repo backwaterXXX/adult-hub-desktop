@@ -1733,10 +1733,11 @@ component SearchResultsSections inherits ScrollView {
     in property <int> channel-total: 0;
     in property <length> avail-width: 800px;
     in property <float> zoom: 1.0;
-    in property <bool> has-more: false;
-    in property <bool> busy: false;
+    // Flat search-list index, so the same card that arrow keys target also
+    // shows the keyboard focus ring here. Hidden/overflow cards simply never
+    // match a visible card's index.
+    in property <int> focused-index: -1;
     callback show-type(string);
-    callback load-more();
     callback play(string);
     callback open-detail(string);
     callback open-performer(string);
@@ -1773,18 +1774,9 @@ component SearchResultsSections inherits ScrollView {
     property <length> video-row-h: root.video-w * 0.5625 + 70px;
     property <length> performer-row-h: root.performer-w * 1.35 + 58px;
 
-    // Scroll-driven paging, mirroring the catalogue ListView prefetch: the
-    // section grids hide overflow rows, so the next page must arrive before
-    // the user reaches the bottom of the scrollable content.
-    changed content-y => {
-        let prefetch = 2 * (HubGrid.catalog-row-height(root.avail-width, root.video-cols, "Latest")
-            + HubGrid.gap());
-        if root.has-more
-            && !root.busy
-            && (-self.content-y + self.visible-height >= self.content-height - prefetch) {
-            root.load-more();
-        }
-    }
+    // This view is a capped preview per type: scrolling here never pages.
+    // Pagination belongs to the flat typed tab (Movies), which appends the
+    // matching subset of each mixed search page.
 
     VerticalLayout {
         spacing: 22px;
@@ -1816,6 +1808,7 @@ component SearchResultsSections inherits ScrollView {
                         visible: movie-index < root.video-cols * 2;
                         card: movie;
                         card-width: root.video-w;
+                        focused-index: root.focused-index;
                         open-performer(name) => { root.open-performer(name); }
                         open-studio(name) => { root.open-studio(name); }
                         open-category(name) => { root.open-category(name); }
@@ -1853,6 +1846,7 @@ component SearchResultsSections inherits ScrollView {
                         visible: performer-index < root.performer-cols;
                         card: performer;
                         card-width: root.performer-w;
+                        focused-index: root.focused-index;
                         open-performer(name) => { root.open-performer(name); }
                         open-studio(name) => { root.open-studio(name); }
                         open-category(name) => { root.open-category(name); }
@@ -1890,6 +1884,7 @@ component SearchResultsSections inherits ScrollView {
                         visible: studio-index < root.tile-cols * 2;
                         card: studio;
                         card-width: root.tile-w;
+                        focused-index: root.focused-index;
                         open-performer(name) => { root.open-performer(name); }
                         open-studio(name) => { root.open-studio(name); }
                         open-category(name) => { root.open-category(name); }
@@ -1927,6 +1922,7 @@ component SearchResultsSections inherits ScrollView {
                         visible: tag-index < root.tile-cols * 2;
                         card: tag;
                         card-width: root.tile-w;
+                        focused-index: root.focused-index;
                         open-performer(name) => { root.open-performer(name); }
                         open-studio(name) => { root.open-studio(name); }
                         open-category(name) => { root.open-category(name); }
@@ -1964,6 +1960,7 @@ component SearchResultsSections inherits ScrollView {
                         visible: channel-index < root.video-cols * 2;
                         card: channel;
                         card-width: root.video-w;
+                        focused-index: root.focused-index;
                         open-performer(name) => { root.open-performer(name); }
                         open-studio(name) => { root.open-studio(name); }
                         open-category(name) => { root.open-category(name); }
@@ -2282,7 +2279,8 @@ export component MainWindow inherits Window {
     in-out property <int> search-tag-total: 0;
     in-out property <int> search-channel-total: 0;
     // Capped per-type card lists rendered as sections in the "All" tab
-    // (Rust caps each list; full lists live in the typed tabs).
+    // (Rust caps each list at the two-row budget; full lists live in the
+    // typed tabs).
     in-out property <[VideoCardData]> search-movies-section: [];
     in-out property <[VideoCardData]> search-performers-section: [];
     in-out property <[VideoCardData]> search-studios-section: [];
@@ -4533,10 +4531,8 @@ export component MainWindow inherits Window {
                     channel-total: root.search-channel-total;
                     avail-width: root.catalog-content-width;
                     zoom: root.card-zoom;
-                    has-more: root.catalog-has-more;
-                    busy: root.is-loading-more || root.is-loading-catalog;
+                    focused-index: root.focused-card-index;
                     show-type(kind) => { root.filter-search-results(kind); }
-                    load-more => { root.load-more-catalog(); }
                     play(id) => { root.play-item(id); }
                     open-detail(id) => { root.open-item-detail(id); }
                     open-performer(name) => { root.open-performer-profile(name); }

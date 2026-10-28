@@ -119,31 +119,15 @@ fn search_result_counts(items: &[TvItem]) -> (usize, usize, usize, usize, usize)
     (movies, performers, studios, tags, channels)
 }
 
-/// Split the flat search result list into the per-type sections shown by the
-/// "All" tab. Classification uses the card's provider, which tv_item_to_card
-/// derives from the same `__adult_hub_*` markers that search_result_counts
-/// reads on the TvItem side, so sections and counters always agree.
 fn set_search_sections(ui: &MainWindow, cards: &[VideoCardData]) {
-    let mut movies = Vec::new();
-    let mut performers = Vec::new();
-    let mut studios = Vec::new();
-    let mut tags = Vec::new();
-    let mut channels = Vec::new();
-    for card in cards {
-        match card.provider.as_str() {
-            "performer" => performers.push(card.clone()),
-            "studio" => studios.push(card.clone()),
-            "genre" | "category" => tags.push(card.clone()),
-            "telegram" => channels.push(card.clone()),
-            _ => movies.push(card.clone()),
-        }
-    }
-    let to_model = |items: Vec<VideoCardData>| Rc::new(slint::VecModel::from(items)).into();
-    ui.set_search_movies_section(to_model(movies));
-    ui.set_search_performers_section(to_model(performers));
-    ui.set_search_studios_section(to_model(studios));
-    ui.set_search_tags_section(to_model(tags));
-    ui.set_search_channels_section(to_model(channels));
+    crate::catalog::set_search_sections(ui, cards.iter().cloned());
+}
+
+/// Whether a card belongs to the flat search tab `kind`. Untyped kinds ("all")
+/// keep every card.
+fn card_matches_search_filter(card: &VideoCardData, kind: &str) -> bool {
+    crate::catalog::search_filter_bucket(kind)
+        .is_none_or(|bucket| crate::catalog::search_section_bucket(&card.provider) == bucket)
 }
 
 fn set_home_shelves(ui: &MainWindow, shelves: &[Vec<VideoCardData>]) {
@@ -3093,6 +3077,13 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             let cat = catalog_filter_scope(&ui);
             let mut current = get_category_filters(&filters, &cat);
             let text = value.trim().to_string();
+            // A genre tile opened from search results leaves search mode
+            // first; otherwise refresh_active_catalog refetches the applied
+            // query with the genre as a hidden filter and the category
+            // listing can never open.
+            let leave_search_for_genre = key.as_str() == "genre"
+                && ui.get_catalog_category_drilldown()
+                && ui.get_is_catalog_search_results();
             match key.as_str() {
                 "genre" => {
                     current.genre = text.clone();
@@ -3116,6 +3107,14 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             }
             set_category_filters(&filters, &cat, current.clone());
             sync_catalog_filters_to_ui(&ui, &cat, &current);
+            if leave_search_for_genre {
+                // Load the listing before clearing the search state:
+                // filter_category snapshots the search page while its
+                // counters are intact, then resets the search flags.
+                ui.invoke_filter_category(ui.get_active_category());
+                CatalogSearchState::cleared().apply(&ui);
+                return;
+            }
             refresh_active_catalog(&ui);
         });
     }
@@ -3560,7 +3559,10 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             let request_id = catalog_generation.fetch_add(1, Ordering::SeqCst) + 1;
             let mut paging = catalog_paging.lock().unwrap();
             paging.loading_more = false;
-            paging.has_more = kind == "all" && ui.get_search_all_has_more();
+            // The sectioned "All" view is a capped preview, so it never pages;
+            // the flat Movies tab owns pagination and filters each mixed page
+            // down to movies on append.
+            paging.has_more = kind == "movies" && ui.get_search_all_has_more();
             let has_more = paging.has_more;
             drop(paging);
 
@@ -3574,10 +3576,12 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 _ => ui.get_search_all_total_count(),
             };
             ui.set_catalog_total_count(per_type_total.max(filtered.len() as i32));
-            ui.set_catalog_has_more(has_more);
             ui.set_is_loading_more(false);
             ui.set_focused_card_index(-1);
             set_catalog(&ui, cards.clone());
+            // set_catalog resets paging flags, so the page state must land
+            // after it or the typed tab loses its load-more trigger.
+            ui.set_catalog_has_more(has_more);
             set_search_sections(&ui, &cards);
 
             if let Some(session) = session {
@@ -4076,8 +4080,21 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                                 loading_more: false,
                                 ..requested_page
                             };
+                            // A typed search tab holds only its own type, so
+                            // append the matching subset of this mixed page;
+                            // cached_catalog keeps everything for the All tab.
+                            let display_cards = if is_search {
+                                let filter = ui.get_search_results_filter();
+                                cards
+                                    .iter()
+                                    .filter(|card| card_matches_search_filter(card, &filter))
+                                    .cloned()
+                                    .collect::<Vec<_>>()
+                            } else {
+                                cards.clone()
+                            };
                             ui.set_catalog_anchor_pending(true);
-                            append_catalog_page(&ui, cards.clone());
+                            append_catalog_page(&ui, display_cards.clone());
                             let mut reported_total = if !is_search && (is_studios || !page.has_more)
                             {
                                 // Studios are aggregated client-side; the raw
@@ -4111,12 +4128,17 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                                     + ui.get_search_tag_total()
                                     + ui.get_search_channel_total();
                                 ui.set_search_all_total_count(aggregate);
-                                reported_total = aggregate;
-                                let model = ui.get_catalog_items();
-                                let all_cards = (0..model.row_count())
-                                    .filter_map(|index| model.row_data(index))
-                                    .collect::<Vec<_>>();
-                                set_search_sections(&ui, &all_cards);
+                                // The flat tab must report its own type total;
+                                // the aggregate belongs to the "All" tab.
+                                reported_total = match ui.get_search_results_filter().as_str() {
+                                    "movies" => ui.get_search_movie_total(),
+                                    "performers" => ui.get_search_performer_total(),
+                                    "studios" => ui.get_search_studio_total(),
+                                    "tags" => ui.get_search_tag_total(),
+                                    "channels" => ui.get_search_channel_total(),
+                                    _ => aggregate,
+                                };
+                                set_search_sections(&ui, &cards);
                             }
                             ui.set_catalog_has_more(page.has_more);
                             ui.set_catalog_more_error("".into());
@@ -4124,7 +4146,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                             ui.set_is_loading_more(false);
                             refresh_catalog_thumbnails_async(
                                 ui.as_weak(),
-                                cards,
+                                display_cards,
                                 token,
                                 cached_catalog.clone(),
                                 Some((catalog_generation.clone(), request_id)),

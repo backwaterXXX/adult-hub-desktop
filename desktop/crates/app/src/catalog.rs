@@ -373,6 +373,63 @@ pub fn set_catalog(ui: &MainWindow, items: Vec<VideoCardData>) {
     ui.set_catalog_items(model.into());
 }
 
+/// Cards rendered per type in the sectioned "All" search tab: two rows of at
+/// most eight columns. The typed tabs keep the full, paginated lists.
+pub const SEARCH_SECTION_CAP: usize = 16;
+const SEARCH_SECTION_COUNT: usize = 5;
+
+/// Section index for a card provider, matching the order of the section
+/// properties: movies, performers, studios, tags, channels.
+pub fn search_section_bucket(provider: &str) -> usize {
+    match provider {
+        "performer" => 1,
+        "studio" => 2,
+        "genre" | "category" => 3,
+        "telegram" => 4,
+        _ => 0,
+    }
+}
+
+/// Section index for a flat search tab kind, or `None` for the mixed tab.
+pub fn search_filter_bucket(kind: &str) -> Option<usize> {
+    match kind {
+        "movies" => Some(0),
+        "performers" => Some(1),
+        "studios" => Some(2),
+        "tags" => Some(3),
+        "channels" => Some(4),
+        _ => None,
+    }
+}
+
+/// Bucket search-result cards into the capped per-type lists rendered in the
+/// "All" tab. Classification matches `search_result_counts`, so a section and
+/// its counter always describe the same rows. Each card keeps its flat-list
+/// index so keyboard focus maps between the list and the sections.
+fn split_search_sections(
+    cards: impl IntoIterator<Item = VideoCardData>,
+) -> [Vec<VideoCardData>; SEARCH_SECTION_COUNT] {
+    let mut sections: [Vec<VideoCardData>; SEARCH_SECTION_COUNT] = Default::default();
+    for (index, mut card) in cards.into_iter().enumerate() {
+        card.card_index = index as i32;
+        let bucket = search_section_bucket(&card.provider);
+        if sections[bucket].len() < SEARCH_SECTION_CAP {
+            sections[bucket].push(card);
+        }
+    }
+    sections
+}
+
+pub fn set_search_sections(ui: &MainWindow, cards: impl IntoIterator<Item = VideoCardData>) {
+    let [movies, performers, studios, tags, channels] = split_search_sections(cards);
+    let to_model = |items: Vec<VideoCardData>| Rc::new(slint::VecModel::from(items)).into();
+    ui.set_search_movies_section(to_model(movies));
+    ui.set_search_performers_section(to_model(performers));
+    ui.set_search_studios_section(to_model(studios));
+    ui.set_search_tags_section(to_model(tags));
+    ui.set_search_channels_section(to_model(channels));
+}
+
 pub fn set_channel_catalog(ui: &MainWindow, items: Vec<VideoCardData>) {
     ui.set_channel_has_more(false);
     ui.set_channel_scroll_y(0.0);
@@ -596,6 +653,7 @@ fn update_catalog_thumbnail(
     card.thumbnail_state = "ready".into();
     card.has_thumbnail = true;
     items.set_row_data(index, card.clone());
+    sync_search_section_card(ui, &card);
 
     let rows = ui.get_catalog_rows();
     let columns = ui.get_catalog_column_count().max(1) as usize;
@@ -613,7 +671,6 @@ fn update_catalog_thumbnail(
         }
         rows.set_row_data(row_index, row);
     }
-    sync_search_sections(ui);
 }
 
 fn update_channel_thumbnail(
@@ -684,6 +741,9 @@ fn update_thumbnail_state(
     }
     card.thumbnail_state = state.into();
     items.set_row_data(index, card.clone());
+    if !channel {
+        sync_search_section_card(ui, &card);
+    }
 
     let row_index = index / columns;
     if let Some(mut row) = rows.row_data(row_index) {
@@ -699,42 +759,30 @@ fn update_thumbnail_state(
         }
         rows.set_row_data(row_index, row);
     }
-    if !channel {
-        sync_search_sections(ui);
-    }
 }
 
-/// Mirror the current catalogue cards into the per-type "All" search sections
-/// whenever a card changes in place (thumbnail arrivals). The section models
-/// are separate from catalog-items, so without this the All tab keeps
-/// placeholders after the rest of the UI has loaded its artwork.
-pub fn sync_search_sections(ui: &MainWindow) {
+/// Patch one card in the "All" tab's per-type mirror after an in-place update
+/// (thumbnail arrival). The section models are separate from catalog-items, so
+/// without this the All tab keeps placeholders. Patching the single matching
+/// row avoids rebuilding every section model for each downloaded thumbnail.
+fn sync_search_section_card(ui: &MainWindow, card: &VideoCardData) {
     if !(ui.get_is_catalog_search_results() && ui.get_search_results_filter() == "all") {
         return;
     }
-    let items = ui.get_catalog_items();
-    let mut movies = Vec::new();
-    let mut performers = Vec::new();
-    let mut studios = Vec::new();
-    let mut tags = Vec::new();
-    let mut channels = Vec::new();
-    for index in 0..items.row_count() {
-        let Some(card) = items.row_data(index) else {
-            continue;
-        };
-        match card.provider.as_str() {
-            "performer" => performers.push(card),
-            "studio" => studios.push(card),
-            "genre" | "category" => tags.push(card),
-            "telegram" => channels.push(card),
-            _ => movies.push(card),
-        }
+    let model = match search_section_bucket(&card.provider) {
+        1 => ui.get_search_performers_section(),
+        2 => ui.get_search_studios_section(),
+        3 => ui.get_search_tags_section(),
+        4 => ui.get_search_channels_section(),
+        _ => ui.get_search_movies_section(),
+    };
+    if let Some(index) = (0..model.row_count()).find(|index| {
+        model
+            .row_data(*index)
+            .is_some_and(|section_card| section_card.id == card.id)
+    }) {
+        model.set_row_data(index, card.clone());
     }
-    ui.set_search_movies_section(Rc::new(slint::VecModel::from(movies)).into());
-    ui.set_search_performers_section(Rc::new(slint::VecModel::from(performers)).into());
-    ui.set_search_studios_section(Rc::new(slint::VecModel::from(studios)).into());
-    ui.set_search_tags_section(Rc::new(slint::VecModel::from(tags)).into());
-    ui.set_search_channels_section(Rc::new(slint::VecModel::from(channels)).into());
 }
 
 pub fn retry_thumbnail_async(
