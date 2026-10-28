@@ -353,7 +353,7 @@ export component VideoCard inherits Rectangle {
                 height: 38px;
             }
 
-            if !root.compact && (root.item.year != "" || root.source-label != "") : HorizontalLayout {
+            if !root.compact && (root.item.year != "" || root.source-label != "" || root.item.genre != "") : HorizontalLayout {
                 height: 16px;
                 spacing: 6px;
                 alignment: start;
@@ -380,6 +380,22 @@ export component VideoCard inherits Rectangle {
                     vertical-alignment: center;
                     overflow: elide;
                     horizontal-stretch: 1;
+                }
+
+                if root.item.genre != "" && (root.item.year != "" || root.source-label != "") : Rectangle {
+                    width: 3px;
+                    height: 3px;
+                    border-radius: 1.5px;
+                    background: HubTheme.separator;
+                    y: 6px;
+                }
+
+                if root.item.genre != "" : Text {
+                    text: root.item.genre;
+                    color: HubTheme.text-muted;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
                 }
             }
         }
