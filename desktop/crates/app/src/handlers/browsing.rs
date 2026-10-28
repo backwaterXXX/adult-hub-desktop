@@ -663,6 +663,12 @@ fn save_catalog_view(
     if page.category.is_empty() {
         return;
     }
+    // "Clear search" empties the search UI before filter_category swaps the
+    // paging state, so snapshotting that half-cleared mix would overwrite the
+    // cached search view with a non-search page filed under the old query.
+    if !page.query.is_empty() && !ui.get_is_catalog_search_results() {
+        return;
+    }
     page.loading_more = false;
     let model = ui.get_catalog_items();
     let cards = (0..model.row_count())
@@ -1183,11 +1189,16 @@ fn search_supplement_query<'a>(
 }
 
 fn resolver_base_url_for(local_store: &LocalStore, session: &Session) -> String {
+    // An empty stored value is meaningful: settings clears both keys when the
+    // resolver shares the active server's origin, so it must fall back to the
+    // session URL instead of being used as a (relative) base.
     local_store
         .get_setting("resolver_base_url")
         .ok()
         .flatten()
         .or_else(|| local_store.get_setting("resolver_url").ok().flatten())
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
         .unwrap_or_else(|| session.server_url.clone())
 }
 
@@ -1847,14 +1858,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                                     Some(session.server_url.clone()),
                                     Some(session.access_token.clone()),
                                 );
-                                let eff_res_url = local_store
-                                    .get_setting("resolver_base_url")
-                                    .ok()
-                                    .flatten()
-                                    .or_else(|| {
-                                        local_store.get_setting("resolver_url").ok().flatten()
-                                    })
-                                    .unwrap_or_else(|| session.server_url.clone());
+                                let eff_res_url = resolver_base_url_for(&local_store, &session);
                                 phash_coord.update_auth(&eff_res_url, Some(&session.access_token));
                                 slint::invoke_from_event_loop(move || {
                                     let Some(ui) = weak.upgrade() else { return };
@@ -2073,14 +2077,8 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                                         Some(session.server_url.clone()),
                                         Some(session.access_token.clone()),
                                     );
-                                    let eff_res_url = local_store
-                                        .get_setting("resolver_base_url")
-                                        .ok()
-                                        .flatten()
-                                        .or_else(|| {
-                                            local_store.get_setting("resolver_url").ok().flatten()
-                                        })
-                                        .unwrap_or_else(|| session.server_url.clone());
+                                    let eff_res_url =
+                                        resolver_base_url_for(&local_store, &session);
                                     phash_coord
                                         .update_auth(&eff_res_url, Some(&session.access_token));
 
