@@ -1735,7 +1735,9 @@ component SearchResultsSections inherits ScrollView {
     in property <float> zoom: 1.0;
     // Flat search-list index, so the same card that arrow keys target also
     // shows the keyboard focus ring here. Hidden/overflow cards simply never
-    // match a visible card's index.
+    // match a visible card's index. Server order is mixed, so Left/Right can
+    // hop between section types; TV-remote navigation would have to walk the
+    // section lists instead of the flat list.
     in property <int> focused-index: -1;
     callback show-type(string);
     callback play(string);

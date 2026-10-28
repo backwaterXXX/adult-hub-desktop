@@ -740,7 +740,11 @@ fn restore_catalog_view(
     ui.set_search_channel_total(snapshot.search_channel_total);
     ui.set_search_all_has_more(snapshot.search_all_has_more);
     ui.set_search_all_total_count(snapshot.search_all_total_count);
-    set_search_sections(ui, &snapshot.cards);
+    // Sections belong to the mixed All view only. Typed-tab and catalogue
+    // snapshots must not rebuild them; All repopulates from the full list.
+    if snapshot.is_search && snapshot.search_results_filter == "all" {
+        set_search_sections(ui, &snapshot.cards);
+    }
     ui.set_catalog_anchor_index(snapshot.anchor_index);
     ui.set_catalog_anchor_screen_y(snapshot.anchor_screen_y);
     ui.set_catalog_anchor_pending(!snapshot.cards.is_empty());
@@ -3582,7 +3586,12 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             // set_catalog resets paging flags, so the page state must land
             // after it or the typed tab loses its load-more trigger.
             ui.set_catalog_has_more(has_more);
-            set_search_sections(&ui, &cards);
+            // Only All renders sections. A typed tab holds one type, so
+            // rebuilding here would blank the other four models for nothing;
+            // switching back to All rebuilds them from the full list.
+            if kind == "all" {
+                set_search_sections(&ui, &cards);
+            }
 
             if let Some(session) = session {
                 let filtered_items = Arc::new(Mutex::new(filtered));
@@ -4138,7 +4147,9 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                                     "channels" => ui.get_search_channel_total(),
                                     _ => aggregate,
                                 };
-                                set_search_sections(&ui, &cards);
+                                if ui.get_search_results_filter() == "all" {
+                                    set_search_sections(&ui, &cards);
+                                }
                             }
                             ui.set_catalog_has_more(page.has_more);
                             ui.set_catalog_more_error("".into());
