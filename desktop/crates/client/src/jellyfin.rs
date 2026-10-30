@@ -401,7 +401,10 @@ impl JellyfinClient {
         }
         if let Some(image_types) = query.image_types {
             if !image_types.trim().is_empty() {
-                url.push_str(&format!("&ImageTypes={}", crate::urlencoding(image_types.trim())));
+                url.push_str(&format!(
+                    "&ImageTypes={}",
+                    crate::urlencoding(image_types.trim())
+                ));
             }
         }
         if !query.sort_by.is_empty() {
