@@ -22,6 +22,7 @@ pub enum NavDestination {
         performer_letter: String,
         performers_photo_only: bool,
         drilldown: bool,
+        search_results_filter: String,
     },
     Channels,
     Settings,
@@ -276,6 +277,7 @@ mod tests {
                 performer_letter: String::new(),
                 performers_photo_only: false,
                 drilldown: false,
+                search_results_filter: "all".into(),
             },
         );
         AppContext::push_history(

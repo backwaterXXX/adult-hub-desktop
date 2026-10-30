@@ -762,6 +762,8 @@ fn restore_catalog_view(
     ui.set_search_channel_total(snapshot.search_channel_total);
     ui.set_search_all_has_more(snapshot.search_all_has_more);
     ui.set_search_all_total_count(snapshot.search_all_total_count);
+    ui.set_search_channels_loading(false);
+    ui.set_search_channel_error("".into());
     // Sections belong to the mixed All view only. Typed-tab and catalogue
     // snapshots must not rebuild them; All repopulates from the full list.
     if snapshot.is_search && snapshot.search_results_filter == "all" {
@@ -1249,7 +1251,7 @@ impl SearchSupplements {
             studio: self
                 .studios
                 .as_ref()
-                .map(|page| page.total_record_count)
+                .map(|page| page.items.len())
                 .unwrap_or(0),
             tag: self
                 .tags
@@ -1296,6 +1298,11 @@ fn fetch_search_supplements(
                     &session.access_token,
                     &studio_query,
                 )
+                .map(|mut page| {
+                    page.items = crate::catalog::aggregate_studio_items(page.items);
+                    page.total_record_count = page.items.len();
+                    page
+                })
                 .map_err(|_| {
                     crate::diagnostics::GLOBAL_LOG.w(
                         "Search",
@@ -1360,6 +1367,7 @@ fn merge_search_supplements(
         movie_page.total_record_count += people_count;
     }
     if let Some(mut studio_page) = supplements.studios {
+        studio_page.items = crate::catalog::aggregate_studio_items(studio_page.items);
         let studio_count = studio_page.items.len();
         added += studio_count;
         for studio in &mut studio_page.items {
@@ -1574,6 +1582,7 @@ pub fn current_nav_destination(
                 } else {
                     String::new()
                 },
+                search_results_filter: ui.get_search_results_filter().to_string(),
                 genre_query: ui.get_catalog_genre_query().to_string(),
                 studio_query: ui.get_catalog_studio_query().to_string(),
                 performer_query: ui.get_catalog_performer_query().to_string(),
@@ -1625,6 +1634,7 @@ pub fn restore_nav_destination(
             category,
             is_search,
             search_query,
+            search_results_filter,
             genre_query,
             studio_query,
             performer_query,
@@ -1636,6 +1646,7 @@ pub fn restore_nav_destination(
             ui.set_active_screen("browse".into());
             ui.set_active_category(category.clone().into());
             ui.set_search_query(search_query.clone().into());
+            ui.set_search_results_filter(search_results_filter.clone().into());
             ui.set_catalog_genre_query(genre_query.clone().into());
             ui.set_catalog_studio_query(studio_query.into());
             ui.set_catalog_performer_query(performer_query.into());
@@ -1646,6 +1657,9 @@ pub fn restore_nav_destination(
             if is_search && !search_query.is_empty() {
                 ui.set_is_catalog_search_results(true);
                 ui.invoke_search_catalog(search_query.into());
+                if ui.get_search_results_filter().as_str() != search_results_filter.as_str() {
+                    ui.invoke_filter_search_results(search_results_filter.into());
+                }
             } else {
                 ui.set_is_catalog_search_results(false);
                 if drilldown && !genre_query.is_empty() {
@@ -3247,6 +3261,8 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             ui.set_search_studio_total(0);
             ui.set_search_tag_total(0);
             ui.set_search_channel_total(0);
+            ui.set_search_channels_loading(!query.is_empty());
+            ui.set_search_channel_error("".into());
             ui.set_focused_card_index(-1);
             let search_context = active_search_context(&ui);
             let debounce_id = search_debounce_generation.fetch_add(1, Ordering::SeqCst) + 1;
@@ -3304,7 +3320,10 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                           has_more: bool,
                           supplemental_total: usize,
                           search_error_message: String,
-                          is_unauth: bool| {
+                          is_unauth: bool,
+                          channels_loading: bool,
+                          channel_error: String,
+                          preserve_scroll: bool| {
                         let filtered = filter_catalog_items(items, &local_store);
                         let (movie_count, performer_count, studio_count, tag_count, channel_count) =
                             search_result_counts(&filtered);
@@ -3359,8 +3378,14 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                                     )
                                 })
                                 .collect::<Vec<_>>();
-                            set_catalog(&ui, cards.clone());
-                            set_search_sections(&ui, &cards);
+                            if preserve_scroll {
+                                crate::catalog::set_catalog_preserving_scroll(&ui, cards.clone());
+                            } else {
+                                set_catalog(&ui, cards.clone());
+                            }
+                            if ui.get_search_results_filter() == "all" {
+                                set_search_sections(&ui, &cards);
+                            }
                             set_recent_searches(&ui, recent_queries);
                             ui.set_search_movie_count(movie_count as i32);
                             ui.set_search_performer_count(performer_count as i32);
@@ -3373,6 +3398,8 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                             ui.set_search_tag_total(totals.tag as i32);
                             ui.set_search_channel_total(totals.channel as i32);
                             ui.set_search_error_message(search_error_message.into());
+                            ui.set_search_channels_loading(channels_loading);
+                            ui.set_search_channel_error(channel_error.into());
                             ui.set_search_all_has_more(has_more);
                             ui.set_search_all_total_count(aggregate as i32);
                             ui.set_catalog_has_more(has_more);
@@ -3419,18 +3446,117 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                         0,
                         "Connect Jellyfin before searching your library.".into(),
                         false,
+                        false,
+                        String::new(),
+                        false,
                     );
                     return;
                 };
 
-                let stage_a = get_search_movies_page_with_empty_fetch(
-                    &jellyfin,
-                    &session,
-                    &local_store,
-                    &query,
-                    &filters,
-                );
-                let mut page = match stage_a {
+                let resolver_url = resolver_base_url_for(&local_store, &session);
+                let query_str = query.clone();
+
+                // Spawn channel search in background (Stage B)
+                let channel_handle = {
+                    let resolver = resolver.clone();
+                    let resolver_url = resolver_url.clone();
+                    let q = query_str.clone();
+                    std::thread::spawn(move || {
+                        resolver
+                            .search_with_timeout(&resolver_url, &q, "telegram", CHANNEL_SEARCH_TIMEOUT)
+                            .map(|videos| videos.into_iter().map(TvItem::from).collect::<Vec<_>>())
+                            .map_err(|e| {
+                                crate::diagnostics::GLOBAL_LOG.w(
+                                    "Search",
+                                    &format!("Resolver channel search failed: {:?}", e),
+                                );
+                                e
+                            })
+                    })
+                };
+
+                // Stage A: Query Jellyfin concurrently (Movies, People, Studios, Tags)
+                let (stage_a_res, people_opt, studio_opt, tag_opt) = std::thread::scope(|scope| {
+                    let movie_task = scope.spawn(|| {
+                        get_search_movies_page_with_empty_fetch(
+                            &jellyfin,
+                            &session,
+                            &local_store,
+                            &query_str,
+                            &filters,
+                        )
+                    });
+                    let people_task = scope.spawn(|| {
+                        let people_query =
+                            search_supplement_query(&query_str, "Person", Some("Actor"));
+                        jellyfin
+                            .get_items(
+                                &session.server_url,
+                                &session.user_id,
+                                &session.access_token,
+                                &people_query,
+                            )
+                            .map_err(|_| {
+                                crate::diagnostics::GLOBAL_LOG.w(
+                                    "Search",
+                                    "Jellyfin performer search failed; preserving results from other sources",
+                                );
+                            })
+                            .ok()
+                    });
+                    let studio_task = scope.spawn(|| {
+                        let studio_query = search_supplement_query(&query_str, "Studio", None);
+                        jellyfin
+                            .get_items(
+                                &session.server_url,
+                                &session.user_id,
+                                &session.access_token,
+                                &studio_query,
+                            )
+                            .map(|mut page| {
+                                page.items = crate::catalog::aggregate_studio_items(page.items);
+                                page.total_record_count = page.items.len();
+                                page
+                            })
+                            .map_err(|_| {
+                                crate::diagnostics::GLOBAL_LOG.w(
+                                    "Search",
+                                    "Jellyfin studio search failed; preserving results from other sources",
+                                );
+                            })
+                            .ok()
+                    });
+                    let tag_task = scope.spawn(|| {
+                        let tag_query = search_supplement_query(&query_str, "Genre", None);
+                        jellyfin
+                            .get_items(
+                                &session.server_url,
+                                &session.user_id,
+                                &session.access_token,
+                                &tag_query,
+                            )
+                            .map_err(|_| {
+                                crate::diagnostics::GLOBAL_LOG.w(
+                                    "Search",
+                                    "Jellyfin tag search failed; preserving results from other sources",
+                                );
+                            })
+                            .ok()
+                    });
+
+                    (
+                        movie_task.join().unwrap(),
+                        people_task.join().unwrap(),
+                        studio_task.join().unwrap(),
+                        tag_task.join().unwrap(),
+                    )
+                });
+
+                if search_debounce_generation.load(Ordering::SeqCst) != debounce_id {
+                    return;
+                }
+
+                let movie_page = match stage_a_res {
                     Ok(page) => page,
                     Err(error) => {
                         let is_unauth = error.is_unauthorized();
@@ -3449,85 +3575,108 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                                 0,
                                 message,
                                 true,
+                                false,
+                                String::new(),
+                                false,
                             );
                             return;
                         }
-                        // Jellyfin is unreachable, but the Resolver may still
-                        // answer for channel results.
-                        let mut partial = TvItemsPage {
+                        CatalogPage {
                             items: Vec::new(),
-                            total_record_count: 0,
-                            start_index: 0,
-                        };
-                        let supplements = fetch_search_supplements(
-                            &jellyfin,
-                            &resolver,
-                            &session,
-                            &query,
-                            &resolver_base_url_for(&local_store, &session),
-                        );
-                        let totals = supplements.totals();
-                        let supplemental_total =
-                            merge_search_supplements(&mut partial, supplements, &local_store);
-                        publish(
-                            partial.items,
-                            0,
-                            totals,
-                            false,
-                            supplemental_total,
-                            message,
-                            false,
-                        );
-                        return;
+                            total_count: 0,
+                            has_more: false,
+                            next_start: 0,
+                            supplemental_total: 0,
+                        }
                     }
                 };
-                let raw_movies = page.items.clone();
+
+                let supplements = SearchSupplements {
+                    people: people_opt,
+                    studios: studio_opt,
+                    tags: tag_opt,
+                    channels: None,
+                };
+                let mut totals = supplements.totals();
+                totals.movie = movie_page.total_count;
+
+                let mut stage_a_merged = TvItemsPage {
+                    items: movie_page.items.clone(),
+                    total_record_count: movie_page.total_count,
+                    start_index: 0,
+                };
+                let mut supplemental_total =
+                    merge_search_supplements(&mut stage_a_merged, supplements, &local_store);
+
+                // Publish Stage A immediately: Performers, Studios, Movies, Tags appear simultaneously,
+                // and Channels shows the compact loading spinner at the bottom
                 publish(
-                    std::mem::take(&mut page.items),
-                    page.next_start,
-                    SearchTypeTotals {
-                        movie: page.total_count,
-                        ..Default::default()
-                    },
-                    page.has_more,
-                    0,
+                    stage_a_merged.items.clone(),
+                    movie_page.next_start,
+                    totals,
+                    movie_page.has_more,
+                    supplemental_total,
+                    String::new(),
+                    false,
+                    true,
                     String::new(),
                     false,
                 );
 
-                if query.trim().is_empty()
-                    || search_debounce_generation.load(Ordering::SeqCst) != debounce_id
-                {
+                // Stage B: Wait for channel videos from Resolver
+                let channel_res = channel_handle
+                    .join()
+                    .unwrap_or(Err(adult_hub_client::ResolverError::Api(
+                        "Thread panicked".into(),
+                    )));
+                if search_debounce_generation.load(Ordering::SeqCst) != debounce_id {
                     return;
                 }
-                let supplements = fetch_search_supplements(
-                    &jellyfin,
-                    &resolver,
-                    &session,
-                    &query,
-                    &resolver_base_url_for(&local_store, &session),
-                );
-                let mut totals = supplements.totals();
-                totals.movie = page.total_count;
-                let mut merged = TvItemsPage {
-                    items: raw_movies,
-                    total_record_count: page.total_count,
-                    start_index: 0,
-                };
-                let supplemental_total =
-                    merge_search_supplements(&mut merged, supplements, &local_store);
-                if supplemental_total == 0 {
-                    return;
+
+                match channel_res {
+                    Ok(channel_items) => {
+                        let channel_supplements = SearchSupplements {
+                            people: None,
+                            studios: None,
+                            tags: None,
+                            channels: Some(channel_items),
+                        };
+                        let channel_added = merge_search_supplements(
+                            &mut stage_a_merged,
+                            channel_supplements,
+                            &local_store,
+                        );
+                        supplemental_total += channel_added;
+                        totals.channel = channel_added;
+
+                        publish(
+                            stage_a_merged.items,
+                            movie_page.next_start,
+                            totals,
+                            movie_page.has_more,
+                            supplemental_total,
+                            String::new(),
+                            false,
+                            false,
+                            String::new(),
+                            true,
+                        );
+                    }
+                    Err(_) => {
+                        publish(
+                            stage_a_merged.items,
+                            movie_page.next_start,
+                            totals,
+                            movie_page.has_more,
+                            supplemental_total,
+                            String::new(),
+                            false,
+                            false,
+                            "Failed to load channel videos".into(),
+                            true,
+                        );
+                    }
                 }
-                publish(
-                    merged.items,
-                    page.next_start,
-                    totals,
-                    page.has_more,
-                    supplemental_total,
-                    String::new(),
-                    false,
-                );
             });
         });
     }

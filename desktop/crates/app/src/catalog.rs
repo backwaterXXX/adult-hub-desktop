@@ -355,12 +355,18 @@ pub fn cards_to_rows(cards: &[VideoCardData], cols_per_row: usize) -> Vec<VideoC
     rows
 }
 
-pub fn set_catalog(ui: &MainWindow, items: Vec<VideoCardData>) {
+pub fn set_catalog_with_scroll_reset(
+    ui: &MainWindow,
+    items: Vec<VideoCardData>,
+    reset_scroll: bool,
+) {
     ui.set_catalog_has_more(false);
-    ui.set_catalog_scroll_y(0.0);
-    ui.set_catalog_anchor_index(0);
-    ui.set_catalog_anchor_screen_y(0.0);
-    ui.set_catalog_anchor_pending(false);
+    if reset_scroll {
+        ui.set_catalog_scroll_y(0.0);
+        ui.set_catalog_anchor_index(0);
+        ui.set_catalog_anchor_screen_y(0.0);
+        ui.set_catalog_anchor_pending(false);
+    }
     let mut indexed = items;
     for (i, card) in indexed.iter_mut().enumerate() {
         card.card_index = i as i32;
@@ -371,6 +377,14 @@ pub fn set_catalog(ui: &MainWindow, items: Vec<VideoCardData>) {
 
     let model = Rc::new(slint::VecModel::from(indexed));
     ui.set_catalog_items(model.into());
+}
+
+pub fn set_catalog(ui: &MainWindow, items: Vec<VideoCardData>) {
+    set_catalog_with_scroll_reset(ui, items, true);
+}
+
+pub fn set_catalog_preserving_scroll(ui: &MainWindow, items: Vec<VideoCardData>) {
+    set_catalog_with_scroll_reset(ui, items, false);
 }
 
 /// Cards rendered per type in the sectioned "All" search tab: two rows of at
@@ -1215,16 +1229,21 @@ pub fn tv_item_to_card(item: &TvItem) -> VideoCardData {
                 || tag == "__adult_hub_studio"
                 || tag == "__adult_hub_genre"
         }) {
-            item.child_count
-                .filter(|count| *count > 0)
-                .map(|count| {
-                    if count == 1 {
-                        "1 movie".to_string()
-                    } else {
-                        format!("{count} movies")
-                    }
-                })
-                .unwrap_or_default()
+            let mut parts = Vec::new();
+            if let Some(provider) = item.source_provider.as_deref() {
+                let trimmed = provider.trim();
+                if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("jellyfin") {
+                    parts.push(trimmed.to_string());
+                }
+            }
+            if let Some(count) = item.child_count.filter(|count| *count > 0) {
+                if count == 1 {
+                    parts.push("1 movie".to_string());
+                } else {
+                    parts.push(format!("{count} movies"));
+                }
+            }
+            parts.join(" • ")
         } else {
             item.studios.first().cloned().unwrap_or_default()
         }
@@ -1853,11 +1872,18 @@ pub fn aggregate_studio_items(items: Vec<TvItem>) -> Vec<TvItem> {
             continue;
         }
 
-        let norm_key = item.title.trim().to_lowercase();
-        if norm_key.is_empty() {
+        let title_clean = item.title.trim().to_lowercase();
+        if title_clean.is_empty() {
             result.push(item);
             continue;
         }
+
+        let provider_key = item
+            .source_provider
+            .as_deref()
+            .map(|p| p.trim().to_lowercase())
+            .unwrap_or_else(|| "jellyfin".to_string());
+        let norm_key = format!("{provider_key}:{title_clean}");
 
         if let Some(&existing_idx) = title_to_index.get(&norm_key) {
             let existing = &mut result[existing_idx];

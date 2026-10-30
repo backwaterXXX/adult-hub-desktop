@@ -41,13 +41,12 @@ export component PerformerCard inherits Rectangle {
     accessible-label: root.item.title;
     accessible-action-default => { root.clicked(); }
 
-    in property <length> card-width: 160px;
+    in property <length> card-width: 200px;
     in property <bool> fixed-width: true;
 
-    preferred-width: root.fixed-width ? root.card-width : 170px;
-    min-width: root.fixed-width ? 150px : 0px;
-    max-width: 190px;
-    height: 260px;
+    width: root.card-width;
+    preferred-width: root.card-width;
+    height: root.fixed-width ? (root.card-width * 1.333333 + 58px) : 260px;
     border-radius: HubTheme.card-radius;
     background: touch.has-hover ? HubTheme.surface-hover : ((root.is-focused || root.has-focus) ? #FFFFFF08 : HubTheme.surface);
     border-width: (root.is-focused || root.has-focus) ? 2px : (touch.has-hover ? 1px : 0px);
@@ -192,16 +191,29 @@ export component StudioCard inherits Rectangle {
             }
         }
 
-        Text {
-            text: root.item.title;
+        VerticalLayout {
             horizontal-stretch: 1;
-            color: HubTheme.text-primary;
-            font-size: HubTheme.card-title-size;
-            font-weight: 600;
-            vertical-alignment: center;
-            overflow: elide;
-            max-lines: 2;
-            wrap: word-wrap;
+            alignment: center;
+            spacing: 2px;
+
+            Text {
+                text: root.item.title;
+                color: HubTheme.text-primary;
+                font-size: HubTheme.card-title-size;
+                font-weight: 600;
+                vertical-alignment: center;
+                overflow: elide;
+                max-lines: 1;
+            }
+
+            if root.item.studio != "" : Text {
+                text: root.item.studio;
+                color: HubTheme.text-muted;
+                font-size: HubTheme.metadata-size;
+                vertical-alignment: center;
+                overflow: elide;
+                max-lines: 1;
+            }
         }
     }
 

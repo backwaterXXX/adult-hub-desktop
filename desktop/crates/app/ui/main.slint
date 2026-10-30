@@ -81,7 +81,7 @@ export global HubGrid {
     public pure function catalog-row-height(available: length, cols: int, category: string) -> length {
         let width = HubGrid.card-width(available, cols);
         if category == "Performers" {
-            return width * 1.35 + 58px + HubGrid.gap();
+            return width * 1.333333 + 58px + HubGrid.gap();
         }
         if category == "Studios" {
             return 72px + HubGrid.gap();
@@ -97,7 +97,7 @@ export global HubGrid {
     }
 
     public pure function performer-min-card(zoom: float) -> length {
-        return 150px * zoom;
+        return 200px * zoom;
     }
 
     public pure function card-width(available: length, cols: int) -> length {
@@ -1762,7 +1762,7 @@ component CatalogGridCard inherits Rectangle {
 
     width: root.card-width;
     preferred-width: root.card-width;
-    height: root.card.provider == "performer" ? (root.card-width * 1.35 + 58px) :
+    height: root.card.provider == "performer" ? (root.card-width * 1.333333 + 58px) :
             (root.card.provider == "studio" ? 72px :
             ((root.card.provider == "genre" || root.card.provider == "category") ? 56px :
             (root.card-width * 0.5625 + 70px)));
@@ -1824,6 +1824,8 @@ component SearchResultsSections inherits ScrollView {
     in property <int> tag-total: 0;
     in property <int> channel-count: 0;
     in property <int> channel-total: 0;
+    in property <bool> channel-loading: false;
+    in property <string> channel-error: "";
     in property <length> avail-width: 800px;
     in property <float> zoom: 1.0;
     // Flat search-list index, so the same card that arrow keys target also
@@ -1844,18 +1846,19 @@ component SearchResultsSections inherits ScrollView {
         HubGrid.video-min-card(1.0), 160px);
     property <length> video-w: HubGrid.card-width(root.avail-width, root.video-cols);
     property <int> performer-cols: HubGrid.zoomed-columns(root.avail-width, root.zoom,
-        HubGrid.performer-min-card(1.0), 150px);
+        HubGrid.performer-min-card(1.0), 180px);
     property <length> performer-w: HubGrid.card-width(root.avail-width, root.performer-cols);
     property <int> tile-cols: HubGrid.zoomed-columns(root.avail-width, root.zoom, 220px, 180px);
     property <length> tile-w: HubGrid.card-width(root.avail-width, root.tile-cols);
 
-    // Counters state "shown of matches" explicitly so a page limit can never
-    // read as a total.
-    pure function counter-label(count: int, total: int) -> string {
-        if count == 1 {
-            return total > count ? "1 of " + total + " results" : "1 result";
+    pure function preview-counter-label(shown: int, total: int) -> string {
+        if total <= 0 {
+            return shown == 1 ? "1 result" : shown + " results";
         }
-        return total > count ? count + " of " + total + " results" : count + " results";
+        if total > shown {
+            return "Showing " + shown + " of " + total + " results";
+        }
+        return total == 1 ? "1 result" : total + " results";
     }
 
     // `visible` does not remove a flex item from the layout, so overflow cards
@@ -1867,7 +1870,7 @@ component SearchResultsSections inherits ScrollView {
     }
 
     property <length> video-row-h: root.video-w * 0.5625 + 70px;
-    property <length> performer-row-h: root.performer-w * 1.35 + 58px;
+    property <length> performer-row-h: root.performer-w * 1.333333 + 58px;
 
     // This view is a capped preview per type: scrolling here never pages.
     // Pagination belongs to the flat typed tab (Movies), which appends the
@@ -1877,51 +1880,13 @@ component SearchResultsSections inherits ScrollView {
         spacing: 22px;
         padding-bottom: 24px;
 
-        if root.movies.length > 0 : VerticalLayout {
-            spacing: 10px;
-
-            SectionHeader {
-                title: "Movies";
-                action-label: "Show all";
-                counter-text: root.counter-label(root.movie-count, root.movie-total);
-                action => { root.show-type("movies"); }
-            }
-
-            Rectangle {
-                height: root.rows-height(root.movies.length, root.video-cols, root.video-row-h);
-                clip: true;
-
-                FlexboxLayout {
-                    width: 100%;
-                    height: 100%;
-                    flex-wrap: wrap;
-                    alignment: start;
-                    spacing-horizontal: HubGrid.gap();
-                    spacing-vertical: HubGrid.gap();
-
-                    for movie[movie-index] in root.movies : CatalogGridCard {
-                        visible: movie-index < root.video-cols * 2;
-                        card: movie;
-                        card-width: root.video-w;
-                        focused-index: root.focused-index;
-                        open-performer(name) => { root.open-performer(name); }
-                        open-studio(name) => { root.open-studio(name); }
-                        open-category(name) => { root.open-category(name); }
-                        play(id) => { root.play(id); }
-                        open-detail(id) => { root.open-detail(id); }
-                        retry-thumbnail(item) => { root.retry-thumbnail(item); }
-                    }
-                }
-            }
-        }
-
         if root.performers.length > 0 : VerticalLayout {
             spacing: 10px;
 
             SectionHeader {
                 title: "Performers";
-                action-label: "Show all";
-                counter-text: root.counter-label(root.performer-count, root.performer-total);
+                action-label: root.performer-total > root.performer-cols ? "Show all" : "";
+                counter-text: root.preview-counter-label(min(root.performers.length, root.performer-cols), root.performer-total);
                 action => { root.show-type("performers"); }
             }
 
@@ -1958,8 +1923,8 @@ component SearchResultsSections inherits ScrollView {
 
             SectionHeader {
                 title: "Studios";
-                action-label: "Show all";
-                counter-text: root.counter-label(root.studio-count, root.studio-total);
+                action-label: root.studio-total > root.tile-cols * 2 ? "Show all" : "";
+                counter-text: root.preview-counter-label(min(root.studios.length, root.tile-cols * 2), root.studio-total);
                 action => { root.show-type("studios"); }
             }
 
@@ -1991,13 +1956,51 @@ component SearchResultsSections inherits ScrollView {
             }
         }
 
+        if root.movies.length > 0 : VerticalLayout {
+            spacing: 10px;
+
+            SectionHeader {
+                title: "Movies";
+                action-label: root.movie-total > root.video-cols * 2 ? "Show all" : "";
+                counter-text: root.preview-counter-label(min(root.movies.length, root.video-cols * 2), root.movie-total);
+                action => { root.show-type("movies"); }
+            }
+
+            Rectangle {
+                height: root.rows-height(root.movies.length, root.video-cols, root.video-row-h);
+                clip: true;
+
+                FlexboxLayout {
+                    width: 100%;
+                    height: 100%;
+                    flex-wrap: wrap;
+                    alignment: start;
+                    spacing-horizontal: HubGrid.gap();
+                    spacing-vertical: HubGrid.gap();
+
+                    for movie[movie-index] in root.movies : CatalogGridCard {
+                        visible: movie-index < root.video-cols * 2;
+                        card: movie;
+                        card-width: root.video-w;
+                        focused-index: root.focused-index;
+                        open-performer(name) => { root.open-performer(name); }
+                        open-studio(name) => { root.open-studio(name); }
+                        open-category(name) => { root.open-category(name); }
+                        play(id) => { root.play(id); }
+                        open-detail(id) => { root.open-detail(id); }
+                        retry-thumbnail(item) => { root.retry-thumbnail(item); }
+                    }
+                }
+            }
+        }
+
         if root.tags.length > 0 : VerticalLayout {
             spacing: 10px;
 
             SectionHeader {
                 title: "Tags";
-                action-label: "Show all";
-                counter-text: root.counter-label(root.tag-count, root.tag-total);
+                action-label: root.tag-total > root.tile-cols * 2 ? "Show all" : "";
+                counter-text: root.preview-counter-label(min(root.tags.length, root.tile-cols * 2), root.tag-total);
                 action => { root.show-type("tags"); }
             }
 
@@ -2029,17 +2032,53 @@ component SearchResultsSections inherits ScrollView {
             }
         }
 
-        if root.channels.length > 0 : VerticalLayout {
+        if root.channels.length > 0 || root.channel-loading || root.channel-error != "" : VerticalLayout {
             spacing: 10px;
 
             SectionHeader {
                 title: "Channel videos";
-                action-label: "Show all";
-                counter-text: root.counter-label(root.channel-count, root.channel-total);
+                action-label: root.channels.length > 0 && root.channel-total > root.video-cols * 2 ? "Show all" : "";
+                counter-text: root.channel-loading
+                    ? "Searching…"
+                    : (root.channel-error != ""
+                        ? "Unavailable"
+                        : root.preview-counter-label(min(root.channels.length, root.video-cols * 2), root.channel-total));
                 action => { root.show-type("channels"); }
             }
 
-            Rectangle {
+            if root.channel-loading : Rectangle {
+                height: 40px;
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: start;
+                    AccentSpinner {
+                        size: 20px;
+                        y: (parent.height - self.height) / 2;
+                    }
+                    Text {
+                        text: "Searching channel videos…";
+                        color: HubTheme.text-muted;
+                        font-size: HubTheme.metadata-size;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            if !root.channel-loading && root.channel-error != "" && root.channels.length == 0 : Rectangle {
+                height: 40px;
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: start;
+                    Text {
+                        text: root.channel-error;
+                        color: #ff7676;
+                        font-size: HubTheme.metadata-size;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            if !root.channel-loading && root.channels.length > 0 : Rectangle {
                 height: root.rows-height(root.channels.length, root.video-cols, root.video-row-h);
                 clip: true;
 
@@ -2373,6 +2412,33 @@ export component MainWindow inherits Window {
     in-out property <int> search-studio-total: 0;
     in-out property <int> search-tag-total: 0;
     in-out property <int> search-channel-total: 0;
+    in-out property <bool> search-channels-loading: false;
+    in-out property <string> search-channel-error: "";
+
+    pure function current-catalog-category() -> string {
+        if root.is-catalog-search-results {
+            if root.search-results-filter == "performers" {
+                return "Performers";
+            }
+            if root.search-results-filter == "studios" {
+                return "Studios";
+            }
+            if root.search-results-filter == "tags" {
+                return "Categories";
+            }
+            return "Latest";
+        }
+        return root.active-category;
+    }
+
+    pure function current-filter-total() -> int {
+        if root.search-results-filter == "movies" { return root.search-movie-total; }
+        if root.search-results-filter == "performers" { return root.search-performer-total; }
+        if root.search-results-filter == "studios" { return root.search-studio-total; }
+        if root.search-results-filter == "tags" { return root.search-tag-total; }
+        if root.search-results-filter == "channels" { return root.search-channel-total; }
+        return root.search-all-total-count;
+    }
     // Capped per-type card lists rendered as sections in the "All" tab
     // (Rust caps each list at the two-row budget; full lists live in the
     // typed tabs).
@@ -2773,15 +2839,15 @@ export component MainWindow inherits Window {
     in property <length> desired-catalog-card-width: HubGrid.zoomed-card-width(
         root.catalog-content-width,
         root.card-zoom,
-        root.active-category == "Performers" ? HubGrid.performer-min-card(1.0) : ((root.active-category == "Studios" || root.active-category == "Categories") ? 220px : HubGrid.video-min-card(1.0)),
-        root.active-category == "Performers" ? 150px : ((root.active-category == "Studios" || root.active-category == "Categories") ? 180px : 160px));
+        root.current-catalog-category() == "Performers" ? HubGrid.performer-min-card(1.0) : ((root.current-catalog-category() == "Studios" || root.current-catalog-category() == "Categories") ? 220px : HubGrid.video-min-card(1.0)),
+        root.current-catalog-category() == "Performers" ? 180px : ((root.current-catalog-category() == "Studios" || root.current-catalog-category() == "Categories") ? 180px : 160px));
     in property <length> desired-channel-card-width: HubGrid.zoomed-card-width(
         root.channel-content-width, root.card-zoom, HubGrid.video-min-card(1.0), 160px);
     in property <int> desired-catalog-columns: HubGrid.zoomed-columns(
         root.catalog-content-width,
         root.card-zoom,
-        root.active-category == "Performers" ? HubGrid.performer-min-card(1.0) : ((root.active-category == "Studios" || root.active-category == "Categories") ? 220px : HubGrid.video-min-card(1.0)),
-        root.active-category == "Performers" ? 150px : ((root.active-category == "Studios" || root.active-category == "Categories") ? 180px : 160px));
+        root.current-catalog-category() == "Performers" ? HubGrid.performer-min-card(1.0) : ((root.current-catalog-category() == "Studios" || root.current-catalog-category() == "Categories") ? 220px : HubGrid.video-min-card(1.0)),
+        root.current-catalog-category() == "Performers" ? 180px : ((root.current-catalog-category() == "Studios" || root.current-catalog-category() == "Categories") ? 180px : 160px));
     in property <int> desired-channel-columns: HubGrid.zoomed-columns(
         root.channel-content-width, root.card-zoom, HubGrid.video-min-card(1.0), 160px);
 
@@ -3748,15 +3814,24 @@ export component MainWindow inherits Window {
                     spacing: 12px;
                     PageHeader {
                         horizontal-stretch: 1;
-                        property <string> count-noun: root.is-catalog-search-results
-                            ? "results"
-                            : (root.active-category == "Performers"
-                                ? "performers"
-                                : (root.active-category == "Studios"
-                                    ? "studios"
-                                    : (root.active-category == "Categories"
-                                        ? "categories"
+                        property <string> count-noun: root.current-catalog-category() == "Performers"
+                            ? "performers"
+                            : (root.current-catalog-category() == "Studios"
+                                ? "studios"
+                                : (root.current-catalog-category() == "Categories"
+                                    ? "categories"
+                                    : (root.is-catalog-search-results && root.search-results-filter == "all"
+                                        ? "results"
                                         : "videos")));
+                        property <string> single-noun: root.current-catalog-category() == "Performers"
+                            ? "performer"
+                            : (root.current-catalog-category() == "Studios"
+                                ? "studio"
+                                : (root.current-catalog-category() == "Categories"
+                                    ? "category"
+                                    : (root.is-catalog-search-results && root.search-results-filter == "all"
+                                        ? "result"
+                                        : "video")));
                         title: root.is-catalog-search-results
                             ? "Search"
                             : (root.catalog-category-drilldown
@@ -3767,21 +3842,21 @@ export component MainWindow inherits Window {
                         metadata: (root.is-loading-catalog
                                 || (root.is-catalog-search-results && root.search-error-message != ""))
                             ? ""
-                            : (root.catalog-total-count > root.catalog-items.length
-                                ? (root.catalog-items.length
-                                    + (root.is-catalog-search-results ? " loaded of " : " of ")
-                                    + root.catalog-total-count + " " + self.count-noun)
-                                : (root.catalog-items.length == 1
-                                    ? ("1 " + (self.count-noun == "videos"
-                                        ? "video"
-                                        : (self.count-noun == "performers"
-                                            ? "performer"
-                                            : (self.count-noun == "studios"
-                                                ? "studio"
-                                                : (self.count-noun == "categories"
-                                                    ? "category"
-                                                    : "result")))))
-                                    : (root.catalog-items.length + " " + self.count-noun)));
+                            : (root.is-catalog-search-results
+                                ? (root.search-results-filter == "all"
+                                    ? (root.search-all-total-count > root.search-results-total
+                                        ? (root.search-results-total + " loaded of " + root.search-all-total-count + " results")
+                                        : (root.search-all-total-count == 1 ? "1 result" : root.search-all-total-count + " results"))
+                                    : (root.current-filter-total() > root.catalog-items.length
+                                        ? (root.catalog-items.length + " loaded of " + root.current-filter-total() + " " + self.count-noun)
+                                        : (root.catalog-items.length == 1
+                                            ? ("1 " + self.single-noun)
+                                            : (root.catalog-items.length + " " + self.count-noun))))
+                                : (root.catalog-total-count > root.catalog-items.length
+                                    ? (root.catalog-items.length + " of " + root.catalog-total-count + " " + self.count-noun)
+                                    : (root.catalog-items.length == 1
+                                        ? ("1 " + self.single-noun)
+                                        : (root.catalog-items.length + " " + self.count-noun))));
                     }
 
                     if root.catalog-category-drilldown : TvSecondaryButton {
@@ -4346,37 +4421,39 @@ export component MainWindow inherits Window {
                     }
 
                     TvChoiceChip {
-                        text: "All  " + root.search-results-total + (root.search-all-total-count > root.search-results-total ? "+" : "");
+                        text: "All  " + root.search-all-total-count + (root.search-channels-loading ? "+" : "");
                         selected: root.search-results-filter == "all";
                         clicked => { root.filter-search-results("all"); }
                     }
 
-                    if root.search-movie-count > 0 : TvChoiceChip {
-                        text: "Movies  " + root.search-movie-count + (root.search-movie-total > root.search-movie-count ? "+" : "");
+                    if root.search-movie-total > 0 : TvChoiceChip {
+                        text: "Movies  " + root.search-movie-total;
                         selected: root.search-results-filter == "movies";
                         clicked => { root.filter-search-results("movies"); }
                     }
 
-                    if root.search-performer-count > 0 : TvChoiceChip {
-                        text: "Performers  " + root.search-performer-count + (root.search-performer-total > root.search-performer-count ? "+" : "");
+                    if root.search-performer-total > 0 : TvChoiceChip {
+                        text: "Performers  " + root.search-performer-total;
                         selected: root.search-results-filter == "performers";
                         clicked => { root.filter-search-results("performers"); }
                     }
 
-                    if root.search-studio-count > 0 : TvChoiceChip {
-                        text: "Studios  " + root.search-studio-count + (root.search-studio-total > root.search-studio-count ? "+" : "");
+                    if root.search-studio-total > 0 : TvChoiceChip {
+                        text: "Studios  " + root.search-studio-total;
                         selected: root.search-results-filter == "studios";
                         clicked => { root.filter-search-results("studios"); }
                     }
 
-                    if root.search-tag-count > 0 : TvChoiceChip {
-                        text: "Tags  " + root.search-tag-count + (root.search-tag-total > root.search-tag-count ? "+" : "");
+                    if root.search-tag-total > 0 : TvChoiceChip {
+                        text: "Tags  " + root.search-tag-total;
                         selected: root.search-results-filter == "tags";
                         clicked => { root.filter-search-results("tags"); }
                     }
 
-                    if root.search-channel-count > 0 : TvChoiceChip {
-                        text: "Channel videos  " + root.search-channel-count + (root.search-channel-total > root.search-channel-count ? "+" : "");
+                    if root.search-channel-total > 0 || root.search-channels-loading : TvChoiceChip {
+                        text: root.search-channels-loading
+                            ? (root.search-channel-total > 0 ? ("Channel videos  " + root.search-channel-total + "+") : "Channel videos  …")
+                            : ("Channel videos  " + root.search-channel-total);
                         selected: root.search-results-filter == "channels";
                         clicked => { root.filter-search-results("channels"); }
                     }
@@ -4582,7 +4659,7 @@ export component MainWindow inherits Window {
                     changed content-height => {
                         if root.catalog-anchor-pending && self.content-height > 0px {
                             let row-height = HubGrid.catalog-row-height(root.catalog-content-width,
-                                root.catalog-column-count, root.active-category);
+                                root.catalog-column-count, root.current-catalog-category());
                             let row-index = floor(root.catalog-anchor-index / root.catalog-column-count);
                             let restored-y = root.catalog-anchor-screen-y - row-index * row-height;
                             root.catalog-scroll-y = min(0px, max(self.visible-height - self.content-height, restored-y));
@@ -4593,7 +4670,7 @@ export component MainWindow inherits Window {
                     changed content-y => {
                         if root.catalog-items.length > 0 {
                             let row-height = HubGrid.catalog-row-height(root.catalog-content-width,
-                                root.catalog-column-count, root.active-category);
+                                root.catalog-column-count, root.current-catalog-category());
                             let visible-row = min(root.catalog-rows.length - 1,
                                 max(0, floor(-self.content-y / row-height)));
                             root.catalog-anchor-index = min(root.catalog-items.length - 1,
@@ -4602,7 +4679,7 @@ export component MainWindow inherits Window {
                         }
                         // Prefetch roughly two rows before the end of the list.
                         let prefetch = 2 * HubGrid.catalog-row-height(root.catalog-content-width,
-                            root.catalog-column-count, root.active-category);
+                            root.catalog-column-count, root.current-catalog-category());
                         if root.catalog-has-more
                             && !root.is-loading-more
                             && !root.is-loading-catalog
@@ -4652,6 +4729,8 @@ export component MainWindow inherits Window {
                     tag-total: root.search-tag-total;
                     channel-count: root.search-channel-count;
                     channel-total: root.search-channel-total;
+                    channel-loading: root.search-channels-loading;
+                    channel-error: root.search-channel-error;
                     avail-width: root.catalog-content-width;
                     zoom: root.card-zoom;
                     focused-index: root.focused-card-index;
