@@ -120,10 +120,18 @@ impl BufferProfile {
 
     pub fn description(&self) -> &'static str {
         match self {
-            Self::FastStart => "Quick startup with 48 MB buffer & 15s readahead. Best for rapid browsing on high-speed connections.",
-            Self::Standard => "Balanced 160 MB buffer & 45s readahead (3.5s resume wait). Smooth 1080p and general 4K streaming.",
-            Self::Large => "Deep 384 MB buffer & 90s readahead with 5.5s resume threshold. Resilient against bandwidth dips and 4K seek stalls.",
-            Self::LowMemory => "Minimal 24 MB RAM footprint & 8s readahead. Conserves memory on low-spec systems.",
+            Self::FastStart => {
+                "Quick startup with 48 MB buffer & 15s readahead. Best for rapid browsing on high-speed connections."
+            }
+            Self::Standard => {
+                "Balanced 160 MB buffer & 45s readahead (3.5s resume wait). Smooth 1080p and general 4K streaming."
+            }
+            Self::Large => {
+                "Deep 384 MB buffer & 90s readahead with 5.5s resume threshold. Resilient against bandwidth dips and 4K seek stalls."
+            }
+            Self::LowMemory => {
+                "Minimal 24 MB RAM footprint & 8s readahead. Conserves memory on low-spec systems."
+            }
         }
     }
 
@@ -340,7 +348,10 @@ impl PlaybackStats {
         if let Some(bitrate) = self.video_bitrate {
             if bitrate > 0.0 {
                 let mbps = bitrate / 1_000_000.0;
-                lines.push(format!("Video Bitrate: {mbps:.2} Mbit/s ({:.0} kbit/s)", bitrate / 1000.0));
+                lines.push(format!(
+                    "Video Bitrate: {mbps:.2} Mbit/s ({:.0} kbit/s)",
+                    bitrate / 1000.0
+                ));
             } else {
                 lines.push("Video Bitrate: 0 kbit/s (Paused)".to_string());
             }
@@ -352,7 +363,10 @@ impl PlaybackStats {
         lines.push(format!("Dropped Frames: {dropped}"));
 
         if self.stall_count > 0 {
-            let last_diag = self.last_stall_diagnosis.as_deref().unwrap_or("Buffer starved");
+            let last_diag = self
+                .last_stall_diagnosis
+                .as_deref()
+                .unwrap_or("Buffer starved");
             lines.push(format!(
                 "Stalls: {} ({:.1} s total) - {last_diag}",
                 self.stall_count, self.total_stalled_duration_secs
@@ -457,8 +471,14 @@ impl Player {
             ("cache-pause-initial", "no"),
             ("cache-pause-wait", initial_profile.cache_pause_wait()),
             ("demuxer-max-bytes", initial_profile.demuxer_max_bytes()),
-            ("demuxer-max-back-bytes", initial_profile.demuxer_max_back_bytes()),
-            ("demuxer-readahead-secs", initial_profile.demuxer_readahead_secs()),
+            (
+                "demuxer-max-back-bytes",
+                initial_profile.demuxer_max_back_bytes(),
+            ),
+            (
+                "demuxer-readahead-secs",
+                initial_profile.demuxer_readahead_secs(),
+            ),
             ("cache-secs", initial_profile.cache_secs()),
             ("force-seekable", "yes"),
             ("vd-lavc-threads", "0"),
@@ -822,11 +842,16 @@ impl Player {
     pub fn effective_buffer_params(&self) -> (String, String, String, String, String) {
         let active = self.buffer_profile();
         (
-            self.get_string("demuxer-max-bytes").unwrap_or_else(|| active.demuxer_max_bytes().into()),
-            self.get_string("demuxer-max-back-bytes").unwrap_or_else(|| active.demuxer_max_back_bytes().into()),
-            self.get_string("demuxer-readahead-secs").unwrap_or_else(|| active.demuxer_readahead_secs().into()),
-            self.get_string("cache-secs").unwrap_or_else(|| active.cache_secs().into()),
-            self.get_string("cache-pause-wait").unwrap_or_else(|| active.cache_pause_wait().into()),
+            self.get_string("demuxer-max-bytes")
+                .unwrap_or_else(|| active.demuxer_max_bytes().into()),
+            self.get_string("demuxer-max-back-bytes")
+                .unwrap_or_else(|| active.demuxer_max_back_bytes().into()),
+            self.get_string("demuxer-readahead-secs")
+                .unwrap_or_else(|| active.demuxer_readahead_secs().into()),
+            self.get_string("cache-secs")
+                .unwrap_or_else(|| active.cache_secs().into()),
+            self.get_string("cache-pause-wait")
+                .unwrap_or_else(|| active.cache_pause_wait().into()),
         )
     }
 
@@ -934,9 +959,13 @@ impl Player {
 
         let cache_forward_bytes = self.get_u64("demuxer-cache-state/fw-bytes");
         let cache_total_bytes = self.get_u64("demuxer-cache-state/total-bytes");
-        let raw_input_rate_bps = self.get_f64("cache-speed")
+        let raw_input_rate_bps = self
+            .get_f64("cache-speed")
             .filter(|&r| r > 0.0)
-            .or_else(|| self.get_f64("demuxer-cache-state/raw-input-rate").filter(|&r| r > 0.0))
+            .or_else(|| {
+                self.get_f64("demuxer-cache-state/raw-input-rate")
+                    .filter(|&r| r > 0.0)
+            })
             .or_else(|| {
                 if let Some(total) = cache_total_bytes {
                     let now = Instant::now();
@@ -1662,11 +1691,20 @@ mod tests {
         assert_eq!(low.cache_secs(), "8");
         assert_eq!(low.cache_pause_wait(), "1.5");
 
-        assert_eq!(BufferProfile::from_id("fast_start"), Some(BufferProfile::FastStart));
-        assert_eq!(BufferProfile::from_id("standard"), Some(BufferProfile::Standard));
+        assert_eq!(
+            BufferProfile::from_id("fast_start"),
+            Some(BufferProfile::FastStart)
+        );
+        assert_eq!(
+            BufferProfile::from_id("standard"),
+            Some(BufferProfile::Standard)
+        );
         assert_eq!(BufferProfile::from_id("large"), Some(BufferProfile::Large));
         assert_eq!(BufferProfile::from_id("4k"), Some(BufferProfile::Large));
-        assert_eq!(BufferProfile::from_id("low_memory"), Some(BufferProfile::LowMemory));
+        assert_eq!(
+            BufferProfile::from_id("low_memory"),
+            Some(BufferProfile::LowMemory)
+        );
         assert_eq!(BufferProfile::from_id("unknown"), None);
     }
 

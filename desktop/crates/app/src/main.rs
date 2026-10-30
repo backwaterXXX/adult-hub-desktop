@@ -125,11 +125,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let geometry_store = forced_size.is_none().then(|| local_store.clone());
     let geometry_applied_successfully = Arc::new(AtomicBool::new(forced_size.is_some()));
-    let _window_event_filter = install_window_event_filter(
-        &ui,
-        geometry_store,
-        geometry_applied_successfully.clone(),
-    );
+    let _window_event_filter =
+        install_window_event_filter(&ui, geometry_store, geometry_applied_successfully.clone());
     set_window_icon(&ui);
     ui.set_licenses_text(LICENSES_TEXT.into());
     let pkg_ver = env!("CARGO_PKG_VERSION");
@@ -141,7 +138,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let build_id = env!("ADULT_HUB_BUILD_ID");
     let build_date = env!("ADULT_HUB_BUILD_DATE");
-    let ver_details = format!("v{pkg_ver} ({commit}{dirty}) · build: {build_id} · Built {build_date}");
+    let ver_details =
+        format!("v{pkg_ver} ({commit}{dirty}) · build: {build_id} · Built {build_date}");
     ui.set_app_version(pkg_ver.into());
     ui.set_app_version_details(ver_details.into());
     ui.set_build_id(build_id.into());
@@ -3119,7 +3117,10 @@ mod tests {
         };
         // 1. Initial attempt with no monitors queryable must defer (return None)
         let first_try = calculate_restored_geometry(saved, &[], 1.75, false);
-        assert_eq!(first_try, None, "restore must defer when monitors are queryable: false");
+        assert_eq!(
+            first_try, None,
+            "restore must defer when monitors are queryable: false"
+        );
 
         // 2. Subsequent attempt when monitor becomes available must succeed
         let monitor = MonitorRect {
@@ -3129,9 +3130,12 @@ mod tests {
             height: 2160,
         };
         let second_try = calculate_restored_geometry(saved, &[monitor], 1.75, false);
-        assert!(second_try.is_some(), "restore must succeed when monitor info arrives");
+        assert!(
+            second_try.is_some(),
+            "restore must succeed when monitor info arrives"
+        );
         let (rect, logical_w, logical_h) = second_try.unwrap();
-        assert_eq!(rect.maximized, true);
+        assert!(rect.maximized);
         assert_eq!(rect.x, 120);
         assert_eq!(rect.y, 80);
         assert_eq!(rect.width, 2065);
@@ -3152,9 +3156,12 @@ mod tests {
         // When retries expire, allow_fallback is set to true.
         // It must return a safe clamped fallback rectangle preserving maximization.
         let fallback_result = calculate_restored_geometry(saved, &[], 1.25, true);
-        assert!(fallback_result.is_some(), "fallback must return a valid geometry");
+        assert!(
+            fallback_result.is_some(),
+            "fallback must return a valid geometry"
+        );
         let (rect, logical_w, logical_h) = fallback_result.unwrap();
-        assert_eq!(rect.maximized, true, "saved maximization flag must be preserved");
+        assert!(rect.maximized, "saved maximization flag must be preserved");
         assert_eq!(rect.width, 1180);
         assert_eq!(rect.height, 760);
         assert_eq!(logical_w.round() as u32, (1180.0 / 1.25_f64).round() as u32);
@@ -3206,19 +3213,35 @@ mod tests {
         };
 
         // Case A: normal restore with live monitor
-        let (applied_max, _, _) = calculate_restored_geometry(normal_maximized, &[monitor], 1.0, false).unwrap();
-        assert!(applied_max.maximized, "maximized flag must be preserved with monitor");
+        let (applied_max, _, _) =
+            calculate_restored_geometry(normal_maximized, &[monitor], 1.0, false).unwrap();
+        assert!(
+            applied_max.maximized,
+            "maximized flag must be preserved with monitor"
+        );
         assert_eq!(applied_max.width, 1400);
 
-        let (applied_unmax, _, _) = calculate_restored_geometry(normal_unmaximized, &[monitor], 1.0, false).unwrap();
-        assert!(!applied_unmax.maximized, "unmaximized flag must be preserved with monitor");
+        let (applied_unmax, _, _) =
+            calculate_restored_geometry(normal_unmaximized, &[monitor], 1.0, false).unwrap();
+        assert!(
+            !applied_unmax.maximized,
+            "unmaximized flag must be preserved with monitor"
+        );
 
         // Case B: fallback restore with missing monitor
-        let (fallback_max, _, _) = calculate_restored_geometry(normal_maximized, &[], 1.0, true).unwrap();
-        assert!(fallback_max.maximized, "maximized flag must be preserved in fallback");
+        let (fallback_max, _, _) =
+            calculate_restored_geometry(normal_maximized, &[], 1.0, true).unwrap();
+        assert!(
+            fallback_max.maximized,
+            "maximized flag must be preserved in fallback"
+        );
 
-        let (fallback_unmax, _, _) = calculate_restored_geometry(normal_unmaximized, &[], 1.0, true).unwrap();
-        assert!(!fallback_unmax.maximized, "unmaximized flag must be preserved in fallback");
+        let (fallback_unmax, _, _) =
+            calculate_restored_geometry(normal_unmaximized, &[], 1.0, true).unwrap();
+        assert!(
+            !fallback_unmax.maximized,
+            "unmaximized flag must be preserved in fallback"
+        );
     }
 
     #[test]
@@ -3283,7 +3306,9 @@ mod tests {
         let compute_cols_and_width = |container_width: f32| -> (usize, f32) {
             let gap = 14.0_f32;
             let target_width = 200.0_f32;
-            let cols = ((container_width + gap) / (target_width + gap)).floor().max(1.0) as usize;
+            let cols = ((container_width + gap) / (target_width + gap))
+                .floor()
+                .max(1.0) as usize;
             let raw_card_width = (container_width - ((cols - 1) as f32 * gap)) / cols as f32;
             let card_width = raw_card_width.clamp(180.0, 220.0);
             (cols, card_width)
@@ -3291,31 +3316,38 @@ mod tests {
 
         // Window ~1180px: content width ~910px (after 220px nav sidebar + 48px padding)
         let (cols_1180, width_1180) = compute_cols_and_width(910.0);
-        assert_eq!(cols_1180, 4, "1180x790 window should show exactly 4 columns in similar titles, not 6");
-        assert!(width_1180 >= 180.0 && width_1180 <= 220.0, "card width must be between 180 and 220px: {width_1180}");
+        assert_eq!(
+            cols_1180, 4,
+            "1180x790 window should show exactly 4 columns in similar titles, not 6"
+        );
+        assert!(
+            (180.0..=220.0).contains(&width_1180),
+            "card width must be between 180 and 220px: {width_1180}"
+        );
 
         // Maximized 1920px window: content width ~1650px
         let (cols_1920, width_1920) = compute_cols_and_width(1650.0);
         assert_eq!(cols_1920, 7);
-        assert!(width_1920 >= 180.0 && width_1920 <= 220.0);
+        assert!((180.0..=220.0).contains(&width_1920));
 
         // Narrow window 700px: content width ~450px
         let (cols_narrow, width_narrow) = compute_cols_and_width(450.0);
         assert_eq!(cols_narrow, 2);
-        assert!(width_narrow >= 180.0 && width_narrow <= 220.0);
+        assert!((180.0..=220.0).contains(&width_narrow));
     }
 
     #[test]
     fn tooltip_positioning_and_decoupled_width() {
-        let compute_tooltip_x = |card_index: i32, total_cards: i32, card_width: f32, tooltip_width: f32| -> f32 {
-            if card_index == 0 {
-                0.0
-            } else if total_cards > 0 && card_index == total_cards - 1 {
-                card_width - tooltip_width
-            } else {
-                (card_width - tooltip_width) / 2.0
-            }
-        };
+        let compute_tooltip_x =
+            |card_index: i32, total_cards: i32, card_width: f32, tooltip_width: f32| -> f32 {
+                if card_index == 0 {
+                    0.0
+                } else if total_cards > 0 && card_index == total_cards - 1 {
+                    card_width - tooltip_width
+                } else {
+                    (card_width - tooltip_width) / 2.0
+                }
+            };
 
         let card_w = 217.0_f32;
         let tooltip_w = 320.0_f32; // preferred decoupled width (280-360px)
@@ -3324,9 +3356,15 @@ mod tests {
         assert_eq!(compute_tooltip_x(0, 4, card_w, tooltip_w), 0.0);
 
         // Last card: aligns right edge with card
-        assert_eq!(compute_tooltip_x(3, 4, card_w, tooltip_w), card_w - tooltip_w);
+        assert_eq!(
+            compute_tooltip_x(3, 4, card_w, tooltip_w),
+            card_w - tooltip_w
+        );
 
         // Middle card: centered over card
-        assert_eq!(compute_tooltip_x(1, 4, card_w, tooltip_w), (card_w - tooltip_w) / 2.0);
+        assert_eq!(
+            compute_tooltip_x(1, 4, card_w, tooltip_w),
+            (card_w - tooltip_w) / 2.0
+        );
     }
 }

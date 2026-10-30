@@ -39,7 +39,10 @@ pub fn apply_and_persist_buffer_profile(
         }
     }
     if let Err(e) = local_store.set_setting("buffer_profile", profile.id()) {
-        crate::diagnostics::GLOBAL_LOG.w("Settings", &format!("Could not persist buffer profile: {e}"));
+        crate::diagnostics::GLOBAL_LOG.w(
+            "Settings",
+            &format!("Could not persist buffer profile: {e}"),
+        );
     }
     ui.set_buffer_profile(profile.id().into());
     ui.set_buffer_profile_label(format!("Buffer: {}", profile.name()).into());
@@ -58,10 +61,7 @@ pub fn apply_and_persist_buffer_profile(
     Ok(())
 }
 
-pub fn select_random_candidate(
-    ctx: &AppContext,
-    current_id: Option<&str>,
-) -> Option<TvItem> {
+pub fn select_random_candidate(ctx: &AppContext, current_id: Option<&str>) -> Option<TvItem> {
     let session = ctx.credential_store.get().ok().flatten();
     let chosen_item: Option<TvItem> = if let Some(session) = &session {
         let parent_id = ctx
@@ -104,8 +104,7 @@ pub fn select_random_candidate(
                     page.items
                 };
                 let filtered = filter_catalog_items(items, &ctx.local_store);
-                ctx.shuffle_engine
-                    .select_candidate(&filtered, current_id)
+                ctx.shuffle_engine.select_candidate(&filtered, current_id)
             }
             Err(err) => {
                 crate::diagnostics::GLOBAL_LOG
@@ -120,8 +119,7 @@ pub fn select_random_candidate(
     chosen_item.or_else(|| {
         let catalog = ctx.cached_catalog.lock().unwrap().clone();
         let filtered = filter_catalog_items(catalog, &ctx.local_store);
-        ctx.shuffle_engine
-            .select_candidate(&filtered, current_id)
+        ctx.shuffle_engine.select_candidate(&filtered, current_id)
     })
 }
 
@@ -135,15 +133,26 @@ pub fn trigger_movie_switch(ui: &MainWindow, ctx: &AppContext, is_random: bool) 
     let request_id = ctx.session_ctrl.next_request_id();
 
     // 2. Checkpoint outgoing item's progress BEFORE touching playback state
-    let pos = ctx.player.as_ref().and_then(|p| p.position()).unwrap_or(0.0).max(0.0);
-    let dur = ctx.player.as_ref().and_then(|p| p.duration()).unwrap_or(0.0).max(0.0);
+    let pos = ctx
+        .player
+        .as_ref()
+        .and_then(|p| p.position())
+        .unwrap_or(0.0)
+        .max(0.0);
+    let dur = ctx
+        .player
+        .as_ref()
+        .and_then(|p| p.duration())
+        .unwrap_or(0.0)
+        .max(0.0);
     let pos_ms = (pos * 1000.0) as u64;
     let dur_ms = (dur * 1000.0) as u64;
 
     let outgoing = ctx.current_playing_item.lock().unwrap().take();
     if let Some(prev) = outgoing.as_ref() {
         if pos_ms >= 5000 {
-            ctx.session_ctrl.checkpoint_progress(prev, pos_ms, dur_ms, false);
+            ctx.session_ctrl
+                .checkpoint_progress(prev, pos_ms, dur_ms, false);
         }
         ctx.reporter.stop_session(pos_ms);
     }
@@ -183,9 +192,7 @@ pub fn trigger_movie_switch(ui: &MainWindow, ctx: &AppContext, is_random: bool) 
     ui.set_playback_ended_visible(false);
     ui.set_autoplay_countdown_sec(0);
     if ui.get_active_screen() != "player" {
-        ctx.push_nav_destination(
-            crate::handlers::browsing::current_nav_destination(ui, ctx),
-        );
+        ctx.push_nav_destination(crate::handlers::browsing::current_nav_destination(ui, ctx));
     }
     ui.set_active_screen("player".into());
     ui.set_status(if is_random {
@@ -671,7 +678,9 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
                 show_error(&ui, format!("Unknown buffer profile: {id}"));
                 return;
             };
-            if let Err(err) = apply_and_persist_buffer_profile(&ui, player.as_deref(), &local_store, profile) {
+            if let Err(err) =
+                apply_and_persist_buffer_profile(&ui, player.as_deref(), &local_store, profile)
+            {
                 show_error(&ui, err);
             }
         });
@@ -692,7 +701,9 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
                 .position(|p| *p == current)
                 .unwrap_or(0);
             let next_profile = BufferProfile::ALL[(current_idx + 1) % BufferProfile::ALL.len()];
-            if let Err(err) = apply_and_persist_buffer_profile(&ui, player.as_deref(), &local_store, next_profile) {
+            if let Err(err) =
+                apply_and_persist_buffer_profile(&ui, player.as_deref(), &local_store, next_profile)
+            {
                 show_error(&ui, err);
             }
         });
@@ -1014,7 +1025,9 @@ pub fn install_fullscreen(ui: &MainWindow) {
     let saved_normal_phys = Rc::new(Cell::new(Option::<(u32, u32)>::None));
     let saved_normal_pos = Rc::new(Cell::new(Option::<(i32, i32)>::None));
     #[cfg(target_os = "windows")]
-    let saved_win32_placement = Rc::new(Cell::new(Option::<windows_sys::Win32::UI::WindowsAndMessaging::WINDOWPLACEMENT>::None));
+    let saved_win32_placement = Rc::new(Cell::new(
+        Option::<windows_sys::Win32::UI::WindowsAndMessaging::WINDOWPLACEMENT>::None,
+    ));
 
     let toggle_fullscreen = {
         let ui_weak = ui.as_weak();
@@ -1247,7 +1260,7 @@ pub fn install_fullscreen(ui: &MainWindow) {
                             let _ = window.request_inner_size(winit::dpi::PhysicalSize::new(pw, ph));
                         }
                         if let Some((x, y)) = saved_normal_pos.get() {
-                            let _ = window.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
+                            window.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
                             ui.window().set_position(slint::WindowPosition::Physical(
                                 slint::PhysicalPosition::new(x, y),
                             ));

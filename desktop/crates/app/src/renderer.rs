@@ -97,9 +97,7 @@ impl<'a> OpenGlStateGuard<'a> {
             pixel_unpack_buffer: unsafe {
                 gl.get_parameter_buffer(glow::PIXEL_UNPACK_BUFFER_BINDING)
             },
-            pixel_pack_buffer: unsafe {
-                gl.get_parameter_buffer(glow::PIXEL_PACK_BUFFER_BINDING)
-            },
+            pixel_pack_buffer: unsafe { gl.get_parameter_buffer(glow::PIXEL_PACK_BUFFER_BINDING) },
             scissor_test: unsafe { gl.is_enabled(glow::SCISSOR_TEST) },
             scissor_box,
             blend: unsafe { gl.is_enabled(glow::BLEND) },
@@ -194,7 +192,8 @@ impl<'a> OpenGlStateGuard<'a> {
 impl Drop for OpenGlStateGuard<'_> {
     fn drop(&mut self) {
         unsafe {
-            self.gl.bind_framebuffer(glow::FRAMEBUFFER, self.framebuffer);
+            self.gl
+                .bind_framebuffer(glow::FRAMEBUFFER, self.framebuffer);
             self.gl.viewport(
                 self.viewport[0],
                 self.viewport[1],
@@ -204,21 +203,32 @@ impl Drop for OpenGlStateGuard<'_> {
             self.gl.use_program(self.program);
             self.gl.bind_vertex_array(self.vertex_array);
             self.gl.bind_buffer(glow::ARRAY_BUFFER, self.array_buffer);
-            self.gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, self.element_array_buffer);
-            self.gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, self.pixel_unpack_buffer);
-            self.gl.bind_buffer(glow::PIXEL_PACK_BUFFER, self.pixel_pack_buffer);
+            self.gl
+                .bind_buffer(glow::ELEMENT_ARRAY_BUFFER, self.element_array_buffer);
+            self.gl
+                .bind_buffer(glow::PIXEL_UNPACK_BUFFER, self.pixel_unpack_buffer);
+            self.gl
+                .bind_buffer(glow::PIXEL_PACK_BUFFER, self.pixel_pack_buffer);
             self.gl.active_texture(self.active_texture);
             self.gl.bind_texture(glow::TEXTURE_2D, self.texture_2d);
             self.gl.bind_sampler(0, self.sampler);
 
-            self.gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, self.unpack_alignment);
-            self.gl.pixel_store_i32(glow::PACK_ALIGNMENT, self.pack_alignment);
-            self.gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, self.unpack_row_length);
-            self.gl.pixel_store_i32(glow::PACK_ROW_LENGTH, self.pack_row_length);
-            self.gl.pixel_store_i32(glow::UNPACK_SKIP_PIXELS, self.unpack_skip_pixels);
-            self.gl.pixel_store_i32(glow::UNPACK_SKIP_ROWS, self.unpack_skip_rows);
-            self.gl.pixel_store_i32(glow::PACK_SKIP_PIXELS, self.pack_skip_pixels);
-            self.gl.pixel_store_i32(glow::PACK_SKIP_ROWS, self.pack_skip_rows);
+            self.gl
+                .pixel_store_i32(glow::UNPACK_ALIGNMENT, self.unpack_alignment);
+            self.gl
+                .pixel_store_i32(glow::PACK_ALIGNMENT, self.pack_alignment);
+            self.gl
+                .pixel_store_i32(glow::UNPACK_ROW_LENGTH, self.unpack_row_length);
+            self.gl
+                .pixel_store_i32(glow::PACK_ROW_LENGTH, self.pack_row_length);
+            self.gl
+                .pixel_store_i32(glow::UNPACK_SKIP_PIXELS, self.unpack_skip_pixels);
+            self.gl
+                .pixel_store_i32(glow::UNPACK_SKIP_ROWS, self.unpack_skip_rows);
+            self.gl
+                .pixel_store_i32(glow::PACK_SKIP_PIXELS, self.pack_skip_pixels);
+            self.gl
+                .pixel_store_i32(glow::PACK_SKIP_ROWS, self.pack_skip_rows);
 
             self.gl.color_mask(
                 self.color_writemask[0],
@@ -322,9 +332,18 @@ impl Renderer {
         gl_err: u32,
         state_before: &OpenGlStateGuard<'_>,
     ) {
-        let hwdec_req = self.player.get_string("hwdec").unwrap_or_else(|| "unknown".into());
-        let hwdec_cur = self.player.get_string("hwdec-current").unwrap_or_else(|| "no".into());
-        let pixfmt = self.player.get_string("video-params/pixelformat").unwrap_or_else(|| "unknown".into());
+        let hwdec_req = self
+            .player
+            .get_string("hwdec")
+            .unwrap_or_else(|| "unknown".into());
+        let hwdec_cur = self
+            .player
+            .get_string("hwdec-current")
+            .unwrap_or_else(|| "no".into());
+        let pixfmt = self
+            .player
+            .get_string("video-params/pixelformat")
+            .unwrap_or_else(|| "unknown".into());
         let coded_w = self.player.get_u32("video-params/w").unwrap_or(0);
         let coded_h = self.player.get_u32("video-params/h").unwrap_or(0);
         let disp_w = self.player.get_u32("video-params/dw").unwrap_or(0);
@@ -336,9 +355,18 @@ impl Renderer {
             *last_key = Some(key);
             drop(last_key);
 
-            let mpv_ver = self.player.get_string("mpv-version").unwrap_or_else(|| "unknown".into());
-            let ffmpeg_ver = self.player.get_string("ffmpeg-version").unwrap_or_else(|| "unknown".into());
-            let pbo_id = state_before.pixel_unpack_buffer.map(|b| b.0.get()).unwrap_or(0);
+            let mpv_ver = self
+                .player
+                .get_string("mpv-version")
+                .unwrap_or_else(|| "unknown".into());
+            let ffmpeg_ver = self
+                .player
+                .get_string("ffmpeg-version")
+                .unwrap_or_else(|| "unknown".into());
+            let pbo_id = state_before
+                .pixel_unpack_buffer
+                .map(|b| b.0.get())
+                .unwrap_or(0);
 
             let msg = format!(
                 "Video render diagnostics: mpv='{mpv_ver}' ffmpeg='{ffmpeg_ver}' hwdec_requested='{hwdec_req}' hwdec_active='{hwdec_cur}' pixfmt='{pixfmt}' coded={coded_w}x{coded_h} display={disp_w}x{disp_h} target_fbo={width}x{height} (status=0x{surface_status:04X}) gl_err=0x{gl_err:04X} unpack_align={} unpack_row_len={} unpack_skip_px={} unpack_skip_rows={} pbo=0x{pbo_id:X} active_tex=0x{:04X} scissor_test={}",
@@ -656,9 +684,7 @@ mod tests {
 
     #[test]
     fn test_diagnostics_message_formatting_redacts_credentials() {
-        let msg = format!(
-            "Video render diagnostics: mpv='0.41.0' ffmpeg='N-127313' hwdec_requested='auto-safe' hwdec_active='d3d11va-copy' pixfmt='nv12' coded=404x720 display=404x720 target_fbo=404x720 (status=0x8CD5) gl_err=0x0000 unpack_align=4 unpack_row_len=0 unpack_skip_px=0 unpack_skip_rows=0 pbo=0x0 active_tex=0x84C0 scissor_test=false"
-        );
+        let msg = "Video render diagnostics: mpv='0.41.0' ffmpeg='N-127313' hwdec_requested='auto-safe' hwdec_active='d3d11va-copy' pixfmt='nv12' coded=404x720 display=404x720 target_fbo=404x720 (status=0x8CD5) gl_err=0x0000 unpack_align=4 unpack_row_len=0 unpack_skip_px=0 unpack_skip_rows=0 pbo=0x0 active_tex=0x84C0 scissor_test=false".to_string();
         let redacted = crate::diagnostics::redact(&msg);
         assert!(redacted.contains("d3d11va-copy"));
         assert!(redacted.contains("404x720"));

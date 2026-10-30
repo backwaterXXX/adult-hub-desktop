@@ -942,7 +942,11 @@ impl LocalStore {
             return Err(StorageError::Custom("seekStepSec must be positive".into()));
         }
         let profile = config.buffer_profile.as_str();
-        if profile != "fast_start" && profile != "standard" && profile != "large" && profile != "low_memory" {
+        if profile != "fast_start"
+            && profile != "standard"
+            && profile != "large"
+            && profile != "low_memory"
+        {
             return Err(StorageError::Custom(format!(
                 "Unsupported buffer profile: {}",
                 config.buffer_profile
@@ -1840,12 +1844,18 @@ mod tests {
         // Selected channel persistence
         assert_eq!(store.get_selected_channel().unwrap(), None);
         store.set_selected_channel(Some("THE G BUNKER")).unwrap();
-        assert_eq!(store.get_selected_channel().unwrap(), Some("THE G BUNKER".into()));
+        assert_eq!(
+            store.get_selected_channel().unwrap(),
+            Some("THE G BUNKER".into())
+        );
         // "All Channels" must never be saved as selected single channel
         store.set_selected_channel(Some("All Channels")).unwrap();
         assert_eq!(store.get_selected_channel().unwrap(), None);
         store.set_selected_channel(Some("Channel A")).unwrap();
-        assert_eq!(store.get_selected_channel().unwrap(), Some("Channel A".into()));
+        assert_eq!(
+            store.get_selected_channel().unwrap(),
+            Some("Channel A".into())
+        );
         store.set_selected_channel(None).unwrap();
         assert_eq!(store.get_selected_channel().unwrap(), None);
     }

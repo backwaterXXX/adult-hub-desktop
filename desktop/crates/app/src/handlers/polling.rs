@@ -67,9 +67,7 @@ pub fn classify_stall_cause(
             adult_hub_player::BufferProfile::Large => 384 * 1024 * 1024,
             adult_hub_player::BufferProfile::LowMemory => 24 * 1024 * 1024,
         };
-        if stall_start_fw_bytes >= (max_bytes_limit * 85 / 100)
-            && stall_start_cache_secs < 8.0
-        {
+        if stall_start_fw_bytes >= (max_bytes_limit * 85 / 100) && stall_start_cache_secs < 8.0 {
             StallCause::BufferLimitTooSmall
         } else if let (Some(video_bitrate), Some(start_rate), Some(curr_rate)) = (
             stall_start_video_bitrate.filter(|&v| v > 0.0),

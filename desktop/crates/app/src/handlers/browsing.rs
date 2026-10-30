@@ -2077,8 +2077,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                                         Some(session.server_url.clone()),
                                         Some(session.access_token.clone()),
                                     );
-                                    let eff_res_url =
-                                        resolver_base_url_for(&local_store, &session);
+                                    let eff_res_url = resolver_base_url_for(&local_store, &session);
                                     phash_coord
                                         .update_auth(&eff_res_url, Some(&session.access_token));
 

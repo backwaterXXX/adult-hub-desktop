@@ -850,10 +850,8 @@ fn fetch_image_result(
             };
             if is_new {
                 crate::log_debug(&format!("artwork not found (HTTP 404): {subject}"));
-                crate::diagnostics::GLOBAL_LOG.w(
-                    "Thumbnail",
-                    &format!("{subject}: HTTP 404 not found"),
-                );
+                crate::diagnostics::GLOBAL_LOG
+                    .w("Thumbnail", &format!("{subject}: HTTP 404 not found"));
             }
         } else {
             crate::log_debug(&format!(

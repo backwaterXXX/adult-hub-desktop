@@ -231,7 +231,10 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
         ui.on_hide_current_channel(move || {
             let Some(ui) = weak.upgrade() else { return };
             let channel_id = current_channel_id.lock().unwrap().clone();
-            if channel_id == "main" || channel_id.is_empty() || local_store.hide_channel(&channel_id).is_err() {
+            if channel_id == "main"
+                || channel_id.is_empty()
+                || local_store.hide_channel(&channel_id).is_err()
+            {
                 return;
             }
 

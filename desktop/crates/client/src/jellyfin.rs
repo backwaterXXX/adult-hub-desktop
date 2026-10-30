@@ -66,8 +66,7 @@ pub struct GetItemsQuery<'a> {
     pub fields: Option<&'a str>,
 }
 
-const DEFAULT_ITEM_FIELDS: &str =
-    "ProviderIds,Overview,Genres,Studios,People,MediaSources,ChildCount,Path,IsPlaceHolder,CommunityRating";
+const DEFAULT_ITEM_FIELDS: &str = "ProviderIds,Overview,Genres,Studios,People,MediaSources,ChildCount,Path,IsPlaceHolder,CommunityRating";
 
 impl JellyfinClient {
     pub fn new(device_id: impl Into<String>) -> Self {
@@ -1239,9 +1238,11 @@ mod tests {
             play_method: crate::models::PlayMethod::DirectPlay,
         };
         // Non-UUID ID must return Ok(()) without attempting network connection
-        assert!(client
-            .report_playback_start("http://invalid.local", "token", &start_info)
-            .is_ok());
+        assert!(
+            client
+                .report_playback_start("http://invalid.local", "token", &start_info)
+                .is_ok()
+        );
 
         let progress_info = PlaybackProgressInfo {
             item_id: "telegram:123456".into(),
@@ -1255,9 +1256,11 @@ mod tests {
             playback_order: "Default".into(),
             play_method: crate::models::PlayMethod::DirectPlay,
         };
-        assert!(client
-            .report_playback_progress("http://invalid.local", "token", &progress_info)
-            .is_ok());
+        assert!(
+            client
+                .report_playback_progress("http://invalid.local", "token", &progress_info)
+                .is_ok()
+        );
 
         let stop_info = PlaybackStopInfo {
             item_id: "telegram:123456".into(),
@@ -1266,9 +1269,11 @@ mod tests {
             play_session_id: None,
             failed: false,
         };
-        assert!(client
-            .report_playback_stopped("http://invalid.local", "token", &stop_info)
-            .is_ok());
+        assert!(
+            client
+                .report_playback_stopped("http://invalid.local", "token", &stop_info)
+                .is_ok()
+        );
     }
 
     #[test]

@@ -645,16 +645,24 @@ pub fn start_item_playback_with_resume_ctx(
         std::thread::spawn(move || {
             let resolver_url = ctx_variants.get_resolver_url();
             let Some(base_url) = resolver_url else { return };
-            if base_url.trim().is_empty() { return };
+            if base_url.trim().is_empty() {
+                return;
+            };
 
-            match ctx_variants.resolver.get_video_variants(&base_url, &vid_ref) {
+            match ctx_variants
+                .resolver
+                .get_video_variants(&base_url, &vid_ref)
+            {
                 Ok(response) => {
                     let _ = slint::invoke_from_event_loop(move || {
-                        let Some(ui) = weak_ui_variants.upgrade() else { return };
+                        let Some(ui) = weak_ui_variants.upgrade() else {
+                            return;
+                        };
                         if !ctx_variants.session_ctrl.is_request_current(request_id) {
                             return;
                         }
-                        *ctx_variants.current_video_variants.lock().unwrap() = response.variants.clone();
+                        *ctx_variants.current_video_variants.lock().unwrap() =
+                            response.variants.clone();
                         let active_id = ctx_variants.active_quality_id.lock().unwrap().clone();
 
                         if response.has_alternatives && response.variants.len() > 1 {
@@ -692,7 +700,9 @@ pub fn start_item_playback_with_resume_ctx(
                         &format!("Could not fetch video variants for {vid_ref}: {err}"),
                     );
                     let _ = slint::invoke_from_event_loop(move || {
-                        let Some(ui) = weak_ui_variants.upgrade() else { return };
+                        let Some(ui) = weak_ui_variants.upgrade() else {
+                            return;
+                        };
                         if !ctx_variants.session_ctrl.is_request_current(request_id) {
                             return;
                         }
@@ -1032,7 +1042,11 @@ pub fn format_variant_options(
             let has_duplicate = height_counts.get(&v.height).copied().unwrap_or(0) > 1;
             let label = v.display_label(has_duplicate);
             let res = v.resolution_label();
-            let codec_norm = v.codec.as_deref().map(normalize_codec_name).unwrap_or_default();
+            let codec_norm = v
+                .codec
+                .as_deref()
+                .map(normalize_codec_name)
+                .unwrap_or_default();
             let size_text = v
                 .file_size
                 .map(adult_hub_client::format_media_size)
@@ -1058,11 +1072,7 @@ pub fn update_slint_quality_options(ui: &MainWindow, options: &[crate::VideoQual
     ui.set_player_quality_options(model.into());
 }
 
-pub fn switch_video_quality(
-    ui: &MainWindow,
-    ctx: &AppContext,
-    target_variant_id: String,
-) {
+pub fn switch_video_quality(ui: &MainWindow, ctx: &AppContext, target_variant_id: String) {
     let Some(player) = ctx.player.clone() else {
         return;
     };
@@ -1133,8 +1143,10 @@ pub fn switch_video_quality(
                     };
 
                     let path = resolve_media_input(&new_stream_url);
-                    if let Err(e) = player_clone.load_with_start(&path, &headers, Some(target_pos)) {
-                        crate::diagnostics::GLOBAL_LOG.e("Player", &format!("Quality load failed: {e}"));
+                    if let Err(e) = player_clone.load_with_start(&path, &headers, Some(target_pos))
+                    {
+                        crate::diagnostics::GLOBAL_LOG
+                            .e("Player", &format!("Quality load failed: {e}"));
                         // Attempt fallback to previous URL to preserve working source
                         let _ = player_clone.load_with_start(
                             &resolve_media_input(&previous_stream_url),
@@ -1143,7 +1155,9 @@ pub fn switch_video_quality(
                         );
                         let _ = player_clone.set_pause(was_paused);
                         ui.set_is_changing_quality(false);
-                        ui.set_toast_message("Failed to switch quality, keeping current stream".into());
+                        ui.set_toast_message(
+                            "Failed to switch quality, keeping current stream".into(),
+                        );
                         ui.set_toast_type("error".into());
                         ui.set_toast_visible(true);
                         return;
@@ -1173,7 +1187,8 @@ pub fn switch_video_quality(
                 });
             }
             Err(err) => {
-                crate::diagnostics::GLOBAL_LOG.w("Player", &format!("Quality resolution error: {err}"));
+                crate::diagnostics::GLOBAL_LOG
+                    .w("Player", &format!("Quality resolution error: {err}"));
                 let _ = slint::invoke_from_event_loop(move || {
                     let Some(ui) = weak_ui.upgrade() else { return };
                     if !ctx_clone.session_ctrl.is_request_current(quality_req_id) {

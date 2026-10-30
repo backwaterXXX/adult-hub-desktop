@@ -212,11 +212,17 @@ mod tests {
         let parts: Vec<&str> = pkg_ver.split('.').collect();
         assert_eq!(parts.len(), 3, "version must be major.minor.patch semver");
         for part in &parts {
-            assert!(part.chars().all(|c| c.is_ascii_digit()), "version parts must be numeric");
+            assert!(
+                part.chars().all(|c| c.is_ascii_digit()),
+                "version parts must be numeric"
+            );
         }
         let build_id = env!("ADULT_HUB_BUILD_ID");
         let expected_prefix = format!("{pkg_ver}-");
-        assert!(build_id.starts_with(&expected_prefix), "build_id was: {build_id}");
+        assert!(
+            build_id.starts_with(&expected_prefix),
+            "build_id was: {build_id}"
+        );
         assert!(!build_id.is_empty());
         let build_date = env!("ADULT_HUB_BUILD_DATE");
         assert!(!build_date.is_empty());

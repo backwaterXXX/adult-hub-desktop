@@ -1284,13 +1284,13 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
                     }
                 }
                 "channels" => {
-            let cat = ui.get_active_channel_category();
-            if !cat.is_empty() {
-                ui.invoke_select_channel_category(cat);
-            } else {
-                ui.invoke_refresh_channel_categories();
-            }
-        }
+                    let cat = ui.get_active_channel_category();
+                    if !cat.is_empty() {
+                        ui.invoke_select_channel_category(cat);
+                    } else {
+                        ui.invoke_refresh_channel_categories();
+                    }
+                }
                 _ => ui.invoke_refresh_home(),
             }
             ui.set_status("Image cache cleared; reloading artwork…".into());
