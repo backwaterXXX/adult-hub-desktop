@@ -39,6 +39,10 @@ pub fn install_stage9_handlers(ui: &MainWindow, ctx: &AppContext) {
             let new_vol = (cur + delta).clamp(0.0, 100.0);
             if let Some(player) = &player {
                 let _ = player.set_volume(new_vol as f64);
+                if new_vol > 0.0 && (ui.get_muted() || player.is_muted()) {
+                    let _ = player.set_muted(false);
+                    ui.set_muted(false);
+                }
             }
             ui.set_volume(new_vol);
         });

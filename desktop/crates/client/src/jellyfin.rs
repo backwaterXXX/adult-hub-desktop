@@ -61,12 +61,13 @@ pub struct GetItemsQuery<'a> {
     pub is_unplayed: bool,
     pub include_item_types: Option<&'a str>,
     pub person_types: Option<&'a str>,
+    pub image_types: Option<&'a str>,
     /// Overrides the `Fields=` list. `Some("")` omits the parameter entirely
     /// (server defaults only); `None` keeps the full desktop field set.
     pub fields: Option<&'a str>,
 }
 
-const DEFAULT_ITEM_FIELDS: &str = "ProviderIds,Overview,Genres,Studios,People,MediaSources,ChildCount,Path,IsPlaceHolder,CommunityRating";
+const DEFAULT_ITEM_FIELDS: &str = "ProviderIds,Overview,Genres,Studios,People,MediaSources,ChildCount,Path,IsPlaceHolder,CommunityRating,Tags";
 
 impl JellyfinClient {
     pub fn new(device_id: impl Into<String>) -> Self {
@@ -320,7 +321,7 @@ impl JellyfinClient {
     ) -> Result<TvItemsPage> {
         let base = Self::clean_url(base_url);
         let url = format!(
-            "{base}/UserItems/Resume?userId={}&startIndex={start_index}&limit={limit}&enableTotalRecordCount=true&enableImages=true&enableImageTypes=Primary,Thumb,Backdrop&imageTypeLimit=1&fields=ProviderIds,Overview,Genres,Studios,People,MediaSources,ChildCount,Path,IsPlaceHolder",
+            "{base}/UserItems/Resume?userId={}&startIndex={start_index}&limit={limit}&enableTotalRecordCount=true&enableImages=true&enableImageTypes=Primary,Thumb,Backdrop&imageTypeLimit=1&fields=ProviderIds,Overview,Genres,Studios,People,MediaSources,ChildCount,Path,IsPlaceHolder,Tags",
             crate::urlencoding(user_id)
         );
         let res: ItemsResponseDto = Self::check_res(
@@ -352,7 +353,7 @@ impl JellyfinClient {
     ) -> Result<Vec<TvItem>> {
         let base = Self::clean_url(base_url);
         let mut url = format!(
-            "{base}/Users/{}/Items/Latest?Limit={limit}&EnableImages=true&EnableImageTypes=Primary,Thumb,Backdrop&ImageTypeLimit=1&Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources,ChildCount,Path,IsPlaceHolder",
+            "{base}/Users/{}/Items/Latest?Limit={limit}&EnableImages=true&EnableImageTypes=Primary,Thumb,Backdrop&ImageTypeLimit=1&Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources,ChildCount,Path,IsPlaceHolder,Tags",
             crate::urlencoding(user_id)
         );
         if let Some(pid) = parent_id {
@@ -397,6 +398,11 @@ impl JellyfinClient {
                 "&PersonTypes={}",
                 crate::urlencoding(person_types)
             ));
+        }
+        if let Some(image_types) = query.image_types {
+            if !image_types.trim().is_empty() {
+                url.push_str(&format!("&ImageTypes={}", crate::urlencoding(image_types.trim())));
+            }
         }
         if !query.sort_by.is_empty() {
             url.push_str(&format!("&SortBy={}", crate::urlencoding(query.sort_by)));
@@ -517,7 +523,7 @@ impl JellyfinClient {
     ) -> Result<Vec<TvItem>> {
         let base = Self::clean_url(base_url);
         let url = format!(
-            "{base}/Items/{}/Similar?Limit={limit}&Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources,ChildCount,Path,IsPlaceHolder",
+            "{base}/Items/{}/Similar?Limit={limit}&Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources,ChildCount,Path,IsPlaceHolder,Tags",
             crate::urlencoding(item_id)
         );
         let res: ItemsResponseDto = Self::check_res(
@@ -741,7 +747,7 @@ impl JellyfinClient {
     ) -> Result<TvItem> {
         let base = Self::clean_url(base_url);
         let url = format!(
-            "{base}/Users/{}/Items/{}?EnableImages=true&EnableImageTypes=Primary,Thumb,Backdrop&ImageTypeLimit=1&Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources,ChildCount,Path,IsPlaceHolder",
+            "{base}/Users/{}/Items/{}?EnableImages=true&EnableImageTypes=Primary,Thumb,Backdrop&ImageTypeLimit=1&Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources,ChildCount,Path,IsPlaceHolder,Tags",
             crate::urlencoding(user_id),
             crate::urlencoding(item_id)
         );

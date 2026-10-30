@@ -66,6 +66,9 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
         ui.on_open_item_detail(move |id| {
             let Some(ui) = weak.upgrade() else { return };
             let id = id.to_string();
+            if ui.get_active_screen() == "browse" {
+                ui.invoke_cache_catalog_view();
+            }
             // Snapshot the screen being left (player, list, …) before any part
             // of this handler mutates UI state, so Back really returns there.
             ctx_detail.push_nav_destination(crate::handlers::browsing::current_nav_destination(
@@ -373,15 +376,31 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                 })
                 .collect::<Vec<_>>();
 
+            let mut combined_tags: Vec<String> = Vec::new();
+            let mut add_tag = |raw_tag: &str| {
+                let cleaned = raw_tag.trim().trim_start_matches('#').trim();
+                if !cleaned.is_empty()
+                    && !combined_tags
+                        .iter()
+                        .any(|existing: &String| existing.eq_ignore_ascii_case(cleaned))
+                {
+                    combined_tags.push(cleaned.to_string());
+                }
+            };
+
+            for t in &target_item.tags {
+                add_tag(t);
+            }
             let (_, extracted_tags) =
                 crate::catalog::extract_title_tags_and_clean_title(&target_item.title);
-            let mut combined_tags = target_item.tags.clone();
             for t in extracted_tags {
-                if !combined_tags
-                    .iter()
-                    .any(|existing| existing.eq_ignore_ascii_case(&t))
-                {
-                    combined_tags.push(t);
+                add_tag(&t);
+            }
+            if let Some(overview) = target_item.overview.as_deref() {
+                let (_, overview_tags) =
+                    crate::catalog::extract_title_tags_and_clean_title(overview);
+                for t in overview_tags {
+                    add_tag(&t);
                 }
             }
             let tag_items = combined_tags

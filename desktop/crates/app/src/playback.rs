@@ -616,6 +616,9 @@ pub fn start_item_playback_with_resume_ctx(
     player.set_quality_variant(None);
 
     if ui.get_active_screen() != "player" {
+        if ui.get_active_screen() == "browse" {
+            ui.invoke_cache_catalog_view();
+        }
         ctx.push_nav_destination(crate::handlers::browsing::current_nav_destination(ui, ctx));
     }
     ui.set_active_screen("player".into());

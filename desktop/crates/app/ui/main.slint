@@ -293,7 +293,7 @@ component TvPrimaryButton inherits Rectangle {
 
     preferred-width: root.custom-width > 0px ? root.custom-width : (btn-text-1.preferred-width + 32px);
     width: root.custom-width > 0px ? root.custom-width : self.preferred-width;
-    height: max(40px, root.custom-height);
+    height: root.custom-height > 0px ? root.custom-height : 40px;
     border-radius: HubTheme.control-radius;
     background: !root.enabled ? HubTheme.surface-hover : (root.glass
         ? (touch.pressed ? #A3154Ecc : (touch.has-hover ? #D11D66dd : #C2185B88))
@@ -358,7 +358,7 @@ component TvSecondaryButton inherits Rectangle {
 
     preferred-width: root.custom-width > 0px ? root.custom-width : (btn-text-2.preferred-width + 28px);
     width: root.custom-width > 0px ? root.custom-width : self.preferred-width;
-    height: max(40px, root.custom-height);
+    height: root.custom-height > 0px ? root.custom-height : 40px;
     border-radius: HubTheme.control-radius;
     background: !root.enabled ? HubTheme.navigation-background : (root.glass
         ? (root.active ? #C2185B44 : (root.has-focus || touch.has-hover ? #F5F5F51A : #14141488))
@@ -645,6 +645,98 @@ component ActorChip inherits Rectangle {
     }
 }
 
+component DetailGenreChip inherits Rectangle {
+    in property <string> genre;
+    out property <bool> has-focus: focus-scope.has-focus;
+    callback clicked();
+
+    forward-focus: focus-scope;
+    accessible-role: button;
+    accessible-label: "Genre " + root.genre;
+    accessible-action-default => { root.clicked(); }
+
+    height: 26px;
+    border-radius: 13px;
+    background: root.has-focus || touch.has-hover ? #BE185D44 : #231b24;
+    border-width: root.has-focus ? 2px : 1px;
+    border-color: root.has-focus ? HubTheme.focus-ring : (touch.has-hover ? HubTheme.accent-outline : #BE185D55);
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        alignment: center;
+        Text {
+            text: root.genre;
+            color: root.has-focus || touch.has-hover ? #ffffff : #ff9abc;
+            font-size: 11px;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+
+    focus-scope := FocusScope {
+        width: 0px;
+        height: 0px;
+        key-pressed(event) => {
+            if (event.text == Key.Space || event.text == Key.Return) {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+}
+
+component DetailTagChip inherits Rectangle {
+    in property <string> tag;
+    out property <bool> has-focus: focus-scope.has-focus;
+    callback clicked();
+
+    forward-focus: focus-scope;
+    accessible-role: button;
+    accessible-label: "Tag " + root.tag;
+    accessible-action-default => { root.clicked(); }
+
+    height: 26px;
+    border-radius: 13px;
+    background: root.has-focus || touch.has-hover ? #2a2433 : #1c1c24;
+    border-width: root.has-focus ? 2px : 1px;
+    border-color: root.has-focus ? HubTheme.focus-ring : (touch.has-hover ? #b77cff : #b77cff55);
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        alignment: center;
+        Text {
+            text: "#" + root.tag;
+            color: root.has-focus || touch.has-hover ? #ffffff : #c8a2f4;
+            font-size: 11px;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+
+    focus-scope := FocusScope {
+        width: 0px;
+        height: 0px;
+        key-pressed(event) => {
+            if (event.text == Key.Space || event.text == Key.Return) {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+}
+
 component PerformerHeroHeaderDesktop inherits Rectangle {
     in property <string> name;
     in property <string> nationality;
@@ -878,6 +970,7 @@ component TvChoiceChip inherits Rectangle {
     in property <bool> selected: false;
     in property <bool> removable: false;
     in property <bool> enabled: true;
+    in property <length> custom-height: 32px;
     out property <bool> has-focus: focus-scope.has-focus;
     callback clicked();
 
@@ -886,7 +979,7 @@ component TvChoiceChip inherits Rectangle {
     accessible-label: root.text;
     accessible-action-default => { if (root.enabled) { root.clicked(); } }
 
-    height: 36px;
+    height: root.custom-height > 0px ? root.custom-height : 32px;
     border-radius: 8px;
     background: !root.enabled
         ? #FFFFFF05
@@ -3945,25 +4038,26 @@ export component MainWindow inherits Window {
 
                 if root.catalog-filter-categories-available
                     && root.catalog-filters-expanded : ScrollView {
-                    height: 38px;
+                    height: 42px;
                     vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                     horizontal-scrollbar-policy: ScrollBarPolicy.as-needed;
                     mouse-drag-pan-enabled: true;
 
                     HorizontalLayout {
                         spacing: 8px;
-                        height: 34px;
+                        padding-top: 4px;
+                        padding-bottom: 4px;
 
                         TvSecondaryButton {
                             text: "Sort: " + root.catalog-sort-label;
-                            custom-height: 40px;
+                            custom-height: 32px;
                             clicked => { root.update-catalog-filter("sort"); }
                         }
                         TvSecondaryButton {
                             text: root.catalog-sort-label == "Date added"
                                 ? (root.catalog-sort-descending ? "Newest first" : "Oldest first")
                                 : (root.catalog-sort-descending ? "Descending" : "Ascending");
-                            custom-height: 40px;
+                            custom-height: 32px;
                             clicked => { root.update-catalog-filter("direction"); }
                         }
                         TvChoiceChip {
@@ -3983,12 +4077,12 @@ export component MainWindow inherits Window {
                         }
                         TvSecondaryButton {
                             text: "Length: " + root.catalog-duration-label;
-                            custom-height: 40px;
+                            custom-height: 32px;
                             clicked => { root.update-catalog-filter("duration"); }
                         }
                         if root.active-category == "Latest" || root.active-category == "Favorites" : TvSecondaryButton {
                             text: root.catalog-surprise-loading ? "Finding…" : "Surprise me";
-                            custom-height: 40px;
+                            custom-height: 32px;
                             enabled: !root.catalog-surprise-loading;
                             clicked => { root.surprise-me(); }
                         }
@@ -3997,16 +4091,18 @@ export component MainWindow inherits Window {
 
                 if root.catalog-filter-categories-available
                     && root.catalog-filters-expanded : ScrollView {
-                    height: 38px;
+                    height: 42px;
                     vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                     horizontal-scrollbar-policy: ScrollBarPolicy.as-needed;
                     mouse-drag-pan-enabled: true;
 
                     HorizontalLayout {
                         spacing: 8px;
-                        height: 34px;
+                        padding-top: 4px;
+                        padding-bottom: 4px;
                         DarkLineEdit {
                             width: 150px;
+                            height: 32px;
                             text <=> root.catalog-genre-query;
                             placeholder-text: "Genre filter";
                             edited(text) => {
@@ -4028,6 +4124,7 @@ export component MainWindow inherits Window {
                         }
                         DarkLineEdit {
                             width: 150px;
+                            height: 32px;
                             text <=> root.catalog-studio-query;
                             placeholder-text: "Studio filter";
                             edited(text) => {
@@ -4049,6 +4146,7 @@ export component MainWindow inherits Window {
                         }
                         DarkLineEdit {
                             width: 150px;
+                            height: 32px;
                             text <=> root.catalog-performer-query;
                             placeholder-text: "Performer filter";
                             edited(text) => {
@@ -4079,14 +4177,15 @@ export component MainWindow inherits Window {
 
                 // Active filter chips (visible even when filter drawer is collapsed)
                 if !root.is-catalog-search-results && root.catalog-active-filter-count > 0 : ScrollView {
-                    height: 38px;
+                    height: 42px;
                     vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                     horizontal-scrollbar-policy: ScrollBarPolicy.as-needed;
                     mouse-drag-pan-enabled: true;
 
                     HorizontalLayout {
                         spacing: 8px;
-                        height: 32px;
+                        padding-top: 4px;
+                        padding-bottom: 4px;
                         alignment: start;
 
                         Text {
@@ -4095,6 +4194,28 @@ export component MainWindow inherits Window {
                             font-size: 12px;
                             font-weight: 600;
                             vertical-alignment: center;
+                        }
+
+                        if root.active-category == "Performers" && root.performers-photo-only : TvChoiceChip {
+                            text: "With photo only";
+                            selected: true;
+                            removable: true;
+                            clicked => {
+                                root.performers-photo-only = false;
+                                root.is-loading-catalog = true;
+                                root.filter-category("Performers");
+                            }
+                        }
+
+                        if root.active-category == "Performers" && root.performer-letter != "" : TvChoiceChip {
+                            text: "Letter: " + root.performer-letter;
+                            selected: true;
+                            removable: true;
+                            clicked => {
+                                root.performer-letter = "";
+                                root.is-loading-catalog = true;
+                                root.filter-category("Performers");
+                            }
                         }
 
                         if root.catalog-unwatched-only : TvChoiceChip {
@@ -6404,6 +6525,25 @@ export component MainWindow inherits Window {
                                                         let vol = (1.0 - (track-offset / 120.0)) * 100.0;
                                                         root.set-volume(Math.max(0.0, Math.min(100.0, vol)));
                                                     }
+                                                    EventResult.accept
+                                                }
+                                                moved => {
+                                                    if (self.pressed) {
+                                                        root.player-controls-visible = true;
+                                                        player-controls-hide-timer.restart();
+                                                        root.player-volume-flyout-open = true;
+                                                        let track-offset = Math.max(0.0, Math.min(120.0, (self.mouse-y - 7px) / 1px));
+                                                        let vol = (1.0 - (track-offset / 120.0)) * 100.0;
+                                                        root.set-volume(Math.max(0.0, Math.min(100.0, vol)));
+                                                    }
+                                                }
+                                                clicked => {
+                                                    root.player-controls-visible = true;
+                                                    player-controls-hide-timer.restart();
+                                                    root.player-volume-flyout-open = true;
+                                                    let track-offset = Math.max(0.0, Math.min(120.0, (self.mouse-y - 7px) / 1px));
+                                                    let vol = (1.0 - (track-offset / 120.0)) * 100.0;
+                                                    root.set-volume(Math.max(0.0, Math.min(100.0, vol)));
                                                 }
                                                 scroll-event(event) => {
                                                     root.player-controls-visible = true;
@@ -6444,7 +6584,7 @@ export component MainWindow inherits Window {
                                                     }
                                                     root.player-volume-flyout-open = true;
                                                 }
-                                                EventResult.reject
+                                                EventResult.accept
                                             }
                                             clicked => {
                                                 root.player-controls-visible = true;
@@ -7203,7 +7343,7 @@ export component MainWindow inherits Window {
                 }
 
                 // Popover Dismiss Scrim for Bottom Bar Panels & Menus
-                if root.player-more-controls-visible || root.player-quality-panel-open || root.download-panel-open || root.player-volume-flyout-open : TouchArea {
+                if root.player-more-controls-visible || root.player-quality-panel-open || root.download-panel-open : TouchArea {
                     width: 100%;
                     height: 100%;
                     z: 74;
@@ -7218,7 +7358,6 @@ export component MainWindow inherits Window {
                         root.player-more-controls-visible = false;
                         root.player-quality-panel-open = false;
                         root.download-panel-open = false;
-                        root.player-volume-flyout-open = false;
                         root.player-controls-visible = true;
                         player-controls-hide-timer.restart();
                     }
@@ -7832,24 +7971,14 @@ export component MainWindow inherits Window {
                                 spacing-horizontal: HubTheme.space-2;
                                 spacing-vertical: HubTheme.space-2;
                                 Text { text: "Genres:"; color: HubTheme.text-secondary; font-size: 12px; font-weight: 600; vertical-alignment: center; }
-                                for genre in root.detail-genre-items : Rectangle {
-                                    height: 26px;
-                                    border-radius: 13px;
-                                    background: g-touch-fs.has-hover ? #BE185D44 : #231b24;
-                                    border-width: 1px;
-                                    border-color: g-touch-fs.has-hover ? HubTheme.accent-outline : #BE185D55;
-                                    HorizontalLayout {
-                                        padding-left: 10px;
-                                        padding-right: 10px;
-                                        alignment: center;
-                                        Text { text: genre; color: #ff9abc; font-size: 11px; font-weight: 600; vertical-alignment: center; }
-                                    }
-                                    g-touch-fs := TouchArea {
-                                        clicked => {
-                                             root.active-category = "Latest"; root.search-query = "";
-                                            root.catalog-genre-query = genre; root.switch-screen("browse");
-                                            root.set-catalog-text-filter("genre", genre);
-                                        }
+                                for genre in root.detail-genre-items : DetailGenreChip {
+                                    genre: genre;
+                                    clicked => {
+                                        root.active-category = "Latest";
+                                        root.search-query = "";
+                                        root.catalog-genre-query = genre;
+                                        root.switch-screen("browse");
+                                        root.set-catalog-text-filter("genre", genre);
                                     }
                                 }
                             }
@@ -7860,24 +7989,15 @@ export component MainWindow inherits Window {
                                 spacing-horizontal: HubTheme.space-2;
                                 spacing-vertical: HubTheme.space-2;
                                 Text { text: "Tags:"; color: HubTheme.text-secondary; font-size: 12px; font-weight: 600; vertical-alignment: center; }
-                                for tag in root.detail-tag-items : Rectangle {
-                                    height: 26px;
-                                    border-radius: 13px;
-                                    background: tag-t-fs.has-hover ? #2a2433 : #1c1c24;
-                                    border-width: 1px;
-                                    border-color: tag-t-fs.has-hover ? #b77cff : #b77cff55;
-                                    HorizontalLayout {
-                                        padding-left: 10px;
-                                        padding-right: 10px;
-                                        alignment: center;
-                                        Text { text: "#" + tag; color: #c8a2f4; font-size: 11px; font-weight: 600; vertical-alignment: center; }
-                                    }
-                                    tag-t-fs := TouchArea {
-                                        clicked => {
-                                            root.active-category = "Latest"; root.search-query = tag;
-                                            root.switch-screen("browse"); root.catalog-genre-query = "";
-                                            root.set-catalog-text-filter("genre", "");
-                                        }
+                                for tag in root.detail-tag-items : DetailTagChip {
+                                    tag: tag;
+                                    clicked => {
+                                        root.active-category = "Latest";
+                                        root.search-query = tag;
+                                        root.switch-screen("browse");
+                                        root.catalog-genre-query = "";
+                                        root.set-catalog-text-filter("genre", "");
+                                        root.search-catalog(tag);
                                     }
                                 }
                             }
@@ -8759,9 +8879,10 @@ export component MainWindow inherits Window {
 
         player-controls-hide-timer := Timer {
         interval: 3s;
-        running: root.active-screen == "player" && root.player-media-loaded && root.playing && root.player-controls-visible && !root.player-volume-flyout-open && !root.player-more-controls-visible && !root.player-quality-panel-open && !root.download-panel-open;
+        running: root.active-screen == "player" && root.player-media-loaded && root.playing && root.player-controls-visible && !root.player-more-controls-visible && !root.player-quality-panel-open && !root.download-panel-open;
         triggered() => {
-            if (!root.player-volume-flyout-open && !root.player-more-controls-visible && !root.player-quality-panel-open && !root.download-panel-open) {
+            if (!root.player-more-controls-visible && !root.player-quality-panel-open && !root.download-panel-open) {
+                root.player-volume-flyout-open = false;
                 root.player-controls-visible = false;
             }
         }

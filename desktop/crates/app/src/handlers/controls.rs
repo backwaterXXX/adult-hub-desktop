@@ -439,13 +439,12 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
         ui.on_set_volume(move |volume| {
             let Some(ui) = weak.upgrade() else { return };
             let Some(player) = &player else { return };
+            let volume = volume.clamp(0.0, 100.0);
             if let Err(error) = player.set_volume(volume as f64) {
                 show_error(&ui, error.to_string());
             }
-            if (volume - ui.get_volume()).abs() > 0.5 {
-                ui.set_volume(volume);
-            }
-            if volume > 0.0 && ui.get_muted() {
+            ui.set_volume(volume);
+            if volume > 0.0 && (ui.get_muted() || player.is_muted()) {
                 let _ = player.set_muted(false);
                 ui.set_muted(false);
             }
@@ -1409,5 +1408,20 @@ mod tests {
         assert!(text.contains("outer_pos=Some((100, 100))"));
         assert!(text.contains("scale=1.00"));
         assert!(text.contains("monitor=None"));
+    }
+
+    #[test]
+    fn test_volume_clamping_and_unmuting_rules() {
+        let compute_volume = |vol: f32, muted: bool| -> (f32, bool) {
+            let clamped = vol.clamp(0.0, 100.0);
+            let new_muted = if clamped > 0.0 && muted { false } else { muted };
+            (clamped, new_muted)
+        };
+
+        assert_eq!(compute_volume(120.0, true), (100.0, false));
+        assert_eq!(compute_volume(-15.0, true), (0.0, true));
+        assert_eq!(compute_volume(45.0, true), (45.0, false));
+        assert_eq!(compute_volume(0.0, true), (0.0, true));
+        assert_eq!(compute_volume(60.0, false), (60.0, false));
     }
 }

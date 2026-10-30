@@ -456,6 +456,7 @@ struct CatalogFilters {
     performer: String,
     performer_id: String,
     performer_letter: String,
+    pub performer_photo_only: bool,
 }
 
 #[derive(Clone)]
@@ -511,6 +512,7 @@ impl Default for CatalogFilters {
             performer: String::new(),
             performer_id: String::new(),
             performer_letter: String::new(),
+            performer_photo_only: false,
         }
     }
 }
@@ -526,6 +528,16 @@ impl CatalogFilters {
     }
 
     fn active_filter_count(&self, category: &str) -> i32 {
+        if category == "Performers" {
+            let mut count = 0;
+            if self.performer_photo_only {
+                count += 1;
+            }
+            if !self.performer_letter.is_empty() {
+                count += 1;
+            }
+            return count;
+        }
         let mut count = 0;
         if self.unwatched {
             count += 1;
@@ -669,6 +681,10 @@ fn save_catalog_view(
     if !page.query.is_empty() && !ui.get_is_catalog_search_results() {
         return;
     }
+    if page.category == "Performers" {
+        page.filters.performer_photo_only = ui.get_performers_photo_only();
+        page.filters.performer_letter = ui.get_performer_letter().to_string();
+    }
     page.loading_more = false;
     let model = ui.get_catalog_items();
     let cards = (0..model.row_count())
@@ -761,6 +777,10 @@ fn restore_catalog_view(
 }
 
 fn sync_catalog_filters_to_ui(ui: &MainWindow, category: &str, filters: &CatalogFilters) {
+    if category == "Performers" {
+        ui.set_performer_letter(filters.performer_letter.clone().into());
+        ui.set_performers_photo_only(filters.performer_photo_only);
+    }
     let (sort, duration) = catalog_filter_labels(filters);
     ui.set_catalog_sort_label(sort.into());
     ui.set_catalog_sort_descending(filters.descending);
@@ -937,6 +957,8 @@ fn get_catalog_page(
                 name_starts_with: (!performer_letter.is_empty()).then_some(performer_letter),
                 include_item_types: Some("Person"),
                 person_types: Some("Actor"),
+                image_types: (category == "Performers" && filters.performer_photo_only)
+                    .then_some("Primary"),
                 ..Default::default()
             },
         )?;
@@ -1044,6 +1066,8 @@ fn get_catalog_page(
                             _ => "Genre",
                         }),
                         person_types: (category == "Performers").then_some("Actor"),
+                        image_types: (category == "Performers" && filters.performer_photo_only)
+                            .then_some("Primary"),
                         ..Default::default()
                     },
                 )?;
@@ -1696,6 +1720,9 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             let Some(ui) = weak.upgrade() else { return };
             let current_screen = ui.get_active_screen();
             if current_screen != screen {
+                if current_screen == "browse" {
+                    ui.invoke_cache_catalog_view();
+                }
                 ctx_switch.push_nav_destination(current_nav_destination(&ui, &ctx_switch));
             }
             if matches!(current_screen.as_str(), "home" | "browse" | "channels") {
@@ -3672,6 +3699,8 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             let mut filters = get_category_filters(&catalog_filters, &cat);
             if cat == "Performers" {
                 filters.performer_letter = performer_letter.clone();
+                filters.performer_photo_only = performers_photo_only;
+                set_category_filters(&catalog_filters, &cat, filters.clone());
             }
             let library_id = local_store
                 .get_setting("selected_library_id")
@@ -4539,5 +4568,41 @@ mod tests {
             ..matching_item.clone()
         };
         assert!(!filters.accepts(&wrong_performer));
+    }
+
+    #[test]
+    fn test_performer_filters_count_and_view_key() {
+        let mut filters = CatalogFilters::default();
+        assert_eq!(filters.active_filter_count("Performers"), 0);
+
+        filters.performer_photo_only = true;
+        assert_eq!(filters.active_filter_count("Performers"), 1);
+
+        filters.performer_letter = "E".into();
+        assert_eq!(filters.active_filter_count("Performers"), 2);
+
+        let page1 = CatalogPageState {
+            category: "Performers".into(),
+            filters: CatalogFilters {
+                performer_photo_only: false,
+                ..Default::default()
+            },
+            ..CatalogPageState::default()
+        };
+
+        let page2 = CatalogPageState {
+            category: "Performers".into(),
+            filters: CatalogFilters {
+                performer_photo_only: true,
+                ..Default::default()
+            },
+            ..CatalogPageState::default()
+        };
+
+        assert_ne!(
+            catalog_view_key(&page1),
+            catalog_view_key(&page2),
+            "Photo-only filter change must generate distinct view keys to avoid reusing un-filtered snapshot"
+        );
     }
 }
