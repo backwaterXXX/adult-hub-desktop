@@ -3473,9 +3473,16 @@ export component MainWindow inherits Window {
             // ==========================================
             // 1. HOME DASHBOARD
             // ==========================================
-            if root.active-screen == "home" : ScrollView {
+            if root.active-screen == "home" : home-scroll := ScrollView {
+                width: 100%;
+                height: 100%;
                 content-y <=> root.home-scroll-y;
+                vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
+                horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
                 VerticalLayout {
+                    // Keep the dashboard content pinned to the viewport so
+                    // wide shelves cannot expand the scroll area horizontally.
+                    width: home-scroll.visible-width;
                     padding-left: root.compact-layout ? HubTheme.compact-content-padding : HubTheme.content-padding;
                     padding-right: root.compact-layout ? HubTheme.compact-content-padding : HubTheme.content-padding;
                     padding-top: HubTheme.content-padding;
