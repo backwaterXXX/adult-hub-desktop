@@ -3987,7 +3987,8 @@ export component MainWindow inherits Window {
                             || root.active-category == "Watch History"
                             || root.active-category == "Continue Watching"
                             || root.active-category == "Resume"
-                            || root.catalog-category-drilldown) && root.search-query != "" : TvSecondaryButton {
+                            || root.catalog-category-drilldown)
+                            && (root.search-query != "" || root.scoped-search-active) : TvSecondaryButton {
                             text: "Clear query";
                             custom-height: 40px;
                             clicked => {
@@ -4607,7 +4608,9 @@ export component MainWindow inherits Window {
                                     // Search and filters are two different
                                     // states; each button clears exactly one of
                                     // them and its label says which.
-                                    if root.is-catalog-search-results || root.search-query != "" : TvPrimaryButton {
+                                    if root.is-catalog-search-results
+                                        || root.search-query != ""
+                                        || root.scoped-search-active : TvPrimaryButton {
                                         text: "Clear search";
                                         custom-height: 40px;
                                         clicked => {
