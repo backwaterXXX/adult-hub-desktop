@@ -324,15 +324,23 @@ export component DashboardShelf inherits VerticalLayout {
     in property <bool> loading: false;
     in property <string> error-message: "";
     in property <length> viewport-width: 0px;
+    property <length> shelf-gap: HubTheme.space-4;
+    property <length> minimum-card-width: 160px;
     property <int> visible-performer-count: root.viewport-width > 0px
-        ? max(1, min(root.items.length, min(8, Math.floor((root.viewport-width + 16px) / 176px))))
+        ? max(1, min(root.items.length, min(8, Math.floor((root.viewport-width + root.shelf-gap) / (root.minimum-card-width + root.shelf-gap)))))
         : min(root.items.length, 5);
     property <int> visible-video-count: root.viewport-width > 0px
-        ? (root.viewport-width >= 1500px ? 6 : (root.viewport-width >= 1200px ? 5 : 4))
+        ? max(1, min(6, Math.floor((root.viewport-width + root.shelf-gap) / (root.minimum-card-width + root.shelf-gap))))
         : 4;
     property <length> avail-w: root.viewport-width > 0px ? root.viewport-width : 960px;
     property <int> active-video-count: max(1, min(root.items.length, root.visible-video-count));
-    property <length> shelf-card-width: min(340px, max(160px, (root.avail-w - 48px - (root.active-video-count - 1) * 16px) / root.active-video-count));
+    property <length> performer-card-width: min(200px, max(1px,
+        (root.avail-w - (root.visible-performer-count - 1) * root.shelf-gap) / root.visible-performer-count));
+    property <length> shelf-card-width: min(340px, max(1px,
+        (root.avail-w - (root.active-video-count - 1) * root.shelf-gap) / root.active-video-count));
+
+    width: root.viewport-width;
+    horizontal-stretch: 1;
 
     callback play-item(string);
     callback open-item(string);
@@ -343,9 +351,11 @@ export component DashboardShelf inherits VerticalLayout {
 
 
     if root.items.length > 0 : VerticalLayout {
+        width: 100%;
         spacing: HubTheme.space-4;
 
         SectionHeader {
+            width: 100%;
             title: root.title;
             action-label: root.action-label;
             show-scroll-controls: false;
@@ -353,11 +363,13 @@ export component DashboardShelf inherits VerticalLayout {
         }
 
         if root.error-message != "" : Rectangle {
+            width: 100%;
             height: 54px;
             border-radius: 9px;
             background: HubTheme.surface;
             border-width: 0px;
             HorizontalLayout {
+                width: 100%;
                 padding-left: 14px;
                 padding-right: 10px;
                 spacing: 10px;
@@ -403,52 +415,61 @@ export component DashboardShelf inherits VerticalLayout {
         }
 
         if root.items.length > 0 && root.performer-cards : HorizontalLayout {
+            width: 100%;
             height: 260px;
             spacing: HubTheme.space-4;
             if root.items.length > 0 && root.visible-performer-count >= 1 : PerformerCard {
-                horizontal-stretch: 1;
+                card-width: root.performer-card-width;
+                horizontal-stretch: 0;
                 fixed-width: false;
                 item: root.items[0];
                 clicked => { root.open-performer(root.items[0].title); }
             }
             if root.items.length > 1 && root.visible-performer-count >= 2 : PerformerCard {
-                horizontal-stretch: 1;
+                card-width: root.performer-card-width;
+                horizontal-stretch: 0;
                 fixed-width: false;
                 item: root.items[1];
                 clicked => { root.open-performer(root.items[1].title); }
             }
             if root.items.length > 2 && root.visible-performer-count >= 3 : PerformerCard {
-                horizontal-stretch: 1;
+                card-width: root.performer-card-width;
+                horizontal-stretch: 0;
                 fixed-width: false;
                 item: root.items[2];
                 clicked => { root.open-performer(root.items[2].title); }
             }
             if root.items.length > 3 && root.visible-performer-count >= 4 : PerformerCard {
-                horizontal-stretch: 1;
+                card-width: root.performer-card-width;
+                horizontal-stretch: 0;
                 fixed-width: false;
                 item: root.items[3];
                 clicked => { root.open-performer(root.items[3].title); }
             }
             if root.items.length > 4 && root.visible-performer-count >= 5 : PerformerCard {
-                horizontal-stretch: 1;
+                card-width: root.performer-card-width;
+                horizontal-stretch: 0;
                 fixed-width: false;
                 item: root.items[4];
                 clicked => { root.open-performer(root.items[4].title); }
             }
             if root.items.length > 5 && root.visible-performer-count >= 6 : PerformerCard {
-                horizontal-stretch: 1;
+                card-width: root.performer-card-width;
+                horizontal-stretch: 0;
                 fixed-width: false;
                 item: root.items[5];
                 clicked => { root.open-performer(root.items[5].title); }
             }
             if root.items.length > 6 && root.visible-performer-count >= 7 : PerformerCard {
-                horizontal-stretch: 1;
+                card-width: root.performer-card-width;
+                horizontal-stretch: 0;
                 fixed-width: false;
                 item: root.items[6];
                 clicked => { root.open-performer(root.items[6].title); }
             }
             if root.items.length > 7 && root.visible-performer-count >= 8 : PerformerCard {
-                horizontal-stretch: 1;
+                card-width: root.performer-card-width;
+                horizontal-stretch: 0;
                 fixed-width: false;
                 item: root.items[7];
                 clicked => { root.open-performer(root.items[7].title); }
@@ -456,6 +477,7 @@ export component DashboardShelf inherits VerticalLayout {
         }
 
         if root.items.length > 0 && !root.performer-cards : HorizontalLayout {
+            width: 100%;
             height: root.shelf-card-width * 0.5625 + 70px;
             spacing: HubTheme.space-4;
             if root.items.length > 0 : VideoCard {
@@ -467,7 +489,7 @@ export component DashboardShelf inherits VerticalLayout {
                 open-detail => { root.open-item(root.items[0].id); }
                 thumbnail-retry(item) => { root.thumbnail-retry(item); }
             }
-            if root.items.length > 1 : VideoCard {
+            if root.items.length > 1 && root.visible-video-count >= 2 : VideoCard {
                 item: root.items[1];
                 card-width: root.shelf-card-width;
                 max-width: 340px;
@@ -476,7 +498,7 @@ export component DashboardShelf inherits VerticalLayout {
                 open-detail => { root.open-item(root.items[1].id); }
                 thumbnail-retry(item) => { root.thumbnail-retry(item); }
             }
-            if root.items.length > 2 : VideoCard {
+            if root.items.length > 2 && root.visible-video-count >= 3 : VideoCard {
                 item: root.items[2];
                 card-width: root.shelf-card-width;
                 max-width: 340px;
@@ -485,7 +507,7 @@ export component DashboardShelf inherits VerticalLayout {
                 open-detail => { root.open-item(root.items[2].id); }
                 thumbnail-retry(item) => { root.thumbnail-retry(item); }
             }
-            if root.items.length > 3 : VideoCard {
+            if root.items.length > 3 && root.visible-video-count >= 4 : VideoCard {
                 item: root.items[3];
                 card-width: root.shelf-card-width;
                 max-width: 340px;
