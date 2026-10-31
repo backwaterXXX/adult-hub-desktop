@@ -913,6 +913,27 @@ struct CatalogPage {
     supplemental_total: usize,
 }
 
+fn reported_catalog_total(
+    is_search: bool,
+    is_studios: bool,
+    query: &str,
+    has_more: bool,
+    page_total: usize,
+    cards_len: usize,
+) -> i32 {
+    if !is_search && is_studios && !query.trim().is_empty() {
+        // Studio search totals count raw server rows before client-side
+        // aggregation, and stay stable through the final page.
+        page_total as i32
+    } else if !is_search && is_studios {
+        cards_len as i32
+    } else if !is_search && !has_more {
+        cards_len as i32
+    } else {
+        page_total as i32
+    }
+}
+
 fn get_resume_search_catalog_page(
     jellyfin: &JellyfinClient,
     session: &Session,
@@ -4512,8 +4533,6 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                                 .collect::<Vec<_>>();
 
                             let is_studios = requested_page.category == "Studios";
-                            let studio_listing_without_query =
-                                is_studios && requested_page.query.is_empty();
                             *catalog_paging.lock().unwrap() = CatalogPageState {
                                 next_start: page.next_start,
                                 has_more: page.has_more,
@@ -4535,15 +4554,14 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                             };
                             ui.set_catalog_anchor_pending(true);
                             append_catalog_page(&ui, display_cards.clone());
-                            let mut reported_total =
-                                if !is_search && (studio_listing_without_query || !page.has_more) {
-                                    // Unfiltered studio totals count raw server
-                                    // rows, while the displayed list aggregates
-                                    // duplicate studio names.
-                                    cards.len() as i32
-                                } else {
-                                    (page.total_count + supplemental_total) as i32
-                                };
+                            let mut reported_total = reported_catalog_total(
+                                is_search,
+                                is_studios,
+                                &query,
+                                page.has_more,
+                                page.total_count + supplemental_total,
+                                cards.len(),
+                            );
                             if is_search {
                                 let (
                                     movie_count,
@@ -5035,6 +5053,31 @@ mod tests {
         assert_eq!(
             resolved_search_context("browse", "Latest", true, "Anal"),
             "category:Anal"
+        );
+    }
+
+    #[test]
+    fn reported_studio_search_total_stays_stable_across_pages() {
+        assert_eq!(
+            reported_catalog_total(false, true, "Anal", true, 200, 46),
+            200
+        );
+        assert_eq!(
+            reported_catalog_total(false, true, "Anal", false, 200, 49),
+            200
+        );
+        assert_eq!(
+            reported_catalog_total(false, true, "", true, 200, 46),
+            46,
+            "unfiltered studio lists report the loaded, aggregated card count"
+        );
+        assert_eq!(
+            reported_catalog_total(false, false, "", false, 200, 12),
+            12
+        );
+        assert_eq!(
+            reported_catalog_total(false, false, "", true, 200, 50),
+            200
         );
     }
 
