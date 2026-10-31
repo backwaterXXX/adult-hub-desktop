@@ -15,7 +15,7 @@ use adult_hub_client::{
 };
 use adult_hub_storage::{LocalStore, Session};
 use slint::{ComponentHandle, Model};
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -4572,6 +4572,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                                 .collect::<Vec<_>>();
 
                             let is_studios = requested_page.category == "Studios";
+                            let requested_query = requested_page.query.clone();
                             *catalog_paging.lock().unwrap() = CatalogPageState {
                                 next_start: page.next_start,
                                 has_more: page.has_more,
@@ -4596,7 +4597,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                             let mut reported_total = reported_catalog_total(
                                 is_search,
                                 is_studios,
-                                &query,
+                                &requested_query,
                                 page.has_more,
                                 page.total_count + supplemental_total,
                                 cards.len(),
