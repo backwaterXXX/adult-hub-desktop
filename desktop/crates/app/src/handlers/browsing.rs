@@ -23,6 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const CATALOG_PAGE_SIZE: usize = 50;
+const MAX_RESUME_SEARCH_SERVER_ITEMS: usize = 100;
 
 /// Every piece of catalog-search state that must change together when the user
 /// leaves a search (the central "Clear search" action). The edited field text,
@@ -923,18 +924,25 @@ fn get_resume_search_catalog_page(
     let mut items = Vec::new();
     let mut server_start = 0;
     loop {
+        let remaining = MAX_RESUME_SEARCH_SERVER_ITEMS.saturating_sub(server_start);
+        if remaining == 0 {
+            break;
+        }
         let page = jellyfin.get_resume_items_page(
             &session.server_url,
             &session.user_id,
             &session.access_token,
             server_start,
-            CATALOG_PAGE_SIZE,
+            remaining.min(CATALOG_PAGE_SIZE),
         )?;
         let fetched = page.items.len();
         let server_total = page.total_record_count;
         items.extend(page.items);
         server_start = server_start.saturating_add(fetched);
-        if fetched == 0 || server_start >= server_total {
+        if fetched == 0
+            || server_start >= server_total
+            || server_start >= MAX_RESUME_SEARCH_SERVER_ITEMS
+        {
             break;
         }
     }
@@ -991,6 +999,10 @@ fn get_resume_search_catalog_page(
         items.reverse();
     }
 
+    // Resume searches inspect at most the first 100 server items (two pages),
+    // plus local Telegram progress, to keep each scan bounded. Counts and
+    // has_more describe only this candidate set; matches after the cap are not
+    // searched.
     let total_count = items.len();
     let page_items = items
         .into_iter()
