@@ -970,7 +970,7 @@ component TvChoiceChip inherits Rectangle {
     in property <bool> selected: false;
     in property <bool> removable: false;
     in property <bool> enabled: true;
-    in property <length> custom-height: 32px;
+    in property <length> custom-height: 0px;
     out property <bool> has-focus: focus-scope.has-focus;
     callback clicked();
 
@@ -3959,6 +3959,15 @@ export component MainWindow inherits Window {
                                 keys.focus();
                             }
                         }
+                        if (root.active-category == "Studios" || root.active-category == "Categories") && root.search-query != "" : TvSecondaryButton {
+                            text: "Clear query";
+                            custom-height: 40px;
+                            clicked => {
+                                root.search-query = "";
+                                root.clear-catalog-search();
+                                keys.focus();
+                            }
+                        }
                         if root.catalog-filter-categories-available : FilterIconButton {
                             open: root.catalog-filters-expanded;
                             has-active-filters: root.catalog-active-filter-count > 0;
@@ -3987,7 +3996,6 @@ export component MainWindow inherits Window {
                         }
                         accepted(text) => {
                             root.performer-search-query = text;
-                            root.is-loading-catalog = true;
                             root.filter-category("Performers");
                             keys.focus();
                         }
@@ -3998,7 +4006,6 @@ export component MainWindow inherits Window {
                         text: "Search";
                         primary: true;
                         clicked => {
-                            root.is-loading-catalog = true;
                             root.filter-category("Performers");
                             keys.focus();
                         }
@@ -4014,55 +4021,15 @@ export component MainWindow inherits Window {
                         }
                     }
 
-                    // 3. Camera Toggle Button ("With photo")
-                    photo-toggle-btn := Rectangle {
-                        width: 44px;
-                        height: 40px;
-                        border-radius: 8px;
-                        background: root.performers-photo-only ? #BE185D33 : (photo-touch.has-hover ? #FFFFFF14 : #1c1d24);
-                        border-width: 1px;
-                        border-color: root.performers-photo-only ? HubTheme.focus-ring : (photo-touch.has-hover ? #FFFFFF33 : #FFFFFF18);
-                        accessible-role: checkbox;
-                        accessible-checked: root.performers-photo-only;
-                        accessible-label: "Filter performers with photo";
-
-                        Image {
-                            source: @image-url("../../../assets/icons/camera.svg");
-                            width: 20px;
-                            height: 20px;
-                            x: (parent.width - self.width) / 2;
-                            y: (parent.height - self.height) / 2;
-                            image-fit: contain;
-                        }
-
-                        if photo-touch.has-hover : Rectangle {
-                            y: -30px;
-                            x: (parent.width - self.width) / 2;
-                            height: 24px;
-                            width: photo-tip.preferred-width + 16px;
-                            border-radius: 4px;
-                            background: #14141cf5;
-                            border-width: 1px;
-                            border-color: #BE185D88;
-                            z: 50;
-
-                            photo-tip := Text {
-                                x: 8px;
-                                y: 4px;
-                                text: "With photo only";
-                                color: #FFFFFF;
-                                font-size: 11px;
-                                font-weight: 600;
-                                vertical-alignment: center;
-                            }
-                        }
-
-                        photo-touch := TouchArea {
-                            clicked => {
-                                root.performers-photo-only = !root.performers-photo-only;
-                                root.is-loading-catalog = true;
-                                root.filter-category("Performers");
-                            }
+                    // 3. Photo Toggle Button ("With photo only")
+                    TvChoiceChip {
+                        text: "With photo only";
+                        selected: root.performers-photo-only;
+                        custom-height: 40px;
+                        clicked => {
+                            root.performers-photo-only = !root.performers-photo-only;
+                            root.filter-category("Performers");
+                            keys.focus();
                         }
                     }
 
@@ -4094,7 +4061,6 @@ export component MainWindow inherits Window {
                             selected: root.performer-letter == "";
                             clicked => {
                                 root.performer-letter = "";
-                                root.is-loading-catalog = true;
                                 root.filter-category("Performers");
                             }
                         }
@@ -4104,7 +4070,6 @@ export component MainWindow inherits Window {
                             selected: root.performer-letter == letter;
                             clicked => {
                                 root.performer-letter = letter;
-                                root.is-loading-catalog = true;
                                 root.filter-category("Performers");
                             }
                         }
@@ -4271,24 +4236,12 @@ export component MainWindow inherits Window {
                             vertical-alignment: center;
                         }
 
-                        if root.active-category == "Performers" && root.performers-photo-only : TvChoiceChip {
-                            text: "With photo only";
-                            selected: true;
-                            removable: true;
-                            clicked => {
-                                root.performers-photo-only = false;
-                                root.is-loading-catalog = true;
-                                root.filter-category("Performers");
-                            }
-                        }
-
                         if root.active-category == "Performers" && root.performer-letter != "" : TvChoiceChip {
                             text: "Letter: " + root.performer-letter;
                             selected: true;
                             removable: true;
                             clicked => {
                                 root.performer-letter = "";
-                                root.is-loading-catalog = true;
                                 root.filter-category("Performers");
                             }
                         }
@@ -4384,7 +4337,6 @@ export component MainWindow inherits Window {
                             clicked => {
                                 if (root.active-category == "Performers") {
                                     root.performer-search-query = query;
-                                    root.is-loading-catalog = true;
                                     root.filter-category("Performers");
                                 } else {
                                     root.search-query = query;
@@ -4512,7 +4464,7 @@ export component MainWindow inherits Window {
                     }
 
                     // 2. Filtered-out state (active filters resulted in 0 items)
-                    if (!root.is-catalog-search-results || root.search-error-message == "") && (root.catalog-active-filter-count > 0 || (root.is-catalog-search-results && root.search-applied-query != "") || (root.active-category == "Performers" && (root.performer-search-query != "" || root.performer-letter != "" || root.performers-photo-only))) : HorizontalLayout {
+                    if (!root.is-catalog-search-results || root.search-error-message == "") && (root.catalog-active-filter-count > 0 || (root.is-catalog-search-results && root.search-applied-query != "") || (root.active-category == "Performers" && (root.performer-search-query != "" || root.performer-letter != "" || root.performers-photo-only)) || ((root.active-category == "Studios" || root.active-category == "Categories") && root.search-query != "")) : HorizontalLayout {
                         alignment: center;
 
                         Rectangle {
@@ -4527,7 +4479,8 @@ export component MainWindow inherits Window {
                                         ? "No search results"
                                         : (root.active-category == "Performers" ? "No performers match active filters"
                                         : (root.active-category == "Studios" ? "No studios match active filters"
-                                        : "No videos match active filters"));
+                                        : (root.active-category == "Categories" ? "No categories match active filters"
+                                        : "No videos match active filters")));
                                     color: #eeeeF4;
                                     font-size: 19px;
                                     font-weight: 700;
@@ -4541,8 +4494,10 @@ export component MainWindow inherits Window {
                                         : (root.active-category == "Performers"
                                             ? "Try clearing the letter, photo filter, or search term to see all performers."
                                             : (root.active-category == "Studios"
-                                                ? "Try clearing filters to see all available studios."
-                                                : "Try clearing filters to see all available videos in this section."));
+                                                ? "Try clearing filters or search term to see all available studios."
+                                                : (root.active-category == "Categories"
+                                                    ? "Try clearing the search term to see all available categories."
+                                                    : "Try clearing filters to see all available videos in this section.")));
                                     color: #95919e;
                                     font-size: 13px;
                                     horizontal-alignment: center;
@@ -4558,10 +4513,11 @@ export component MainWindow inherits Window {
                                     // Search and filters are two different
                                     // states; each button clears exactly one of
                                     // them and its label says which.
-                                    if root.is-catalog-search-results : TvPrimaryButton {
+                                    if root.is-catalog-search-results || ((root.active-category == "Studios" || root.active-category == "Categories") && root.search-query != "") : TvPrimaryButton {
                                         text: "Clear search";
                                         custom-height: 40px;
                                         clicked => {
+                                            root.search-query = "";
                                             root.clear-catalog-search();
                                         }
                                     }
@@ -4574,7 +4530,6 @@ export component MainWindow inherits Window {
                                                 root.performer-search-query = "";
                                                 root.performer-letter = "";
                                                 root.performers-photo-only = false;
-                                                root.is-loading-catalog = true;
                                                 root.filter-category("Performers");
                                             } else {
                                                 root.clear-catalog-filters();
@@ -4587,7 +4542,7 @@ export component MainWindow inherits Window {
                     }
 
                     // 3. Truly empty state (no filters active)
-                    if (!root.is-catalog-search-results || root.search-error-message == "") && root.catalog-active-filter-count == 0 && (!root.is-catalog-search-results || root.search-applied-query == "") && (root.active-category != "Performers" || (root.performer-search-query == "" && root.performer-letter == "" && !root.performers-photo-only)) : VerticalLayout {
+                    if (!root.is-catalog-search-results || root.search-error-message == "") && root.catalog-active-filter-count == 0 && (!root.is-catalog-search-results || root.search-applied-query == "") && (root.active-category != "Performers" || (root.performer-search-query == "" && root.performer-letter == "" && !root.performers-photo-only)) && ((root.active-category != "Studios" && root.active-category != "Categories") || root.search-query == "") : VerticalLayout {
                         alignment: center;
                         spacing: 8px;
                         Text {
@@ -6606,24 +6561,6 @@ export component MainWindow inherits Window {
                                                     }
                                                     EventResult.accept
                                                 }
-                                                moved => {
-                                                    if (self.pressed) {
-                                                        root.player-controls-visible = true;
-                                                        player-controls-hide-timer.restart();
-                                                        root.player-volume-flyout-open = true;
-                                                        let track-offset = Math.max(0.0, Math.min(120.0, (self.mouse-y - 7px) / 1px));
-                                                        let vol = (1.0 - (track-offset / 120.0)) * 100.0;
-                                                        root.set-volume(Math.max(0.0, Math.min(100.0, vol)));
-                                                    }
-                                                }
-                                                clicked => {
-                                                    root.player-controls-visible = true;
-                                                    player-controls-hide-timer.restart();
-                                                    root.player-volume-flyout-open = true;
-                                                    let track-offset = Math.max(0.0, Math.min(120.0, (self.mouse-y - 7px) / 1px));
-                                                    let vol = (1.0 - (track-offset / 120.0)) * 100.0;
-                                                    root.set-volume(Math.max(0.0, Math.min(100.0, vol)));
-                                                }
                                                 scroll-event(event) => {
                                                     root.player-controls-visible = true;
                                                     player-controls-hide-timer.restart();
@@ -7422,7 +7359,7 @@ export component MainWindow inherits Window {
                 }
 
                 // Popover Dismiss Scrim for Bottom Bar Panels & Menus
-                if root.player-more-controls-visible || root.player-quality-panel-open || root.download-panel-open : TouchArea {
+                if root.player-more-controls-visible || root.player-quality-panel-open || root.download-panel-open || root.player-volume-flyout-open : TouchArea {
                     width: 100%;
                     height: 100%;
                     z: 74;
@@ -7437,6 +7374,7 @@ export component MainWindow inherits Window {
                         root.player-more-controls-visible = false;
                         root.player-quality-panel-open = false;
                         root.download-panel-open = false;
+                        root.player-volume-flyout-open = false;
                         root.player-controls-visible = true;
                         player-controls-hide-timer.restart();
                     }
@@ -8072,10 +8010,10 @@ export component MainWindow inherits Window {
                                     tag: tag;
                                     clicked => {
                                         root.active-category = "Latest";
-                                        root.search-query = tag;
-                                        root.switch-screen("browse");
                                         root.catalog-genre-query = "";
-                                        root.set-catalog-text-filter("genre", "");
+                                        root.catalog-category-drilldown = false;
+                                        root.is-catalog-search-results = true;
+                                        root.switch-screen("browse");
                                         root.search-catalog(tag);
                                     }
                                 }
@@ -8958,10 +8896,9 @@ export component MainWindow inherits Window {
 
         player-controls-hide-timer := Timer {
         interval: 3s;
-        running: root.active-screen == "player" && root.player-media-loaded && root.playing && root.player-controls-visible && !root.player-more-controls-visible && !root.player-quality-panel-open && !root.download-panel-open;
+        running: root.active-screen == "player" && root.player-media-loaded && root.playing && root.player-controls-visible && !root.player-more-controls-visible && !root.player-quality-panel-open && !root.download-panel-open && !root.player-volume-flyout-open;
         triggered() => {
-            if (!root.player-more-controls-visible && !root.player-quality-panel-open && !root.download-panel-open) {
-                root.player-volume-flyout-open = false;
+            if (!root.player-more-controls-visible && !root.player-quality-panel-open && !root.download-panel-open && !root.player-volume-flyout-open) {
                 root.player-controls-visible = false;
             }
         }

@@ -321,7 +321,7 @@ impl JellyfinClient {
     ) -> Result<TvItemsPage> {
         let base = Self::clean_url(base_url);
         let url = format!(
-            "{base}/UserItems/Resume?userId={}&startIndex={start_index}&limit={limit}&enableTotalRecordCount=true&enableImages=true&enableImageTypes=Primary,Thumb,Backdrop&imageTypeLimit=1&fields=ProviderIds,Overview,Genres,Studios,People,MediaSources,ChildCount,Path,IsPlaceHolder,Tags",
+            "{base}/UserItems/Resume?userId={}&startIndex={start_index}&limit={limit}&enableTotalRecordCount=true&enableImages=true&enableImageTypes=Primary,Thumb,Backdrop&imageTypeLimit=1&fields={DEFAULT_ITEM_FIELDS}",
             crate::urlencoding(user_id)
         );
         let res: ItemsResponseDto = Self::check_res(
@@ -353,7 +353,7 @@ impl JellyfinClient {
     ) -> Result<Vec<TvItem>> {
         let base = Self::clean_url(base_url);
         let mut url = format!(
-            "{base}/Users/{}/Items/Latest?Limit={limit}&EnableImages=true&EnableImageTypes=Primary,Thumb,Backdrop&ImageTypeLimit=1&Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources,ChildCount,Path,IsPlaceHolder,Tags",
+            "{base}/Users/{}/Items/Latest?Limit={limit}&EnableImages=true&EnableImageTypes=Primary,Thumb,Backdrop&ImageTypeLimit=1&Fields={DEFAULT_ITEM_FIELDS}",
             crate::urlencoding(user_id)
         );
         if let Some(pid) = parent_id {
@@ -526,7 +526,7 @@ impl JellyfinClient {
     ) -> Result<Vec<TvItem>> {
         let base = Self::clean_url(base_url);
         let url = format!(
-            "{base}/Items/{}/Similar?Limit={limit}&Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources,ChildCount,Path,IsPlaceHolder,Tags",
+            "{base}/Items/{}/Similar?Limit={limit}&Fields={DEFAULT_ITEM_FIELDS}",
             crate::urlencoding(item_id)
         );
         let res: ItemsResponseDto = Self::check_res(
@@ -750,7 +750,7 @@ impl JellyfinClient {
     ) -> Result<TvItem> {
         let base = Self::clean_url(base_url);
         let url = format!(
-            "{base}/Users/{}/Items/{}?EnableImages=true&EnableImageTypes=Primary,Thumb,Backdrop&ImageTypeLimit=1&Fields=ProviderIds,Overview,Genres,Studios,People,MediaSources,ChildCount,Path,IsPlaceHolder,Tags",
+            "{base}/Users/{}/Items/{}?EnableImages=true&EnableImageTypes=Primary,Thumb,Backdrop&ImageTypeLimit=1&Fields={DEFAULT_ITEM_FIELDS}",
             crate::urlencoding(user_id),
             crate::urlencoding(item_id)
         );

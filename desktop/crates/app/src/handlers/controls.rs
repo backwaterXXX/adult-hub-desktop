@@ -262,6 +262,12 @@ pub fn trigger_movie_switch(ui: &MainWindow, ctx: &AppContext, is_random: bool) 
     });
 }
 
+pub fn compute_volume_state(vol: f32, muted: bool) -> (f32, bool) {
+    let clamped = vol.clamp(0.0, 100.0);
+    let new_muted = if clamped > 0.0 && muted { false } else { muted };
+    (clamped, new_muted)
+}
+
 pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
     let player = ctx.player.clone();
     let autoplay_active = ctx.autoplay_active.clone();
@@ -439,12 +445,13 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
         ui.on_set_volume(move |volume| {
             let Some(ui) = weak.upgrade() else { return };
             let Some(player) = &player else { return };
-            let volume = volume.clamp(0.0, 100.0);
+            let is_muted = ui.get_muted() || player.is_muted();
+            let (volume, new_muted) = compute_volume_state(volume, is_muted);
             if let Err(error) = player.set_volume(volume as f64) {
                 show_error(&ui, error.to_string());
             }
             ui.set_volume(volume);
-            if volume > 0.0 && (ui.get_muted() || player.is_muted()) {
+            if is_muted && !new_muted {
                 let _ = player.set_muted(false);
                 ui.set_muted(false);
             }
@@ -1412,16 +1419,10 @@ mod tests {
 
     #[test]
     fn test_volume_clamping_and_unmuting_rules() {
-        let compute_volume = |vol: f32, muted: bool| -> (f32, bool) {
-            let clamped = vol.clamp(0.0, 100.0);
-            let new_muted = if clamped > 0.0 && muted { false } else { muted };
-            (clamped, new_muted)
-        };
-
-        assert_eq!(compute_volume(120.0, true), (100.0, false));
-        assert_eq!(compute_volume(-15.0, true), (0.0, true));
-        assert_eq!(compute_volume(45.0, true), (45.0, false));
-        assert_eq!(compute_volume(0.0, true), (0.0, true));
-        assert_eq!(compute_volume(60.0, false), (60.0, false));
+        assert_eq!(compute_volume_state(120.0, true), (100.0, false));
+        assert_eq!(compute_volume_state(-15.0, true), (0.0, true));
+        assert_eq!(compute_volume_state(45.0, true), (45.0, false));
+        assert_eq!(compute_volume_state(0.0, true), (0.0, true));
+        assert_eq!(compute_volume_state(60.0, false), (60.0, false));
     }
 }

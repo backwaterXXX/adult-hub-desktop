@@ -76,6 +76,7 @@ pub fn active_search_context(ui: &MainWindow) -> &'static str {
         match ui.get_active_category().as_str() {
             "Performers" => "performers",
             "Studios" => "studios",
+            "Categories" => "tags",
             _ => "movies",
         }
     }
@@ -456,7 +457,7 @@ struct CatalogFilters {
     performer: String,
     performer_id: String,
     performer_letter: String,
-    pub performer_photo_only: bool,
+    performer_photo_only: bool,
 }
 
 #[derive(Clone)]
@@ -530,9 +531,6 @@ impl CatalogFilters {
     fn active_filter_count(&self, category: &str) -> i32 {
         if category == "Performers" {
             let mut count = 0;
-            if self.performer_photo_only {
-                count += 1;
-            }
             if !self.performer_letter.is_empty() {
                 count += 1;
             }
@@ -680,10 +678,6 @@ fn save_catalog_view(
     // cached search view with a non-search page filed under the old query.
     if !page.query.is_empty() && !ui.get_is_catalog_search_results() {
         return;
-    }
-    if page.category == "Performers" {
-        page.filters.performer_photo_only = ui.get_performers_photo_only();
-        page.filters.performer_letter = ui.get_performer_letter().to_string();
     }
     page.loading_more = false;
     let model = ui.get_catalog_items();
@@ -959,8 +953,7 @@ fn get_catalog_page(
                 name_starts_with: (!performer_letter.is_empty()).then_some(performer_letter),
                 include_item_types: Some("Person"),
                 person_types: Some("Actor"),
-                image_types: (category == "Performers" && filters.performer_photo_only)
-                    .then_some("Primary"),
+                image_types: filters.performer_photo_only.then_some("Primary"),
                 ..Default::default()
             },
         )?;
@@ -969,6 +962,51 @@ fn get_catalog_page(
             performer.genres.push("__adult_hub_performer".into());
         }
         performers_page
+    } else if category == "Studios" && !query.trim().is_empty() {
+        let search_term = query.trim();
+        let studios_page = jellyfin.get_items(
+            &session.server_url,
+            &session.user_id,
+            &session.access_token,
+            &GetItemsQuery {
+                parent_id: None,
+                start_index,
+                limit: CATALOG_PAGE_SIZE,
+                sort_by: filters.sort_by(),
+                sort_descending: filters.descending,
+                search_term: (!search_term.is_empty()).then_some(search_term),
+                include_item_types: Some("Studio"),
+                ..Default::default()
+            },
+        )?;
+        let mut studios_page = studios_page;
+        studios_page.items = crate::catalog::aggregate_studio_items(studios_page.items);
+        studios_page.total_record_count = studios_page.items.len();
+        for studio in &mut studios_page.items {
+            studio.genres.push("__adult_hub_studio".into());
+        }
+        studios_page
+    } else if category == "Categories" && !query.trim().is_empty() {
+        let search_term = query.trim();
+        let mut categories_page = jellyfin.get_items(
+            &session.server_url,
+            &session.user_id,
+            &session.access_token,
+            &GetItemsQuery {
+                parent_id: None,
+                start_index,
+                limit: CATALOG_PAGE_SIZE,
+                sort_by: "SortName",
+                sort_descending: false,
+                search_term: (!search_term.is_empty()).then_some(search_term),
+                include_item_types: Some("Genre"),
+                ..Default::default()
+            },
+        )?;
+        for cat_item in &mut categories_page.items {
+            cat_item.genres.push("__adult_hub_genre".into());
+        }
+        categories_page
     } else if !query.trim().is_empty() {
         let movie_query =
             search_movie_query(query, start_index, &filters, selected_library_id.as_deref());
@@ -1130,14 +1168,16 @@ fn get_catalog_page(
             }
         }
     }
-    if matches!(category, "Performers" | "Studios" | "Categories") && query.is_empty() {
+    if matches!(category, "Performers" | "Studios" | "Categories") {
         let kind_marker = match category {
             "Performers" => "__adult_hub_performer",
             "Studios" => "__adult_hub_studio",
             _ => "__adult_hub_genre",
         };
         for item in &mut page.items {
-            item.genres.push(kind_marker.into());
+            if !item.genres.iter().any(|g| g == kind_marker) {
+                item.genres.push(kind_marker.into());
+            }
         }
         if category == "Studios" {
             page.items = crate::catalog::aggregate_studio_items(page.items);
@@ -1169,7 +1209,7 @@ fn get_catalog_page(
 // appended afterwards. The field list omits server-side expensive extras
 // (ChildCount, Path, IsPlaceHolder) that catalog cards never read.
 const SEARCH_MOVIE_FIELDS: &str =
-    "ProviderIds,Overview,Genres,Studios,People,MediaSources,CommunityRating";
+    "ProviderIds,Overview,Genres,Studios,People,MediaSources,CommunityRating,Tags";
 const SEARCH_SUPPLEMENT_FIELDS: &str = "ProviderIds,Overview,ChildCount";
 const CHANNEL_SEARCH_TIMEOUT: Duration = Duration::from_secs(8);
 
@@ -1793,7 +1833,9 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             } else if is_home {
                 ui.invoke_refresh_home();
             } else if is_browse {
-                ui.invoke_filter_category(ui.get_active_category());
+                if !ui.get_is_catalog_search_results() {
+                    ui.invoke_filter_category(ui.get_active_category());
+                }
             } else if is_settings {
                 ui.invoke_refresh_home_categories();
                 ui.invoke_refresh_library_list();
@@ -3203,8 +3245,33 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
         let catalog_views = catalog_views.clone();
         ui.on_search_catalog(move |query| {
             let Some(ui) = weak.upgrade() else { return };
-            save_catalog_view(&ui, &catalog_paging, &cached_catalog, &catalog_views);
             let query = query.trim().to_string();
+            let current_cat = ui.get_active_category().to_string();
+
+            // When searching within specialized catalog categories (Studios, Categories, Performers),
+            // scope the search directly to that category rather than kicking off a global multi-source search.
+            if current_cat == "Studios" || current_cat == "Categories" {
+                ui.set_search_query(query.clone().into());
+                let search_context = active_search_context(&ui);
+                if !query.is_empty() {
+                    let _ = local_store.add_search_query_context(search_context, &query);
+                }
+                refresh_recent_searches_for_context(&ui, &local_store);
+                ui.invoke_filter_category(current_cat.into());
+                return;
+            }
+            if current_cat == "Performers" {
+                ui.set_performer_search_query(query.clone().into());
+                if !query.is_empty() {
+                    let _ = local_store.add_search_query_context("performers", &query);
+                }
+                refresh_recent_searches_for_context(&ui, &local_store);
+                ui.invoke_filter_category("Performers".into());
+                return;
+            }
+
+            save_catalog_view(&ui, &catalog_paging, &cached_catalog, &catalog_views);
+            ui.set_search_query(query.clone().into());
             // Search lists videos, so it applies the video ("Latest") filter
             // set — the same one the chips edit and the badge counts.
             let filters = get_category_filters(&catalog_filters, "Latest");
@@ -3823,7 +3890,6 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             save_catalog_view(&ui, &catalog_paging, &cached_catalog, &catalog_views);
             performer_search_generation.fetch_add(1, Ordering::SeqCst);
             search_debounce_generation.fetch_add(1, Ordering::SeqCst);
-            refresh_recent_searches_for_context(&ui, &local_store);
             if cat == "Channels" {
                 catalog_generation.fetch_add(1, Ordering::SeqCst);
                 ui.set_active_screen("channels".into());
@@ -3839,11 +3905,17 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             }
             let performer_letter = ui.get_performer_letter().to_string();
             let performers_photo_only = ui.get_performers_photo_only();
-            let performer_search_query = if cat == "Performers" {
-                ui.get_performer_search_query().to_string()
-            } else {
-                String::new()
+            let query = match cat.as_str() {
+                "Performers" => ui.get_performer_search_query().to_string(),
+                "Studios" | "Categories" => ui.get_search_query().to_string(),
+                _ => String::new(),
             };
+            let search_context = active_search_context(&ui);
+            let trimmed_q = query.trim();
+            if !trimmed_q.is_empty() {
+                let _ = local_store.add_search_query_context(search_context, trimmed_q);
+            }
+            refresh_recent_searches_for_context(&ui, &local_store);
             let cat = cat.to_string();
             let mut filters = get_category_filters(&catalog_filters, &cat);
             if cat == "Performers" {
@@ -3858,7 +3930,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 .unwrap_or_default();
             let target_page = CatalogPageState {
                 category: cat.clone(),
-                query: performer_search_query.clone(),
+                query: query.clone(),
                 library_id: library_id.clone(),
                 filters: filters.clone(),
                 ..CatalogPageState::default()
@@ -3929,7 +4001,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                             &session,
                             &local_store,
                             &cat,
-                            &performer_search_query,
+                            &query,
                             0,
                             filters.clone(),
                             performers_photo_only,
@@ -3960,7 +4032,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                         &raw_items,
                         &performer_letter,
                         performers_photo_only,
-                        &performer_search_query,
+                        &query,
                     )
                 } else {
                     raw_items.clone()
@@ -3976,7 +4048,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                         *cached_catalog.lock().unwrap() = raw_items;
                         *catalog_paging.lock().unwrap() = CatalogPageState {
                             category: cat,
-                            query: performer_search_query,
+                            query,
                             library_id,
                             next_start,
                             has_more,
@@ -4725,10 +4797,10 @@ mod tests {
         assert_eq!(filters.active_filter_count("Performers"), 0);
 
         filters.performer_photo_only = true;
-        assert_eq!(filters.active_filter_count("Performers"), 1);
+        assert_eq!(filters.active_filter_count("Performers"), 0);
 
         filters.performer_letter = "E".into();
-        assert_eq!(filters.active_filter_count("Performers"), 2);
+        assert_eq!(filters.active_filter_count("Performers"), 1);
 
         let page1 = CatalogPageState {
             category: "Performers".into(),
@@ -4753,5 +4825,21 @@ mod tests {
             catalog_view_key(&page2),
             "Photo-only filter change must generate distinct view keys to avoid reusing un-filtered snapshot"
         );
+    }
+
+    #[test]
+    fn test_context_aware_search_context_mapping() {
+        let category_to_context = |cat: &str| match cat {
+            "Performers" => "performers",
+            "Studios" => "studios",
+            "Categories" => "tags",
+            _ => "movies",
+        };
+
+        assert_eq!(category_to_context("Performers"), "performers");
+        assert_eq!(category_to_context("Studios"), "studios");
+        assert_eq!(category_to_context("Categories"), "tags");
+        assert_eq!(category_to_context("Latest"), "movies");
+        assert_eq!(category_to_context("Favorites"), "movies");
     }
 }
