@@ -224,11 +224,20 @@ fn main() {
         "0.2.25".into()
     });
     let build_date_compact = build_date.replace('-', "");
+    let build_time = Command::new("date")
+        .args(["-u", "+%H%M%S%N"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "000000".into());
     let build_id = std::env::var("ADULT_HUB_BUILD_ID")
         .ok()
         .filter(|s| !s.trim().is_empty() && s != "unknown" && !s.contains("unknown"))
         .unwrap_or_else(|| {
-            format!("{pkg_version}-{commit_hash}-{build_date_compact}{dirty_suffix}")
+            format!("{pkg_version}-{commit_hash}-{build_date_compact}T{build_time}{dirty_suffix}")
         });
     println!("cargo:rustc-env=ADULT_HUB_BUILD_ID={build_id}");
 

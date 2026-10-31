@@ -14,7 +14,7 @@ EXE_PATH="${ROOT_DIR}/desktop/target/${TARGET}/release/adult-hub-desktop.exe"
 # 1. Automatically increment patch version once per application build
 # Clean up re-entrancy marker on exit so future runs in the same shell still bump
 trap 'unset ADULT_HUB_VERSION_BUMPED 2>/dev/null || true' EXIT
-if [[ "${SKIP_VERSION_BUMP:-0}" != "1" && "${ADULT_HUB_VERSION_BUMPED:-0}" != "1" && "${CI:-false}" != "true" && "${GITHUB_ACTIONS:-false}" != "true" ]]; then
+if [[ "${SKIP_VERSION_BUMP:-0}" != "1" && "${ADULT_HUB_VERSION_BUMPED:-0}" != "1" && "${GITHUB_ACTIONS:-false}" != "true" && ("${CI:-false}" != "true" || "${AH_DIRECT_BUILD:-0}" == "1") ]]; then
     "${ROOT_DIR}/scripts/bump-version.sh"
     export ADULT_HUB_VERSION_BUMPED=1
 fi
@@ -36,8 +36,10 @@ if [[ -z "${COMMIT_HASH}" || "${COMMIT_HASH}" == "unknown" ]]; then
 fi
 export ADULT_HUB_COMMIT_HASH="${COMMIT_HASH:-}"
 export ADULT_HUB_BUILD_DATE="$(date -u +%Y-%m-%d)"
+BUILD_TIMESTAMP="$(date -u +%Y%m%dT%H%M%S%NZ)"
+export ADULT_HUB_BUILD_ID="${VERSION}-${ADULT_HUB_COMMIT_HASH:-unknown}-${BUILD_TIMESTAMP}"
 
-echo "==> Preparing Windows build for Adult Hub Desktop v${VERSION} (${ADULT_HUB_COMMIT_HASH}, ${ADULT_HUB_BUILD_DATE})..."
+echo "==> Preparing Windows build for Adult Hub Desktop v${VERSION} (${ADULT_HUB_COMMIT_HASH}, ${BUILD_TIMESTAMP})..."
 
 mkdir -p "${CACHE_DIR}" "${BIN_DIR}"
 if [[ ! -s "${MPV_DLL}" ]]; then
@@ -98,6 +100,7 @@ echo "Adult Hub Desktop Windows Build Complete"
 echo "Version:         ${VERSION}"
 echo "Commit:          ${ADULT_HUB_COMMIT_HASH}"
 echo "Build Date:      ${ADULT_HUB_BUILD_DATE}"
+echo "Build ID:        ${ADULT_HUB_BUILD_ID}"
 echo "Target:          ${TARGET}"
 echo "Output Directory: ${BIN_DIR}"
 echo "Executable:      ${BIN_DIR}/adult-hub-desktop.exe"

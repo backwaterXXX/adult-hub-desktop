@@ -12,6 +12,13 @@ if [[ "${SKIP_VERSION_BUMP:-0}" != "1" && "${ADULT_HUB_VERSION_BUMPED:-0}" != "1
     export ADULT_HUB_VERSION_BUMPED=1
 fi
 
+VERSION=$(grep -m 1 '^version = ' "${ROOT_DIR}/desktop/Cargo.toml" | sed -E 's/version = "([^"]+)"/\1/')
+COMMIT_HASH=$(git -C "${ROOT_DIR}" rev-parse --short=8 HEAD 2>/dev/null || true)
+BUILD_TIMESTAMP="$(date -u +%Y%m%dT%H%M%S%NZ)"
+export ADULT_HUB_COMMIT_HASH="${COMMIT_HASH:-unknown}"
+export ADULT_HUB_BUILD_DATE="$(date -u +%Y-%m-%d)"
+export ADULT_HUB_BUILD_ID="${VERSION}-${ADULT_HUB_COMMIT_HASH}-${BUILD_TIMESTAMP}"
+
 MODE="${1:-release}"
 CARGO_FLAGS=()
 if [[ "${MODE}" == "release" ]]; then
@@ -23,7 +30,7 @@ fi
 
 "${ROOT_DIR}/scripts/warn-target-size.sh"
 
-echo "==> Building Linux (${MODE}) binary..."
+echo "==> Building Linux ${MODE} binary v${VERSION} (${ADULT_HUB_BUILD_ID})..."
 "${ROOT_DIR}/dev/run.sh" cargo build --manifest-path desktop/Cargo.toml "${CARGO_FLAGS[@]}"
 
 "${ROOT_DIR}/scripts/warn-target-size.sh"
@@ -42,4 +49,4 @@ if [[ -f "${ROOT_DIR}/desktop/sample.mp4" && ! -f "${BIN_DIR}/sample.mp4" ]]; th
     cp "${ROOT_DIR}/desktop/sample.mp4" "${BIN_DIR}/sample.mp4"
 fi
 
-echo "==> Done! Linux binary: ${BIN_DIR}/adult-hub-desktop"
+echo "==> Done! Linux binary v${VERSION} (${ADULT_HUB_BUILD_ID}): ${BIN_DIR}/adult-hub-desktop"
