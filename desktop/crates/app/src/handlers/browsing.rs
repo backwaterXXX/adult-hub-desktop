@@ -1082,7 +1082,7 @@ fn get_catalog_page(
         && (!performer_query.is_empty() || !performer_letter.is_empty())
     {
         let search_term = query.trim();
-        let performers_page = jellyfin.get_items(
+        jellyfin.get_items(
             &session.server_url,
             &session.user_id,
             &session.access_token,
@@ -1098,10 +1098,9 @@ fn get_catalog_page(
                 image_types: filters.performer_photo_only.then_some("Primary"),
                 ..Default::default()
             },
-        )?;
-        performers_page
+        )?
     } else if category == "Studios" && !query.trim().is_empty() {
-        let studios_page = jellyfin.get_items(
+        jellyfin.get_items(
             &session.server_url,
             &session.user_id,
             &session.access_token,
@@ -1115,10 +1114,9 @@ fn get_catalog_page(
                 include_item_types: Some("Studio"),
                 ..Default::default()
             },
-        )?;
-        studios_page
+        )?
     } else if category == "Categories" && !query.trim().is_empty() {
-        let categories_page = jellyfin.get_items(
+        jellyfin.get_items(
             &session.server_url,
             &session.user_id,
             &session.access_token,
@@ -1132,8 +1130,7 @@ fn get_catalog_page(
                 include_item_types: Some("Genre"),
                 ..Default::default()
             },
-        )?;
-        categories_page
+        )?
     } else if category == "Favorites" && !query.trim().is_empty() {
         let mut fav_query =
             search_movie_query(query, start_index, &filters, selected_library_id.as_deref());
@@ -1236,7 +1233,7 @@ fn get_catalog_page(
                 } else {
                     ("SortName", false)
                 };
-                let page = jellyfin.get_items(
+                jellyfin.get_items(
                     &session.server_url,
                     &session.user_id,
                     &session.access_token,
@@ -1256,8 +1253,7 @@ fn get_catalog_page(
                             .then_some("Primary"),
                         ..Default::default()
                     },
-                )?;
-                page
+                )?
             }
             _ => TvItemsPage {
                 items: Vec::new(),
