@@ -711,8 +711,9 @@ fn clear_saved_view_queries(
 }
 
 /// Scoped query pages are cached under their category, query, filters, and
-/// drilldown state. The explicit clear-search handler skips its one transition
-/// snapshot so stale results are never filed under the empty-query key.
+/// drilldown state. Transition callers decide whether the current view should
+/// be saved; Clear search opts out so the old results are not filed under an
+/// empty-query key.
 fn save_catalog_view(
     ui: &MainWindow,
     paging: &Arc<Mutex<CatalogPageState>>,
@@ -1138,7 +1139,6 @@ fn get_catalog_page(
     let mut page = if category == "Performers"
         && (!performer_query.is_empty() || !performer_letter.is_empty())
     {
-        let search_term = query.trim();
         jellyfin.get_items(
             &session.server_url,
             &session.user_id,
@@ -1148,7 +1148,7 @@ fn get_catalog_page(
                 start_index,
                 limit: CATALOG_PAGE_SIZE,
                 sort_by: "SortName",
-                search_term: (!search_term.is_empty()).then_some(search_term),
+                search_term: (!performer_query.is_empty()).then_some(performer_query),
                 name_starts_with: (!performer_letter.is_empty()).then_some(performer_letter),
                 include_item_types: Some("Person"),
                 person_types: Some("Actor"),
@@ -1880,6 +1880,8 @@ pub fn restore_nav_destination(
             drilldown,
         } => {
             ui.set_active_screen("browse".into());
+            // The active-category change clears applied query in Slint, so
+            // restore this category before restoring its saved query below.
             ui.set_active_category(category.clone().into());
             ui.set_search_query(search_query.clone().into());
             ui.set_search_applied_query(search_query.clone().into());
