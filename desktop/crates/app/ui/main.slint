@@ -4021,15 +4021,55 @@ export component MainWindow inherits Window {
                         }
                     }
 
-                    // 3. Photo Toggle Button ("With photo only")
-                    TvChoiceChip {
-                        text: "With photo only";
-                        selected: root.performers-photo-only;
-                        custom-height: 40px;
-                        clicked => {
-                            root.performers-photo-only = !root.performers-photo-only;
-                            root.filter-category("Performers");
-                            keys.focus();
+                    // 3. Camera Toggle Button ("With photo")
+                    photo-toggle-btn := Rectangle {
+                        width: 44px;
+                        height: 40px;
+                        border-radius: 8px;
+                        background: root.performers-photo-only ? #BE185D33 : (photo-touch.has-hover ? #FFFFFF14 : #1c1d24);
+                        border-width: 1px;
+                        border-color: root.performers-photo-only ? HubTheme.focus-ring : (photo-touch.has-hover ? #FFFFFF33 : #FFFFFF18);
+                        accessible-role: checkbox;
+                        accessible-checked: root.performers-photo-only;
+                        accessible-label: "Filter performers with photo";
+
+                        Image {
+                            source: @image-url("../../../assets/icons/camera.svg");
+                            width: 20px;
+                            height: 20px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            image-fit: contain;
+                        }
+
+                        if photo-touch.has-hover : Rectangle {
+                            y: -30px;
+                            x: (parent.width - self.width) / 2;
+                            height: 24px;
+                            width: photo-tip.preferred-width + 16px;
+                            border-radius: 4px;
+                            background: #14141cf5;
+                            border-width: 1px;
+                            border-color: #BE185D88;
+                            z: 50;
+
+                            photo-tip := Text {
+                                x: 8px;
+                                y: 4px;
+                                text: "With photo only";
+                                color: #FFFFFF;
+                                font-size: 11px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        photo-touch := TouchArea {
+                            clicked => {
+                                root.performers-photo-only = !root.performers-photo-only;
+                                root.filter-category("Performers");
+                                keys.focus();
+                            }
                         }
                     }
 
