@@ -3365,6 +3365,9 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             let leave_search_for_genre = key.as_str() == "genre"
                 && ui.get_catalog_category_drilldown()
                 && ui.get_is_catalog_search_results();
+            let leave_drilldown = key.as_str() == "genre"
+                && text.is_empty()
+                && ui.get_catalog_category_drilldown();
             match key.as_str() {
                 "genre" => {
                     current.genre = text.clone();
@@ -3388,6 +3391,10 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             }
             set_category_filters(&filters, &cat, current.clone());
             sync_catalog_filters_to_ui(&ui, &cat, &current);
+            if leave_drilldown {
+                ui.set_catalog_category_drilldown(false);
+                ui.set_catalog_genre_query("".into());
+            }
             if leave_search_for_genre {
                 // Load the listing before clearing the search state:
                 // filter_category snapshots the search page while its
