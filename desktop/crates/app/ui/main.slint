@@ -3169,6 +3169,11 @@ export component MainWindow inherits Window {
         }
 
         HorizontalLayout {
+        // Keep the root content inside the native window's client area. Without
+        // explicit bounds, child preferred sizes can make the layout overflow
+        // the window when a screen contains wide content.
+        width: 100%;
+        height: 100%;
         spacing: 0px;
 
         // Persistent desktop navigation rail.
