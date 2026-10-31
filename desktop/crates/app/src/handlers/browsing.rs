@@ -946,13 +946,12 @@ fn reported_catalog_total(
     page_total: usize,
     cards_len: usize,
 ) -> i32 {
-    if !is_search && is_studios && !query.trim().is_empty() {
+    let is_studio_search = is_studios && !query.trim().is_empty();
+    if !is_search && is_studio_search {
         // Studio search totals count raw server rows before client-side
         // aggregation, and stay stable through the final page.
         page_total as i32
-    } else if !is_search && is_studios {
-        cards_len as i32
-    } else if !is_search && !has_more {
+    } else if !is_search && (is_studios || !has_more) {
         cards_len as i32
     } else {
         page_total as i32
