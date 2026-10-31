@@ -970,7 +970,7 @@ component TvChoiceChip inherits Rectangle {
     in property <bool> selected: false;
     in property <bool> removable: false;
     in property <bool> enabled: true;
-    in property <length> custom-height: 0px;
+    in property <length> custom-height: 32px;
     out property <bool> has-focus: focus-scope.has-focus;
     callback clicked();
 
@@ -2395,6 +2395,7 @@ export component MainWindow inherits Window {
     in-out property <string> search-focus-target: "catalog";
     in-out property <int> search-focus-sequence: 0;
     in-out property <bool> is-catalog-search-results: false;
+    property <bool> scoped-search-active: root.search-applied-query != "" && !root.is-catalog-search-results;
     in-out property <string> search-applied-query: "";
     in-out property <string> search-error-message: "";
     in-out property <bool> search-all-has-more: false;
@@ -2459,6 +2460,7 @@ export component MainWindow inherits Window {
     changed active-category => {
         root.catalog-filters-expanded = false;
         root.search-focused = false;
+        root.search-applied-query = "";
     }
     in-out property <string> current-library: "All Videos";
     in-out property <[LibraryOptionData]> library-options: [];
@@ -3267,6 +3269,7 @@ export component MainWindow inherits Window {
                             root.catalog-category-drilldown = false;
                             root.catalog-genre-query = "";
                             root.search-query = "";
+                            root.search-applied-query = "";
                             root.switch-screen("browse");
                             root.filter-category("Latest");
                         }
@@ -3282,6 +3285,7 @@ export component MainWindow inherits Window {
                             root.catalog-category-drilldown = false;
                             root.catalog-genre-query = "";
                             root.search-query = "";
+                            root.search-applied-query = "";
                             root.switch-screen("browse");
                             root.filter-category("Continue Watching");
                         }
@@ -3297,6 +3301,7 @@ export component MainWindow inherits Window {
                             root.catalog-category-drilldown = false;
                             root.catalog-genre-query = "";
                             root.search-query = "";
+                            root.search-applied-query = "";
                             root.switch-screen("browse");
                             root.filter-category("Favorites");
                         }
@@ -3312,6 +3317,7 @@ export component MainWindow inherits Window {
                             root.catalog-category-drilldown = false;
                             root.catalog-genre-query = "";
                             root.search-query = "";
+                            root.search-applied-query = "";
                             root.switch-screen("browse");
                             root.filter-category("Watch History");
                         }
@@ -3327,6 +3333,7 @@ export component MainWindow inherits Window {
                             root.catalog-category-drilldown = false;
                             root.catalog-genre-query = "";
                             root.search-query = "";
+                            root.search-applied-query = "";
                             root.switch-screen("browse");
                             root.filter-category("Categories");
                         }
@@ -3342,6 +3349,7 @@ export component MainWindow inherits Window {
                             root.catalog-category-drilldown = false;
                             root.catalog-genre-query = "";
                             root.search-query = "";
+                            root.search-applied-query = "";
                             root.switch-screen("browse");
                             root.filter-category("Performers");
                         }
@@ -3357,6 +3365,7 @@ export component MainWindow inherits Window {
                             root.catalog-category-drilldown = false;
                             root.catalog-genre-query = "";
                             root.search-query = "";
+                            root.search-applied-query = "";
                             root.switch-screen("browse");
                             root.filter-category("Studios");
                         }
@@ -3794,6 +3803,7 @@ export component MainWindow inherits Window {
                             root.catalog-category-drilldown = true;
                             root.catalog-genre-query = category-name;
                             root.search-query = "";
+                            root.search-applied-query = "";
                             root.switch-screen("browse");
                             root.set-catalog-text-filter("genre", category-name);
                         }
@@ -3863,11 +3873,12 @@ export component MainWindow inherits Window {
                         text: "Back to Categories";
                         custom-height: 40px;
                         clicked => {
-                            root.catalog-category-drilldown = false;
+                            root.active-category = "Categories";
                             root.catalog-genre-query = "";
                             root.search-query = "";
-                            root.active-category = "Categories";
+                            root.search-applied-query = "";
                             root.set-catalog-text-filter("genre", "");
+                            root.catalog-category-drilldown = false;
                         }
                     }
                 }
@@ -4039,53 +4050,69 @@ export component MainWindow inherits Window {
                     }
 
                     // 3. Camera Toggle Button ("With photo")
-                    photo-toggle-btn := Rectangle {
-                        width: 44px;
-                        height: 40px;
-                        border-radius: 8px;
-                        background: root.performers-photo-only ? #BE185D33 : (photo-touch.has-hover ? #FFFFFF14 : #1c1d24);
-                        border-width: 1px;
-                        border-color: root.performers-photo-only ? HubTheme.focus-ring : (photo-touch.has-hover ? #FFFFFF33 : #FFFFFF18);
-                        accessible-role: checkbox;
-                        accessible-checked: root.performers-photo-only;
-                        accessible-label: "Filter performers with photo";
+                    Rectangle {
+                        width: 120px;
+                        height: HubTheme.control-height;
+                        forward-focus: photo-focus;
+                        border-radius: HubTheme.control-radius;
+                        background: root.performers-photo-only
+                            ? HubTheme.accent
+                            : (photo-focus.has-focus || photo-touch.has-hover ? HubTheme.surface-hover : HubTheme.surface);
+                        border-width: photo-focus.has-focus ? 2px : 1px;
+                        border-color: photo-focus.has-focus
+                            ? HubTheme.focus-ring
+                            : (root.performers-photo-only ? HubTheme.accent-outline : HubTheme.separator);
 
-                        Image {
-                            source: @image-url("../../../assets/icons/camera.svg");
-                            width: 20px;
-                            height: 20px;
-                            x: (parent.width - self.width) / 2;
-                            y: (parent.height - self.height) / 2;
-                            image-fit: contain;
-                        }
+                        HorizontalLayout {
+                            padding-left: HubTheme.space-2;
+                            padding-right: HubTheme.space-2;
+                            spacing: HubTheme.space-1;
+                            alignment: center;
 
-                        if photo-touch.has-hover : Rectangle {
-                            y: -30px;
-                            x: (parent.width - self.width) / 2;
-                            height: 24px;
-                            width: photo-tip.preferred-width + 16px;
-                            border-radius: 4px;
-                            background: #14141cf5;
-                            border-width: 1px;
-                            border-color: #BE185D88;
-                            z: 50;
+                            Image {
+                                source: @image-url("../../../assets/icons/camera.svg");
+                                width: 18px;
+                                height: 18px;
+                                colorize: root.performers-photo-only ? HubTheme.text-primary : HubTheme.text-secondary;
+                                image-fit: contain;
+                            }
 
-                            photo-tip := Text {
-                                x: 8px;
-                                y: 4px;
-                                text: "With photo only";
-                                color: #FFFFFF;
-                                font-size: 11px;
+                            Text {
+                                text: "With photo";
+                                color: HubTheme.text-primary;
+                                font-size: HubTheme.metadata-size;
                                 font-weight: 600;
                                 vertical-alignment: center;
                             }
                         }
 
                         photo-touch := TouchArea {
+                            accessible-role: checkbox;
+                            accessible-checked: root.performers-photo-only;
+                            accessible-label: "Filter performers with photo";
+                            accessible-action-default => {
+                                root.performers-photo-only = !root.performers-photo-only;
+                                root.filter-category("Performers");
+                                keys.focus();
+                            }
                             clicked => {
                                 root.performers-photo-only = !root.performers-photo-only;
                                 root.filter-category("Performers");
                                 keys.focus();
+                            }
+                        }
+
+                        photo-focus := FocusScope {
+                            width: 0px;
+                            height: 0px;
+                            key-pressed(event) => {
+                                if (event.text == Key.Space || event.text == Key.Return) {
+                                    root.performers-photo-only = !root.performers-photo-only;
+                                    root.filter-category("Performers");
+                                    keys.focus();
+                                    return accept;
+                                }
+                                reject
                             }
                         }
                     }
@@ -4521,7 +4548,7 @@ export component MainWindow inherits Window {
                     }
 
                     // 2. Filtered-out state (active filters resulted in 0 items)
-                    if (!root.is-catalog-search-results || root.search-error-message == "") && (root.catalog-active-filter-count > 0 || (root.is-catalog-search-results && root.search-applied-query != "") || (root.active-category == "Performers" && (root.performer-search-query != "" || root.performer-letter != "" || root.performers-photo-only)) || root.search-query != "") : HorizontalLayout {
+                    if (!root.is-catalog-search-results || root.search-error-message == "") && (root.catalog-active-filter-count > 0 || (root.is-catalog-search-results && root.search-applied-query != "") || (root.active-category == "Performers" && (root.performer-search-query != "" || root.performer-letter != "" || root.performers-photo-only)) || root.scoped-search-active) : HorizontalLayout {
                         alignment: center;
 
                         Rectangle {
@@ -4537,14 +4564,14 @@ export component MainWindow inherits Window {
                                         : (root.active-category == "Performers" ? "No performers match active filters"
                                         : (root.active-category == "Studios" ? "No studios match active filters"
                                         : (root.active-category == "Categories" ? "No categories match active filters"
-                                        : (root.catalog-category-drilldown && root.search-query != ""
-                                            ? ("No videos match \"" + root.search-query + "\" in " + root.catalog-genre-query)
-                                            : (root.active-category == "Favorites" && root.search-query != ""
-                                                ? ("No favorites match \"" + root.search-query + "\"")
-                                                : (root.active-category == "Watch History" && root.search-query != ""
-                                                    ? ("No history items match \"" + root.search-query + "\"")
-                                                    : (root.active-category == "Continue Watching" && root.search-query != ""
-                                                        ? ("No continue watching videos match \"" + root.search-query + "\"")
+                                        : (root.catalog-category-drilldown && root.search-applied-query != ""
+                                            ? ("No videos match \"" + root.search-applied-query + "\" in " + root.catalog-genre-query)
+                                            : (root.active-category == "Favorites" && root.search-applied-query != ""
+                                                ? ("No favorites match \"" + root.search-applied-query + "\"")
+                                                : (root.active-category == "Watch History" && root.search-applied-query != ""
+                                                    ? ("No history items match \"" + root.search-applied-query + "\"")
+                                                    : (root.active-category == "Continue Watching" && root.search-applied-query != ""
+                                                        ? ("No continue watching videos match \"" + root.search-applied-query + "\"")
                                                         : "No videos match active filters")))))));
                                     color: #eeeeF4;
                                     font-size: 19px;
@@ -4562,7 +4589,7 @@ export component MainWindow inherits Window {
                                                 ? "Try clearing filters or search term to see all available studios."
                                                 : (root.active-category == "Categories"
                                                     ? "Try clearing the search term to see all available categories."
-                                                    : (root.search-query != ""
+                                                    : (root.search-applied-query != ""
                                                         ? "Try clearing the search term to see all available videos."
                                                         : "Try clearing filters to see all available videos in this section."))));
                                     color: #95919e;
@@ -4609,7 +4636,7 @@ export component MainWindow inherits Window {
                     }
 
                     // 3. Truly empty state (no filters active)
-                    if (!root.is-catalog-search-results || root.search-error-message == "") && root.catalog-active-filter-count == 0 && (!root.is-catalog-search-results || root.search-applied-query == "") && (root.active-category != "Performers" || (root.performer-search-query == "" && root.performer-letter == "" && !root.performers-photo-only)) && ((root.active-category != "Studios" && root.active-category != "Categories") || root.search-query == "") : VerticalLayout {
+                    if (!root.is-catalog-search-results || root.search-error-message == "") && root.catalog-active-filter-count == 0 && (!root.is-catalog-search-results || root.search-applied-query == "") && (root.active-category != "Performers" || (root.performer-search-query == "" && root.performer-letter == "" && !root.performers-photo-only)) && !root.scoped-search-active : VerticalLayout {
                         alignment: center;
                         spacing: 8px;
                         Text {
@@ -4719,14 +4746,14 @@ export component MainWindow inherits Window {
                         // two-card row across the entire viewport.
                         alignment: start;
 
-                        if row.has-0 : CatalogGridCard { card: row.card-0; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.search-query = ""; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
-                        if row.has-1 : CatalogGridCard { card: row.card-1; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.search-query = ""; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
-                        if row.has-2 : CatalogGridCard { card: row.card-2; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.search-query = ""; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
-                        if row.has-3 : CatalogGridCard { card: row.card-3; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.search-query = ""; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
-                        if row.has-4 : CatalogGridCard { card: row.card-4; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.search-query = ""; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
-                        if row.has-5 : CatalogGridCard { card: row.card-5; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.search-query = ""; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
-                        if row.has-6 : CatalogGridCard { card: row.card-6; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.search-query = ""; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
-                        if row.has-7 : CatalogGridCard { card: row.card-7; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.search-query = ""; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
+                        if row.has-0 : CatalogGridCard { card: row.card-0; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.search-query = ""; root.search-applied-query = ""; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
+                        if row.has-1 : CatalogGridCard { card: row.card-1; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.search-query = ""; root.search-applied-query = ""; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
+                        if row.has-2 : CatalogGridCard { card: row.card-2; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.search-query = ""; root.search-applied-query = ""; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
+                        if row.has-3 : CatalogGridCard { card: row.card-3; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.search-query = ""; root.search-applied-query = ""; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
+                        if row.has-4 : CatalogGridCard { card: row.card-4; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.search-query = ""; root.search-applied-query = ""; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
+                        if row.has-5 : CatalogGridCard { card: row.card-5; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.search-query = ""; root.search-applied-query = ""; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
+                        if row.has-6 : CatalogGridCard { card: row.card-6; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.search-query = ""; root.search-applied-query = ""; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
+                        if row.has-7 : CatalogGridCard { card: row.card-7; card-width: root.desired-catalog-card-width; focused-index: root.focused-card-index; open-performer(n) => { root.open-performer-profile(n); } open-studio(n) => { root.open-studio-profile(n); } open-category(n) => { root.active-category = "Latest"; root.catalog-category-drilldown = true; root.catalog-genre-query = n; root.search-query = ""; root.search-applied-query = ""; root.set-catalog-text-filter("genre", n); } play(id) => { root.play-item(id); } open-detail(id) => { root.open-item-detail(id); } retry-thumbnail(item) => { root.retry-thumbnail(item); } }
                     }
                 }
 
@@ -4766,6 +4793,7 @@ export component MainWindow inherits Window {
                         root.catalog-category-drilldown = true;
                         root.catalog-genre-query = name;
                         root.search-query = "";
+                        root.search-applied-query = "";
                         root.set-catalog-text-filter("genre", name);
                     }
                     retry-thumbnail(item) => { root.retry-thumbnail(item); }
@@ -8060,6 +8088,7 @@ export component MainWindow inherits Window {
                                     clicked => {
                                         root.active-category = "Latest";
                                         root.search-query = "";
+                                        root.search-applied-query = "";
                                         root.catalog-genre-query = genre;
                                         root.switch-screen("browse");
                                         root.set-catalog-text-filter("genre", genre);
@@ -8079,7 +8108,7 @@ export component MainWindow inherits Window {
                                         root.active-category = "Latest";
                                         root.catalog-genre-query = "";
                                         root.catalog-category-drilldown = false;
-                                        root.is-catalog-search-results = true;
+                                        root.search-applied-query = "";
                                         root.switch-screen("browse");
                                         root.search-catalog(tag);
                                     }
@@ -8401,6 +8430,7 @@ export component MainWindow inherits Window {
                                 root.active-screen = "browse";
                                 root.active-category = "Latest";
                                 root.search-query = "";
+                                root.search-applied-query = "";
                                 root.catalog-performer-query = root.performer-name;
                                 root.set-catalog-text-filter("performer", root.performer-name);
                             }
@@ -8660,6 +8690,7 @@ export component MainWindow inherits Window {
                                 root.active-screen = "browse";
                                 root.active-category = "Latest";
                                 root.search-query = "";
+                                root.search-applied-query = "";
                                 root.catalog-studio-query = root.studio-name;
                                 root.set-catalog-text-filter("studio", root.studio-name);
                             }
@@ -9566,6 +9597,7 @@ export component MainWindow inherits Window {
                         root.catalog-category-drilldown = false;
                         root.catalog-genre-query = "";
                         root.search-query = "";
+                        root.search-applied-query = "";
                         root.switch-screen("browse");
                         root.filter-category("Categories");
                     }
@@ -9581,6 +9613,7 @@ export component MainWindow inherits Window {
                         root.catalog-category-drilldown = false;
                         root.catalog-genre-query = "";
                         root.search-query = "";
+                        root.search-applied-query = "";
                         root.switch-screen("browse");
                         root.filter-category("Performers");
                     }
@@ -9596,6 +9629,7 @@ export component MainWindow inherits Window {
                         root.catalog-category-drilldown = false;
                         root.catalog-genre-query = "";
                         root.search-query = "";
+                        root.search-applied-query = "";
                         root.switch-screen("browse");
                         root.filter-category("Studios");
                     }

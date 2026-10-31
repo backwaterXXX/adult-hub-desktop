@@ -262,7 +262,7 @@ pub fn trigger_movie_switch(ui: &MainWindow, ctx: &AppContext, is_random: bool) 
     });
 }
 
-pub fn compute_volume_state(vol: f32, muted: bool) -> (f32, bool) {
+fn compute_volume_state(vol: f32, muted: bool) -> (f32, bool) {
     let clamped = vol.clamp(0.0, 100.0);
     let new_muted = if clamped > 0.0 && muted { false } else { muted };
     (clamped, new_muted)

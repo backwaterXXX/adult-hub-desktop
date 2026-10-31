@@ -15,7 +15,7 @@ use adult_hub_client::{
 };
 use adult_hub_storage::{LocalStore, Session};
 use slint::{ComponentHandle, Model};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -69,13 +69,13 @@ fn catalog_generation_is_current(generation: &AtomicU64, request_id: u64) -> boo
     generation.load(Ordering::SeqCst) == request_id
 }
 
-pub fn active_search_context(ui: &MainWindow) -> &'static str {
-    if ui.get_active_screen() == "channels" {
+fn search_context(screen: &str, category: &str, drilldown: bool) -> &'static str {
+    if screen == "channels" {
         "channels"
-    } else if ui.get_catalog_category_drilldown() {
+    } else if drilldown {
         "category_drilldown"
     } else {
-        match ui.get_active_category().as_str() {
+        match category {
             "Performers" => "performers",
             "Studios" => "studios",
             "Categories" => "tags",
@@ -87,9 +87,27 @@ pub fn active_search_context(ui: &MainWindow) -> &'static str {
     }
 }
 
+fn resolved_search_context(screen: &str, category: &str, drilldown: bool, genre: &str) -> String {
+    match search_context(screen, category, drilldown) {
+        "category_drilldown" => format!("category:{genre}"),
+        context => context.to_string(),
+    }
+}
+
+pub fn active_search_context(ui: &MainWindow) -> String {
+    resolved_search_context(
+        ui.get_active_screen().as_str(),
+        ui.get_active_category().as_str(),
+        ui.get_catalog_category_drilldown(),
+        ui.get_catalog_genre_query().as_str(),
+    )
+}
+
 pub fn refresh_recent_searches_for_context(ui: &MainWindow, store: &LocalStore) {
     let ctx = active_search_context(ui);
-    let items = store.get_search_history_context(ctx, 8).unwrap_or_default();
+    let items = store
+        .get_search_history_context(&ctx, 8)
+        .unwrap_or_default();
     set_recent_searches(ui, items);
 }
 
@@ -427,6 +445,10 @@ fn resolve_home_category_ids(categories: &[TvItem], local_store: &LocalStore) ->
 struct CatalogPageState {
     category: String,
     query: String,
+    drilldown: bool,
+    /// True only for the global multi-source search results view. Scoped
+    /// searches keep a query but continue through the category paging path.
+    is_search: bool,
     library_id: String,
     next_start: usize,
     has_more: bool,
@@ -645,15 +667,13 @@ fn set_category_filters(
 
 fn catalog_view_key(page: &CatalogPageState) -> String {
     format!(
-        "{}\0{}\0{}\0{:?}",
-        page.library_id, page.category, page.query, page.filters
+        "{}\0{}\0{}\0{}\0{}\0{:?}",
+        page.library_id, page.category, page.query, page.drilldown, page.is_search, page.filters
     )
 }
 
-/// Drop the remembered field text from every stored view of `category`.
-/// Snapshots keep the typed query so navigating away and back restores it, but
-/// after an explicit "Clear search" the old text must not resurface when the
-/// category listing is restored from its snapshot.
+/// Drop the remembered field text from every stored view of `category` after
+/// an explicit "Clear search" so the old query does not reappear on restore.
 fn clear_saved_view_queries(
     views: &Rc<RefCell<std::collections::HashMap<String, CatalogViewSnapshot>>>,
     category: &str,
@@ -665,6 +685,9 @@ fn clear_saved_view_queries(
     }
 }
 
+/// Scoped query pages are cached under their category, query, filters, and
+/// drilldown state. The explicit clear-search handler skips its one transition
+/// snapshot so stale results are never filed under the empty-query key.
 fn save_catalog_view(
     ui: &MainWindow,
     paging: &Arc<Mutex<CatalogPageState>>,
@@ -676,12 +699,6 @@ fn save_catalog_view(
     }
     let mut page = paging.lock().unwrap().clone();
     if page.category.is_empty() {
-        return;
-    }
-    // "Clear search" empties the search UI before filter_category swaps the
-    // paging state, so snapshotting that half-cleared mix would overwrite the
-    // cached search view with a non-search page filed under the old query.
-    if !page.query.is_empty() && !ui.get_is_catalog_search_results() {
         return;
     }
     page.loading_more = false;
@@ -699,9 +716,18 @@ fn save_catalog_view(
         anchor_index: ui.get_catalog_anchor_index(),
         anchor_screen_y: ui.get_catalog_anchor_screen_y(),
         more_error: ui.get_catalog_more_error().to_string(),
-        is_search: ui.get_is_catalog_search_results(),
-        search_query: ui.get_search_query().to_string(),
-        search_applied_query: ui.get_search_applied_query().to_string(),
+        is_search: page.is_search,
+        search_query: if !page.is_search && page.category != "Performers" && !page.query.is_empty()
+        {
+            page.query.clone()
+        } else {
+            ui.get_search_query().to_string()
+        },
+        search_applied_query: if !page.is_search && !page.query.is_empty() {
+            page.query.clone()
+        } else {
+            ui.get_search_applied_query().to_string()
+        },
         search_error: ui.get_search_error_message().to_string(),
         search_results_filter: ui.get_search_results_filter().to_string(),
         search_movie_count: ui.get_search_movie_count(),
@@ -735,6 +761,10 @@ fn restore_catalog_view(
     let mut page = snapshot.page.clone();
     page.loading_more = false;
     sync_catalog_filters_to_ui(ui, &page.category, &page.filters);
+    ui.set_catalog_category_drilldown(page.drilldown);
+    if page.category == "Performers" {
+        ui.set_performer_search_query(page.query.clone().into());
+    }
     *paging.lock().unwrap() = page;
     *cached_items.lock().unwrap() = snapshot.items.clone();
 
@@ -801,7 +831,7 @@ fn sync_catalog_filters_to_ui(ui: &MainWindow, category: &str, filters: &Catalog
 /// one scope for display and application is what makes query, filters, the
 /// active-filter counter and the rendered results describe one state.
 fn catalog_filter_scope(ui: &MainWindow) -> String {
-    if ui.get_is_catalog_search_results() {
+    if ui.get_is_catalog_search_results() || ui.get_catalog_category_drilldown() {
         "Latest".to_string()
     } else {
         ui.get_active_category().to_string()
@@ -882,6 +912,101 @@ struct CatalogPage {
     supplemental_total: usize,
 }
 
+fn get_resume_search_catalog_page(
+    jellyfin: &JellyfinClient,
+    session: &Session,
+    local_store: &LocalStore,
+    query: &str,
+    start_index: usize,
+    filters: CatalogFilters,
+) -> std::result::Result<CatalogPage, JellyfinError> {
+    let mut items = Vec::new();
+    let mut server_start = 0;
+    loop {
+        let page = jellyfin.get_resume_items_page(
+            &session.server_url,
+            &session.user_id,
+            &session.access_token,
+            server_start,
+            CATALOG_PAGE_SIZE,
+        )?;
+        let fetched = page.items.len();
+        let server_total = page.total_record_count;
+        items.extend(page.items);
+        server_start = server_start.saturating_add(fetched);
+        if fetched == 0 || server_start >= server_total {
+            break;
+        }
+    }
+
+    if let Ok(records) = local_store.get_all_telegram_progress(50) {
+        for record in records.into_iter().filter(|record| !record.is_played) {
+            let item_id = format!("telegram:{}", record.provider_video_id);
+            if items.iter().any(|item| {
+                item.id == item_id
+                    || item.provider_video_id.as_deref() == Some(record.provider_video_id.as_str())
+            }) {
+                continue;
+            }
+            items.push(TvItem {
+                id: item_id,
+                title: if record.title.is_empty() {
+                    format!("Telegram {}", record.provider_video_id)
+                } else {
+                    record.title
+                },
+                runtime_ticks: Some((record.duration_ms * 10_000) as i64),
+                genres: vec!["Telegram".into()],
+                primary_image_tag: record.thumbnail_url,
+                playback_position_ticks: (record.position_ms * 10_000) as i64,
+                played_percentage: (record.duration_ms > 0)
+                    .then_some(record.position_ms as f64 / record.duration_ms as f64 * 100.0),
+                provider_video_id: Some(record.provider_video_id),
+                container: Some("mp4".into()),
+                ..Default::default()
+            });
+        }
+    }
+
+    let query = query.trim().to_lowercase();
+    items.retain(|item| {
+        (item.title.to_lowercase().contains(&query)
+            || item
+                .overview
+                .as_ref()
+                .is_some_and(|overview| overview.to_lowercase().contains(&query)))
+            && filters.accepts(item)
+    });
+    match filters.sort {
+        1 => items.sort_by_key(|item| item.title.to_lowercase()),
+        2 => items.sort_by_key(|item| item.runtime_ticks.unwrap_or_default()),
+        3 => items.sort_by(|a, b| {
+            a.community_rating
+                .unwrap_or_default()
+                .total_cmp(&b.community_rating.unwrap_or_default())
+        }),
+        _ => {}
+    }
+    if filters.sort != 0 && filters.descending {
+        items.reverse();
+    }
+
+    let total_count = items.len();
+    let page_items = items
+        .into_iter()
+        .skip(start_index)
+        .take(CATALOG_PAGE_SIZE)
+        .collect::<Vec<_>>();
+    let next_start = start_index + page_items.len();
+    Ok(CatalogPage {
+        items: page_items,
+        next_start,
+        total_count,
+        has_more: next_start < total_count,
+        supplemental_total: 0,
+    })
+}
+
 fn get_catalog_page(
     jellyfin: &JellyfinClient,
     resolver: &ResolverClient,
@@ -889,6 +1014,7 @@ fn get_catalog_page(
     local_store: &LocalStore,
     category: &str,
     query: &str,
+    drilldown: bool,
     start_index: usize,
     filters: CatalogFilters,
 ) -> std::result::Result<CatalogPage, JellyfinError> {
@@ -933,6 +1059,17 @@ fn get_catalog_page(
         });
     }
 
+    if matches!(category, "Resume" | "Continue Watching") && !query.trim().is_empty() {
+        return get_resume_search_catalog_page(
+            jellyfin,
+            session,
+            local_store,
+            query,
+            start_index,
+            filters,
+        );
+    }
+
     let mut supplemental_count = 0;
     let mut supplemental_total = 0;
     let selected_library_id = local_store
@@ -962,13 +1099,8 @@ fn get_catalog_page(
                 ..Default::default()
             },
         )?;
-        let mut performers_page = performers_page;
-        for performer in &mut performers_page.items {
-            performer.genres.push("__adult_hub_performer".into());
-        }
         performers_page
     } else if category == "Studios" && !query.trim().is_empty() {
-        let search_term = query.trim();
         let studios_page = jellyfin.get_items(
             &session.server_url,
             &session.user_id,
@@ -979,21 +1111,14 @@ fn get_catalog_page(
                 limit: CATALOG_PAGE_SIZE,
                 sort_by: filters.sort_by(),
                 sort_descending: filters.descending,
-                search_term: (!search_term.is_empty()).then_some(search_term),
+                search_term: Some(query.trim()),
                 include_item_types: Some("Studio"),
                 ..Default::default()
             },
         )?;
-        let mut studios_page = studios_page;
-        studios_page.items = crate::catalog::aggregate_studio_items(studios_page.items);
-        studios_page.total_record_count = studios_page.items.len();
-        for studio in &mut studios_page.items {
-            studio.genres.push("__adult_hub_studio".into());
-        }
         studios_page
     } else if category == "Categories" && !query.trim().is_empty() {
-        let search_term = query.trim();
-        let mut categories_page = jellyfin.get_items(
+        let categories_page = jellyfin.get_items(
             &session.server_url,
             &session.user_id,
             &session.access_token,
@@ -1003,14 +1128,11 @@ fn get_catalog_page(
                 limit: CATALOG_PAGE_SIZE,
                 sort_by: "SortName",
                 sort_descending: false,
-                search_term: (!search_term.is_empty()).then_some(search_term),
+                search_term: Some(query.trim()),
                 include_item_types: Some("Genre"),
                 ..Default::default()
             },
         )?;
-        for cat_item in &mut categories_page.items {
-            cat_item.genres.push("__adult_hub_genre".into());
-        }
         categories_page
     } else if category == "Favorites" && !query.trim().is_empty() {
         let mut fav_query =
@@ -1022,7 +1144,7 @@ fn get_catalog_page(
             &session.access_token,
             &fav_query,
         )?
-    } else if !filters.genre.is_empty() && !query.trim().is_empty() {
+    } else if category == "Latest" && drilldown && !query.trim().is_empty() {
         let cat_query =
             search_movie_query(query, start_index, &filters, selected_library_id.as_deref());
         jellyfin.get_items(
@@ -1031,30 +1153,6 @@ fn get_catalog_page(
             &session.access_token,
             &cat_query,
         )?
-    } else if (category == "Resume" || category == "Continue Watching") && !query.trim().is_empty() {
-        let mut resume_page = jellyfin.get_resume_items_page(
-            &session.server_url,
-            &session.user_id,
-            &session.access_token,
-            0,
-            100,
-        )?;
-        let q = query.trim().to_lowercase();
-        resume_page.items.retain(|item| {
-            item.title.to_lowercase().contains(&q)
-                || item
-                    .overview
-                    .as_ref()
-                    .is_some_and(|o| o.to_lowercase().contains(&q))
-        });
-        resume_page.total_record_count = resume_page.items.len();
-        resume_page.items = resume_page
-            .items
-            .into_iter()
-            .skip(start_index)
-            .take(CATALOG_PAGE_SIZE)
-            .collect();
-        resume_page
     } else if !query.trim().is_empty() {
         let movie_query =
             search_movie_query(query, start_index, &filters, selected_library_id.as_deref());
@@ -1159,11 +1257,6 @@ fn get_catalog_page(
                         ..Default::default()
                     },
                 )?;
-                if category == "Performers" {
-                    for performer in &mut page.items {
-                        performer.genres.push("__adult_hub_performer".into());
-                    }
-                }
                 page
             }
             _ => TvItemsPage {
@@ -1226,9 +1319,6 @@ fn get_catalog_page(
             if !item.genres.iter().any(|g| g == kind_marker) {
                 item.genres.push(kind_marker.into());
             }
-        }
-        if category == "Studios" {
-            page.items = crate::catalog::aggregate_studio_items(page.items);
         }
     } else {
         page.items.retain(|item| {
@@ -1586,6 +1676,7 @@ fn get_catalog_page_with_empty_page_fetch(
     local_store: &LocalStore,
     category: &str,
     query: &str,
+    drilldown: bool,
     start_index: usize,
     filters: CatalogFilters,
     performer_photo_only: bool,
@@ -1597,6 +1688,7 @@ fn get_catalog_page_with_empty_page_fetch(
         local_store,
         category,
         query,
+        drilldown,
         start_index,
         filters.clone(),
     )?;
@@ -1626,6 +1718,7 @@ fn get_catalog_page_with_empty_page_fetch(
             local_store,
             category,
             query,
+            drilldown,
             previous_start,
             filters.clone(),
         )?;
@@ -1667,8 +1760,10 @@ pub fn current_nav_destination(
                 is_search,
                 search_query: if is_search {
                     ui.get_search_query().to_string()
-                } else {
+                } else if ui.get_active_category() == "Performers" {
                     String::new()
+                } else {
+                    ui.get_search_applied_query().to_string()
                 },
                 search_results_filter: ui.get_search_results_filter().to_string(),
                 genre_query: ui.get_catalog_genre_query().to_string(),
@@ -1734,6 +1829,7 @@ pub fn restore_nav_destination(
             ui.set_active_screen("browse".into());
             ui.set_active_category(category.clone().into());
             ui.set_search_query(search_query.clone().into());
+            ui.set_search_applied_query(search_query.clone().into());
             ui.set_search_results_filter(search_results_filter.clone().into());
             ui.set_catalog_genre_query(genre_query.clone().into());
             ui.set_catalog_studio_query(studio_query.into());
@@ -1806,6 +1902,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
     let cached_catalog = ctx.cached_catalog.clone();
     let phash_coord = ctx.phash_coord.clone();
     let qc_generation = Arc::new(AtomicU64::new(0));
+    let skip_next_catalog_view_save = Rc::new(Cell::new(false));
     refresh_recent_searches_for_context(ui, &local_store);
 
     // 1. Screen switching
@@ -3268,6 +3365,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
     {
         let weak = ui.as_weak();
         let catalog_views = catalog_views.clone();
+        let skip_next_catalog_view_save = skip_next_catalog_view_save.clone();
         ui.on_clear_catalog_search(move || {
             let Some(ui) = weak.upgrade() else { return };
             // Separate action from "Reset filters": drops the query and leaves
@@ -3276,6 +3374,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             // DarkLineEdit, so clearing the property clears the visible field.
             CatalogSearchState::cleared().apply(&ui);
             clear_saved_view_queries(&catalog_views, &ui.get_active_category());
+            skip_next_catalog_view_save.set(true);
             ui.invoke_filter_category(ui.get_active_category());
         });
     }
@@ -3302,9 +3401,10 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             // scope the search directly to that screen rather than kicking off a global multi-source search.
             if is_category_drilldown {
                 ui.set_search_query(query.clone().into());
+                ui.set_search_applied_query(query.clone().into());
                 let search_context = active_search_context(&ui);
                 if !query.is_empty() {
-                    let _ = local_store.add_search_query_context(search_context, &query);
+                    let _ = local_store.add_search_query_context(&search_context, &query);
                 }
                 refresh_recent_searches_for_context(&ui, &local_store);
                 ui.invoke_filter_category("Latest".into());
@@ -3318,9 +3418,10 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 || current_cat == "Resume"
             {
                 ui.set_search_query(query.clone().into());
+                ui.set_search_applied_query(query.clone().into());
                 let search_context = active_search_context(&ui);
                 if !query.is_empty() {
-                    let _ = local_store.add_search_query_context(search_context, &query);
+                    let _ = local_store.add_search_query_context(&search_context, &query);
                 }
                 refresh_recent_searches_for_context(&ui, &local_store);
                 ui.invoke_filter_category(current_cat.into());
@@ -3328,6 +3429,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             }
             if current_cat == "Performers" {
                 ui.set_performer_search_query(query.clone().into());
+                ui.set_search_applied_query(query.clone().into());
                 if !query.is_empty() {
                     let _ = local_store.add_search_query_context("performers", &query);
                 }
@@ -3349,6 +3451,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 .unwrap_or_default();
             let target_page = CatalogPageState {
                 category: "Latest".into(),
+                is_search: !query.is_empty(),
                 query: query.clone(),
                 library_id,
                 filters: filters.clone(),
@@ -3422,10 +3525,10 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     return;
                 }
                 if !query.is_empty() {
-                    let _ = local_store.add_search_query_context(search_context, &query);
+                    let _ = local_store.add_search_query_context(&search_context, &query);
                 }
                 let recent_queries = local_store
-                    .get_search_history_context(search_context, 8)
+                    .get_search_history_context(&search_context, 8)
                     .unwrap_or_default();
 
                 let session = credential_store.get().ok().flatten();
@@ -3489,7 +3592,9 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                             }
                             *catalog_paging.lock().unwrap() = CatalogPageState {
                                 category: "Latest".into(),
+                                is_search: !query.is_empty(),
                                 query,
+                                drilldown: false,
                                 library_id: local_store
                                     .get_setting("selected_library_id")
                                     .ok()
@@ -3941,6 +4046,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
         let catalog_paging = catalog_paging.clone();
         let catalog_views = catalog_views.clone();
         let catalog_filters = catalog_filters.clone();
+        let skip_next_catalog_view_save = skip_next_catalog_view_save.clone();
         ui.on_filter_category(move |cat| {
             let Some(ui) = weak.upgrade() else { return };
             if cat != "Latest" {
@@ -3953,7 +4059,9 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     }
                 }
             }
-            save_catalog_view(&ui, &catalog_paging, &cached_catalog, &catalog_views);
+            if !skip_next_catalog_view_save.replace(false) {
+                save_catalog_view(&ui, &catalog_paging, &cached_catalog, &catalog_views);
+            }
             performer_search_generation.fetch_add(1, Ordering::SeqCst);
             search_debounce_generation.fetch_add(1, Ordering::SeqCst);
             if cat == "Channels" {
@@ -3973,21 +4081,18 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             let performers_photo_only = ui.get_performers_photo_only();
             let query = match cat.as_str() {
                 "Performers" => ui.get_performer_search_query().to_string(),
-                "Studios"
-                | "Categories"
-                | "Favorites"
-                | "Watch History"
-                | "Continue Watching"
-                | "Resume" => ui.get_search_query().to_string(),
+                "Studios" | "Categories" | "Favorites" | "Watch History" | "Continue Watching"
+                | "Resume" => ui.get_search_applied_query().to_string(),
                 "Latest" if ui.get_catalog_category_drilldown() => {
-                    ui.get_search_query().to_string()
+                    ui.get_search_applied_query().to_string()
                 }
                 _ => String::new(),
             };
+            ui.set_search_applied_query(query.clone().into());
             let search_context = active_search_context(&ui);
             let trimmed_q = query.trim();
             if !trimmed_q.is_empty() {
-                let _ = local_store.add_search_query_context(search_context, trimmed_q);
+                let _ = local_store.add_search_query_context(&search_context, trimmed_q);
             }
             refresh_recent_searches_for_context(&ui, &local_store);
             let cat = cat.to_string();
@@ -4005,6 +4110,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             let target_page = CatalogPageState {
                 category: cat.clone(),
                 query: query.clone(),
+                drilldown: cat == "Latest" && ui.get_catalog_category_drilldown(),
                 library_id: library_id.clone(),
                 filters: filters.clone(),
                 ..CatalogPageState::default()
@@ -4060,6 +4166,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             let catalog_generation = catalog_generation.clone();
             let catalog_paging = catalog_paging.clone();
             let library_id = library_id.clone();
+            let drilldown = target_page.drilldown;
             sync_catalog_filters_to_ui(&ui, &cat, &filters);
 
             std::thread::spawn(move || {
@@ -4076,6 +4183,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                             &local_store,
                             &cat,
                             &query,
+                            drilldown,
                             0,
                             filters.clone(),
                             performers_photo_only,
@@ -4113,7 +4221,6 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 };
                 let image_server = image_auth.as_ref().map(|(server, _)| server.clone());
                 let token_for_refresh = image_auth.map(|(_, token)| token);
-                let is_studios = cat == "Studios";
                 slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
                         if !catalog_generation_is_current(&catalog_generation, request_id) {
@@ -4123,6 +4230,8 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                         *catalog_paging.lock().unwrap() = CatalogPageState {
                             category: cat,
                             query,
+                            drilldown,
+                            is_search: false,
                             library_id,
                             next_start,
                             has_more,
@@ -4141,17 +4250,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                             .collect::<Vec<_>>();
                         set_catalog(&ui, cards.clone());
                         ui.set_catalog_has_more(has_more);
-                        let reported_total = if !has_more {
-                            cards.len()
-                        } else if is_studios {
-                            // Studio records are aggregated client-side, so the
-                            // raw server total is not comparable with the cards
-                            // on screen. Show the honest loaded count instead of
-                            // an "N of M" range against a different universe.
-                            cards.len()
-                        } else {
-                            total_count
-                        };
+                        let reported_total = if has_more { total_count } else { cards.len() };
                         ui.set_catalog_total_count(reported_total as i32);
                         ui.set_is_loading_more(false);
                         ui.set_is_loading_catalog(false);
@@ -4342,6 +4441,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                             &local_store,
                             &requested_page.category,
                             &requested_page.query,
+                            requested_page.drilldown,
                             requested_page.next_start,
                             requested_page.filters.clone(),
                             performer_photo_only,
@@ -4358,7 +4458,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     match result {
                         Ok((page, server_url, token)) => {
                             let supplemental_total = requested_page.supplemental_total;
-                            let is_search = !requested_page.query.is_empty();
+                            let is_search = requested_page.is_search;
                             let items = {
                                 let mut cached = cached_catalog.lock().unwrap();
                                 if requested_page.category == "Studios" {
@@ -4404,6 +4504,8 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                                 .collect::<Vec<_>>();
 
                             let is_studios = requested_page.category == "Studios";
+                            let studio_listing_without_query =
+                                is_studios && requested_page.query.is_empty();
                             *catalog_paging.lock().unwrap() = CatalogPageState {
                                 next_start: page.next_start,
                                 has_more: page.has_more,
@@ -4425,16 +4527,15 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                             };
                             ui.set_catalog_anchor_pending(true);
                             append_catalog_page(&ui, display_cards.clone());
-                            let mut reported_total = if !is_search && (is_studios || !page.has_more)
-                            {
-                                // Studios are aggregated client-side; the raw
-                                // server total is not comparable with the cards
-                                // (see first-page counter), so report the
-                                // honest loaded count while paging continues.
-                                cards.len() as i32
-                            } else {
-                                (page.total_count + supplemental_total) as i32
-                            };
+                            let mut reported_total =
+                                if !is_search && (studio_listing_without_query || !page.has_more) {
+                                    // Unfiltered studio totals count raw server
+                                    // rows, while the displayed list aggregates
+                                    // duplicate studio names.
+                                    cards.len() as i32
+                                } else {
+                                    (page.total_count + supplemental_total) as i32
+                                };
                             if is_search {
                                 let (
                                     movie_count,
@@ -4903,30 +5004,30 @@ mod tests {
 
     #[test]
     fn test_context_aware_search_context_mapping() {
-        let category_to_context = |cat: &str, drilldown: bool| {
-            if drilldown {
-                "category_drilldown"
-            } else {
-                match cat {
-                    "Performers" => "performers",
-                    "Studios" => "studios",
-                    "Categories" => "tags",
-                    "Favorites" => "favorites",
-                    "Watch History" => "history",
-                    "Continue Watching" | "Resume" => "resume",
-                    _ => "movies",
-                }
-            }
-        };
-
-        assert_eq!(category_to_context("Performers", false), "performers");
-        assert_eq!(category_to_context("Studios", false), "studios");
-        assert_eq!(category_to_context("Categories", false), "tags");
-        assert_eq!(category_to_context("Latest", false), "movies");
-        assert_eq!(category_to_context("Latest", true), "category_drilldown");
-        assert_eq!(category_to_context("Favorites", false), "favorites");
-        assert_eq!(category_to_context("Watch History", false), "history");
-        assert_eq!(category_to_context("Continue Watching", false), "resume");
+        assert_eq!(search_context("browse", "Performers", false), "performers");
+        assert_eq!(search_context("browse", "Studios", false), "studios");
+        assert_eq!(search_context("browse", "Categories", false), "tags");
+        assert_eq!(search_context("browse", "Latest", false), "movies");
+        assert_eq!(search_context("browse", "Favorites", false), "favorites");
+        assert_eq!(search_context("browse", "Watch History", false), "history");
+        assert_eq!(
+            search_context("browse", "Continue Watching", false),
+            "resume"
+        );
+        assert_eq!(search_context("channels", "Latest", true), "channels");
+        assert_eq!(
+            search_context("browse", "Latest", true),
+            "category_drilldown"
+        );
+        assert_ne!(
+            resolved_search_context("browse", "Latest", true, "Anal"),
+            resolved_search_context("browse", "Latest", true, "Blonde"),
+            "Search history must be isolated by drilldown genre"
+        );
+        assert_eq!(
+            resolved_search_context("browse", "Latest", true, "Anal"),
+            "category:Anal"
+        );
     }
 
     #[test]
@@ -4934,6 +5035,7 @@ mod tests {
         let page_genre = CatalogPageState {
             category: "Latest".into(),
             query: "blonde".into(),
+            drilldown: true,
             filters: CatalogFilters {
                 genre: "Anal".into(),
                 ..Default::default()

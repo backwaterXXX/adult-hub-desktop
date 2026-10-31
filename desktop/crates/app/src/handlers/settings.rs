@@ -710,7 +710,7 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
                 ui.set_status("All search history cleared".into());
             } else {
                 let ctx = super::browsing::active_search_context(&ui);
-                let _ = local_store.clear_search_history_context(ctx);
+                let _ = local_store.clear_search_history_context(&ctx);
                 super::browsing::refresh_recent_searches_for_context(&ui, &local_store);
                 ui.set_status(format!("Search history cleared for {ctx}").into());
             }
