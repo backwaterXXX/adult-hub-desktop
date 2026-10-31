@@ -1236,7 +1236,7 @@ fn get_catalog_page(
                 } else {
                     ("SortName", false)
                 };
-                let mut page = jellyfin.get_items(
+                let page = jellyfin.get_items(
                     &session.server_url,
                     &session.user_id,
                     &session.access_token,
