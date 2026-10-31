@@ -709,10 +709,16 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
                 );
                 ui.set_status("All search history cleared".into());
             } else {
+                let label = super::browsing::search_context_label(
+                    ui.get_active_screen().as_str(),
+                    ui.get_active_category().as_str(),
+                    ui.get_catalog_category_drilldown(),
+                    ui.get_catalog_genre_query().as_str(),
+                );
                 let ctx = super::browsing::active_search_context(&ui);
                 let _ = local_store.clear_search_history_context(&ctx);
                 super::browsing::refresh_recent_searches_for_context(&ui, &local_store);
-                ui.set_status(format!("Search history cleared for {ctx}").into());
+                ui.set_status(format!("Search history cleared for {label}").into());
             }
             ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
         });

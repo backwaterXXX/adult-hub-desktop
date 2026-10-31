@@ -95,6 +95,30 @@ fn resolved_search_context(screen: &str, category: &str, drilldown: bool, genre:
     }
 }
 
+pub(super) fn search_context_label(
+    screen: &str,
+    category: &str,
+    drilldown: bool,
+    genre: &str,
+) -> String {
+    if screen == "channels" {
+        "channels".to_string()
+    } else if drilldown {
+        format!("category \"{genre}\"")
+    } else {
+        match category {
+            "Performers" => "performers",
+            "Studios" => "studios",
+            "Categories" => "categories",
+            "Favorites" => "favorites",
+            "Watch History" => "watch history",
+            "Continue Watching" | "Resume" => "continue watching",
+            _ => "movies",
+        }
+        .to_string()
+    }
+}
+
 pub fn active_search_context(ui: &MainWindow) -> String {
     resolved_search_context(
         ui.get_active_screen().as_str(),
@@ -5058,6 +5082,40 @@ mod tests {
             resolved_search_context("browse", "Latest", true, "Anal"),
             "category:Anal"
         );
+    }
+
+    #[test]
+    fn search_context_labels_are_user_facing() {
+        let labels = [
+            ("browse", "Latest", false, "", "movies"),
+            ("browse", "Performers", false, "", "performers"),
+            ("browse", "Studios", false, "", "studios"),
+            ("browse", "Categories", false, "", "categories"),
+            ("browse", "Favorites", false, "", "favorites"),
+            ("browse", "Watch History", false, "", "watch history"),
+            (
+                "browse",
+                "Continue Watching",
+                false,
+                "",
+                "continue watching",
+            ),
+            ("channels", "Latest", false, "", "channels"),
+            (
+                "browse",
+                "Latest",
+                true,
+                "Anal",
+                "category \"Anal\"",
+            ),
+        ];
+
+        for (screen, category, drilldown, genre, expected) in labels {
+            assert_eq!(
+                search_context_label(screen, category, drilldown, genre),
+                expected
+            );
+        }
     }
 
     #[test]
