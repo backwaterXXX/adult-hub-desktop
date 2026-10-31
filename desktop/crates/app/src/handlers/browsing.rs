@@ -3367,9 +3367,8 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             let leave_search_for_genre = key.as_str() == "genre"
                 && ui.get_catalog_category_drilldown()
                 && ui.get_is_catalog_search_results();
-            let leave_drilldown = key.as_str() == "genre"
-                && text.is_empty()
-                && ui.get_catalog_category_drilldown();
+            let leave_drilldown =
+                key.as_str() == "genre" && text.is_empty() && ui.get_catalog_category_drilldown();
             match key.as_str() {
                 "genre" => {
                     current.genre = text.clone();
@@ -4091,7 +4090,9 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
         let catalog_paging = catalog_paging.clone();
         let catalog_views = catalog_views.clone();
         let catalog_filters = catalog_filters.clone();
-        Rc::new(move |ui: MainWindow, cat: slint::SharedString, save_current_view: bool| {
+        let filter_category = move |ui: MainWindow,
+                                    cat: slint::SharedString,
+                                    save_current_view: bool| {
             if cat != "Latest" {
                 ui.set_catalog_category_drilldown(false);
             } else if !ui.get_catalog_category_drilldown() {
@@ -4323,7 +4324,8 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 })
                 .ok();
             });
-        })
+        };
+        Rc::new(filter_category)
     };
     {
         let weak = ui.as_weak();
@@ -5110,13 +5112,7 @@ mod tests {
                 "continue watching",
             ),
             ("channels", "Latest", false, "", "channels"),
-            (
-                "browse",
-                "Latest",
-                true,
-                "Anal",
-                "category \"Anal\"",
-            ),
+            ("browse", "Latest", true, "Anal", "category \"Anal\""),
         ];
 
         for (screen, category, drilldown, genre, expected) in labels {
@@ -5142,14 +5138,8 @@ mod tests {
             46,
             "unfiltered studio lists report the loaded, aggregated card count"
         );
-        assert_eq!(
-            reported_catalog_total(false, false, "", false, 200, 12),
-            12
-        );
-        assert_eq!(
-            reported_catalog_total(false, false, "", true, 200, 50),
-            200
-        );
+        assert_eq!(reported_catalog_total(false, false, "", false, 200, 12), 12);
+        assert_eq!(reported_catalog_total(false, false, "", true, 200, 50), 200);
     }
 
     #[test]
