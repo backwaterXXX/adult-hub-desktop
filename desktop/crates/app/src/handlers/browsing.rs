@@ -1931,7 +1931,6 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
     let cached_catalog = ctx.cached_catalog.clone();
     let phash_coord = ctx.phash_coord.clone();
     let qc_generation = Arc::new(AtomicU64::new(0));
-    let skip_next_catalog_view_save = Rc::new(Cell::new(false));
     refresh_recent_searches_for_context(ui, &local_store);
 
     // 1. Screen switching
@@ -3393,22 +3392,6 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
     }
     {
         let weak = ui.as_weak();
-        let catalog_views = catalog_views.clone();
-        let skip_next_catalog_view_save = skip_next_catalog_view_save.clone();
-        ui.on_clear_catalog_search(move || {
-            let Some(ui) = weak.upgrade() else { return };
-            // Separate action from "Reset filters": drops the query and leaves
-            // search mode, returning to the current category listing. The
-            // field text participates through the two-way binding on
-            // DarkLineEdit, so clearing the property clears the visible field.
-            CatalogSearchState::cleared().apply(&ui);
-            clear_saved_view_queries(&catalog_views, &ui.get_active_category());
-            skip_next_catalog_view_save.set(true);
-            ui.invoke_filter_category(ui.get_active_category());
-        });
-    }
-    {
-        let weak = ui.as_weak();
         let jellyfin = jellyfin.clone();
         let resolver = resolver.clone();
         let credential_store = credential_store.clone();
@@ -4062,7 +4045,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
     }
 
     // 6. Filter Category
-    {
+    let filter_category = {
         let weak = ui.as_weak();
         let jellyfin = jellyfin.clone();
         let resolver = resolver.clone();
@@ -4075,9 +4058,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
         let catalog_paging = catalog_paging.clone();
         let catalog_views = catalog_views.clone();
         let catalog_filters = catalog_filters.clone();
-        let skip_next_catalog_view_save = skip_next_catalog_view_save.clone();
-        ui.on_filter_category(move |cat| {
-            let Some(ui) = weak.upgrade() else { return };
+        Rc::new(move |ui: MainWindow, cat: slint::SharedString, save_current_view: bool| {
             if cat != "Latest" {
                 ui.set_catalog_category_drilldown(false);
             } else if !ui.get_catalog_category_drilldown() {
@@ -4088,7 +4069,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     }
                 }
             }
-            if !skip_next_catalog_view_save.replace(false) {
+            if save_current_view {
                 save_catalog_view(&ui, &catalog_paging, &cached_catalog, &catalog_views);
             }
             performer_search_generation.fetch_add(1, Ordering::SeqCst);
@@ -4309,6 +4290,29 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 })
                 .ok();
             });
+        })
+    };
+    {
+        let weak = ui.as_weak();
+        let filter_category = filter_category.clone();
+        ui.on_filter_category(move |cat| {
+            let Some(ui) = weak.upgrade() else { return };
+            filter_category(ui, cat, true);
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let catalog_views = catalog_views.clone();
+        let filter_category = filter_category.clone();
+        ui.on_clear_catalog_search(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            // Clear-search intentionally omits the transitional snapshot for
+            // both scoped and global search results; returning to either view
+            // refetches its contents after the query has been cleared.
+            CatalogSearchState::cleared().apply(&ui);
+            let category = ui.get_active_category();
+            clear_saved_view_queries(&catalog_views, &category);
+            filter_category(ui, category, false);
         });
     }
 
