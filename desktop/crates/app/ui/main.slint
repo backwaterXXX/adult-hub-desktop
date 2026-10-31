@@ -3865,6 +3865,7 @@ export component MainWindow inherits Window {
                         clicked => {
                             root.catalog-category-drilldown = false;
                             root.catalog-genre-query = "";
+                            root.search-query = "";
                             root.active-category = "Categories";
                             root.set-catalog-text-filter("genre", "");
                         }
@@ -3933,7 +3934,17 @@ export component MainWindow inherits Window {
                             text <=> root.search-query;
                             placeholder-text: root.active-category == "Studios"
                                 ? "Search studios..."
-                                : (root.active-category == "Categories" ? "Search categories..." : "Search videos, cast, channels...");
+                                : (root.active-category == "Categories"
+                                    ? "Search categories..."
+                                    : (root.catalog-category-drilldown
+                                        ? ("Search in " + root.catalog-genre-query + "...")
+                                        : (root.active-category == "Favorites"
+                                            ? "Search favorites..."
+                                            : (root.active-category == "Watch History"
+                                                ? "Search history..."
+                                                : (root.active-category == "Continue Watching" || root.active-category == "Resume"
+                                                    ? "Search continue watching..."
+                                                    : "Search videos, cast, channels...")))));
                             changed has-focus => {
                                 if (self.has-focus) {
                                     root.search-focused = true;
@@ -3959,7 +3970,13 @@ export component MainWindow inherits Window {
                                 keys.focus();
                             }
                         }
-                        if (root.active-category == "Studios" || root.active-category == "Categories") && root.search-query != "" : TvSecondaryButton {
+                        if (root.active-category == "Studios"
+                            || root.active-category == "Categories"
+                            || root.active-category == "Favorites"
+                            || root.active-category == "Watch History"
+                            || root.active-category == "Continue Watching"
+                            || root.active-category == "Resume"
+                            || root.catalog-category-drilldown) && root.search-query != "" : TvSecondaryButton {
                             text: "Clear query";
                             custom-height: 40px;
                             clicked => {
@@ -4504,7 +4521,7 @@ export component MainWindow inherits Window {
                     }
 
                     // 2. Filtered-out state (active filters resulted in 0 items)
-                    if (!root.is-catalog-search-results || root.search-error-message == "") && (root.catalog-active-filter-count > 0 || (root.is-catalog-search-results && root.search-applied-query != "") || (root.active-category == "Performers" && (root.performer-search-query != "" || root.performer-letter != "" || root.performers-photo-only)) || ((root.active-category == "Studios" || root.active-category == "Categories") && root.search-query != "")) : HorizontalLayout {
+                    if (!root.is-catalog-search-results || root.search-error-message == "") && (root.catalog-active-filter-count > 0 || (root.is-catalog-search-results && root.search-applied-query != "") || (root.active-category == "Performers" && (root.performer-search-query != "" || root.performer-letter != "" || root.performers-photo-only)) || root.search-query != "") : HorizontalLayout {
                         alignment: center;
 
                         Rectangle {
@@ -4520,7 +4537,15 @@ export component MainWindow inherits Window {
                                         : (root.active-category == "Performers" ? "No performers match active filters"
                                         : (root.active-category == "Studios" ? "No studios match active filters"
                                         : (root.active-category == "Categories" ? "No categories match active filters"
-                                        : "No videos match active filters")));
+                                        : (root.catalog-category-drilldown && root.search-query != ""
+                                            ? ("No videos match \"" + root.search-query + "\" in " + root.catalog-genre-query)
+                                            : (root.active-category == "Favorites" && root.search-query != ""
+                                                ? ("No favorites match \"" + root.search-query + "\"")
+                                                : (root.active-category == "Watch History" && root.search-query != ""
+                                                    ? ("No history items match \"" + root.search-query + "\"")
+                                                    : (root.active-category == "Continue Watching" && root.search-query != ""
+                                                        ? ("No continue watching videos match \"" + root.search-query + "\"")
+                                                        : "No videos match active filters")))))));
                                     color: #eeeeF4;
                                     font-size: 19px;
                                     font-weight: 700;
@@ -4537,7 +4562,9 @@ export component MainWindow inherits Window {
                                                 ? "Try clearing filters or search term to see all available studios."
                                                 : (root.active-category == "Categories"
                                                     ? "Try clearing the search term to see all available categories."
-                                                    : "Try clearing filters to see all available videos in this section.")));
+                                                    : (root.search-query != ""
+                                                        ? "Try clearing the search term to see all available videos."
+                                                        : "Try clearing filters to see all available videos in this section."))));
                                     color: #95919e;
                                     font-size: 13px;
                                     horizontal-alignment: center;
@@ -4553,7 +4580,7 @@ export component MainWindow inherits Window {
                                     // Search and filters are two different
                                     // states; each button clears exactly one of
                                     // them and its label says which.
-                                    if root.is-catalog-search-results || ((root.active-category == "Studios" || root.active-category == "Categories") && root.search-query != "") : TvPrimaryButton {
+                                    if root.is-catalog-search-results || root.search-query != "" : TvPrimaryButton {
                                         text: "Clear search";
                                         custom-height: 40px;
                                         clicked => {

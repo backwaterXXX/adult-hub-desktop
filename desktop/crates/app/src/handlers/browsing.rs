@@ -72,11 +72,16 @@ fn catalog_generation_is_current(generation: &AtomicU64, request_id: u64) -> boo
 pub fn active_search_context(ui: &MainWindow) -> &'static str {
     if ui.get_active_screen() == "channels" {
         "channels"
+    } else if ui.get_catalog_category_drilldown() {
+        "category_drilldown"
     } else {
         match ui.get_active_category().as_str() {
             "Performers" => "performers",
             "Studios" => "studios",
             "Categories" => "tags",
+            "Favorites" => "favorites",
+            "Watch History" => "history",
+            "Continue Watching" | "Resume" => "resume",
             _ => "movies",
         }
     }
@@ -1007,6 +1012,49 @@ fn get_catalog_page(
             cat_item.genres.push("__adult_hub_genre".into());
         }
         categories_page
+    } else if category == "Favorites" && !query.trim().is_empty() {
+        let mut fav_query =
+            search_movie_query(query, start_index, &filters, selected_library_id.as_deref());
+        fav_query.is_favorite = Some(true);
+        jellyfin.get_items(
+            &session.server_url,
+            &session.user_id,
+            &session.access_token,
+            &fav_query,
+        )?
+    } else if !filters.genre.is_empty() && !query.trim().is_empty() {
+        let cat_query =
+            search_movie_query(query, start_index, &filters, selected_library_id.as_deref());
+        jellyfin.get_items(
+            &session.server_url,
+            &session.user_id,
+            &session.access_token,
+            &cat_query,
+        )?
+    } else if (category == "Resume" || category == "Continue Watching") && !query.trim().is_empty() {
+        let mut resume_page = jellyfin.get_resume_items_page(
+            &session.server_url,
+            &session.user_id,
+            &session.access_token,
+            0,
+            100,
+        )?;
+        let q = query.trim().to_lowercase();
+        resume_page.items.retain(|item| {
+            item.title.to_lowercase().contains(&q)
+                || item
+                    .overview
+                    .as_ref()
+                    .is_some_and(|o| o.to_lowercase().contains(&q))
+        });
+        resume_page.total_record_count = resume_page.items.len();
+        resume_page.items = resume_page
+            .items
+            .into_iter()
+            .skip(start_index)
+            .take(CATALOG_PAGE_SIZE)
+            .collect();
+        resume_page
     } else if !query.trim().is_empty() {
         let movie_query =
             search_movie_query(query, start_index, &filters, selected_library_id.as_deref());
@@ -3247,10 +3295,28 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             let Some(ui) = weak.upgrade() else { return };
             let query = query.trim().to_string();
             let current_cat = ui.get_active_category().to_string();
+            let is_category_drilldown = ui.get_catalog_category_drilldown();
 
-            // When searching within specialized catalog categories (Studios, Categories, Performers),
-            // scope the search directly to that category rather than kicking off a global multi-source search.
-            if current_cat == "Studios" || current_cat == "Categories" {
+            // When searching within specialized catalog screens (Category Drilldown,
+            // Studios, Categories, Favorites, Watch History, Continue Watching, or Performers),
+            // scope the search directly to that screen rather than kicking off a global multi-source search.
+            if is_category_drilldown {
+                ui.set_search_query(query.clone().into());
+                let search_context = active_search_context(&ui);
+                if !query.is_empty() {
+                    let _ = local_store.add_search_query_context(search_context, &query);
+                }
+                refresh_recent_searches_for_context(&ui, &local_store);
+                ui.invoke_filter_category("Latest".into());
+                return;
+            }
+            if current_cat == "Studios"
+                || current_cat == "Categories"
+                || current_cat == "Favorites"
+                || current_cat == "Watch History"
+                || current_cat == "Continue Watching"
+                || current_cat == "Resume"
+            {
                 ui.set_search_query(query.clone().into());
                 let search_context = active_search_context(&ui);
                 if !query.is_empty() {
@@ -3907,7 +3973,15 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             let performers_photo_only = ui.get_performers_photo_only();
             let query = match cat.as_str() {
                 "Performers" => ui.get_performer_search_query().to_string(),
-                "Studios" | "Categories" => ui.get_search_query().to_string(),
+                "Studios"
+                | "Categories"
+                | "Favorites"
+                | "Watch History"
+                | "Continue Watching"
+                | "Resume" => ui.get_search_query().to_string(),
+                "Latest" if ui.get_catalog_category_drilldown() => {
+                    ui.get_search_query().to_string()
+                }
                 _ => String::new(),
             };
             let search_context = active_search_context(&ui);
@@ -4829,17 +4903,59 @@ mod tests {
 
     #[test]
     fn test_context_aware_search_context_mapping() {
-        let category_to_context = |cat: &str| match cat {
-            "Performers" => "performers",
-            "Studios" => "studios",
-            "Categories" => "tags",
-            _ => "movies",
+        let category_to_context = |cat: &str, drilldown: bool| {
+            if drilldown {
+                "category_drilldown"
+            } else {
+                match cat {
+                    "Performers" => "performers",
+                    "Studios" => "studios",
+                    "Categories" => "tags",
+                    "Favorites" => "favorites",
+                    "Watch History" => "history",
+                    "Continue Watching" | "Resume" => "resume",
+                    _ => "movies",
+                }
+            }
         };
 
-        assert_eq!(category_to_context("Performers"), "performers");
-        assert_eq!(category_to_context("Studios"), "studios");
-        assert_eq!(category_to_context("Categories"), "tags");
-        assert_eq!(category_to_context("Latest"), "movies");
-        assert_eq!(category_to_context("Favorites"), "movies");
+        assert_eq!(category_to_context("Performers", false), "performers");
+        assert_eq!(category_to_context("Studios", false), "studios");
+        assert_eq!(category_to_context("Categories", false), "tags");
+        assert_eq!(category_to_context("Latest", false), "movies");
+        assert_eq!(category_to_context("Latest", true), "category_drilldown");
+        assert_eq!(category_to_context("Favorites", false), "favorites");
+        assert_eq!(category_to_context("Watch History", false), "history");
+        assert_eq!(category_to_context("Continue Watching", false), "resume");
+    }
+
+    #[test]
+    fn test_category_drilldown_view_key_and_query() {
+        let page_genre = CatalogPageState {
+            category: "Latest".into(),
+            query: "blonde".into(),
+            filters: CatalogFilters {
+                genre: "Anal".into(),
+                ..Default::default()
+            },
+            ..CatalogPageState::default()
+        };
+
+        let page_global = CatalogPageState {
+            category: "Latest".into(),
+            query: "blonde".into(),
+            filters: CatalogFilters::default(),
+            ..CatalogPageState::default()
+        };
+
+        assert_ne!(
+            catalog_view_key(&page_genre),
+            catalog_view_key(&page_global),
+            "Search within a category must have a distinct view key from global search"
+        );
+
+        let query = search_movie_query("blonde", 0, &page_genre.filters, None);
+        assert_eq!(query.genre, Some("Anal"));
+        assert_eq!(query.search_term, Some("blonde"));
     }
 }
