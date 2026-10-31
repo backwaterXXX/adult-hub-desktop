@@ -4053,7 +4053,7 @@ export component MainWindow inherits Window {
 
                     // 3. Camera Toggle Button ("With photo")
                     Rectangle {
-                        width: 120px;
+                        width: HubTheme.control-height;
                         height: HubTheme.control-height;
                         forward-focus: photo-focus;
                         border-radius: HubTheme.control-radius;
@@ -4066,25 +4066,14 @@ export component MainWindow inherits Window {
                             : (root.performers-photo-only ? HubTheme.accent-outline : HubTheme.separator);
 
                         HorizontalLayout {
-                            padding-left: HubTheme.space-2;
-                            padding-right: HubTheme.space-2;
-                            spacing: HubTheme.space-1;
                             alignment: center;
 
                             Image {
                                 source: @image-url("../../../assets/icons/camera.svg");
-                                width: 18px;
-                                height: 18px;
+                                width: 20px;
+                                height: 20px;
                                 colorize: root.performers-photo-only ? HubTheme.text-primary : HubTheme.text-secondary;
                                 image-fit: contain;
-                            }
-
-                            Text {
-                                text: "With photo";
-                                color: HubTheme.text-primary;
-                                font-size: HubTheme.metadata-size;
-                                font-weight: 600;
-                                vertical-alignment: center;
                             }
                         }
 
