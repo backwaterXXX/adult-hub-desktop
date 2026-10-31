@@ -4077,16 +4077,15 @@ export component MainWindow inherits Window {
                             ? HubTheme.focus-ring
                             : (root.performers-photo-only ? HubTheme.accent-outline : HubTheme.separator);
 
-                        HorizontalLayout {
-                            alignment: center;
-
-                            Image {
-                                source: @image-url("../../../assets/icons/camera.svg");
-                                width: 20px;
-                                height: 20px;
-                                colorize: root.performers-photo-only ? HubTheme.text-primary : HubTheme.text-secondary;
-                                image-fit: contain;
-                            }
+                        Image {
+                            x: (parent.width - self.width) / 2;
+                            // The camera path sits slightly below the SVG viewBox center.
+                            y: (parent.height - self.height) / 2 - 1px;
+                            source: @image-url("../../../assets/icons/camera.svg");
+                            width: 20px;
+                            height: 20px;
+                            colorize: root.performers-photo-only ? HubTheme.text-primary : HubTheme.text-secondary;
+                            image-fit: contain;
                         }
 
                         photo-touch := TouchArea {
