@@ -514,7 +514,120 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
             ui.set_detail_resume_text(resume_text.into());
             let perf_model = Rc::new(slint::VecModel::from(performers));
             ui.set_detail_performers(perf_model.into());
+            let needs_cast_lookup = performer_cards.is_empty();
             ui.set_detail_performer_cards(Rc::new(slint::VecModel::from(performer_cards)).into());
+            ui.set_detail_scroll_y(0.0);
+
+            // Resolver listings and older cache entries often carry no cast, so
+            // the section stays hidden. Recover it from the matching Jellyfin
+            // entry without blocking the UI thread.
+            let cast_session = if needs_cast_lookup {
+                artwork_session.clone()
+            } else {
+                None
+            };
+            if let Some(session) = cast_session {
+                let weak = weak.clone();
+                let detail_id = target_item.id.clone();
+                let detail_title = target_item.title.clone();
+                let provider_video_id = target_item.provider_video_id.clone();
+                let jellyfin = jellyfin.clone();
+                std::thread::spawn(move || {
+                    let resolved = provider_video_id
+                        .as_deref()
+                        .and_then(|provider_id| {
+                            jellyfin
+                                .find_telegram_item(
+                                    &session.server_url,
+                                    &session.user_id,
+                                    &session.access_token,
+                                    provider_id,
+                                    &detail_title,
+                                )
+                                .ok()
+                                .flatten()
+                        })
+                        .or_else(|| {
+                            // Only a GUID can address a Jellyfin item directly.
+                            // Resolver and `telegram:` ids would just 404.
+                            uuid::Uuid::parse_str(&detail_id).ok()?;
+                            jellyfin
+                                .get_item_details(
+                                    &session.server_url,
+                                    &session.user_id,
+                                    &session.access_token,
+                                    &detail_id,
+                                )
+                                .ok()
+                        });
+                    let Some(resolved) = resolved else { return };
+                    let person_width = crate::thumbnails::person_thumbnail_max_width();
+                    let cards = resolved
+                        .people
+                        .into_iter()
+                        .filter(|person| !person.name.trim().is_empty())
+                        .filter(|person| {
+                            person
+                                .person_type
+                                .as_deref()
+                                .is_none_or(|kind| kind.eq_ignore_ascii_case("actor"))
+                        })
+                        .take(20)
+                        .map(|person| {
+                            let image_bytes = person
+                                .primary_image_tag
+                                .as_deref()
+                                .filter(|tag| !tag.trim().is_empty())
+                                .and_then(|tag| {
+                                    uuid::Uuid::parse_str(&person.id).ok()?;
+                                    Some(JellyfinClient::image_url(
+                                        &session.server_url,
+                                        &person.id,
+                                        "Primary",
+                                        person_width,
+                                        Some(tag),
+                                    ))
+                                })
+                                .and_then(|url| {
+                                    crate::thumbnails::load_cached_image_bytes(&url).or_else(|| {
+                                        crate::thumbnails::fetch_and_cache_image_bytes(
+                                            &url,
+                                            Some(&session.access_token),
+                                        )
+                                    })
+                                });
+                            (person, image_bytes)
+                        })
+                        .collect::<Vec<_>>();
+                    if cards.is_empty() {
+                        return;
+                    }
+                    let _ = slint::invoke_from_event_loop(move || {
+                        let Some(ui) = weak.upgrade() else { return };
+                        if ui.get_detail_id() != detail_id.as_str()
+                            || ui.get_detail_performer_cards().row_count() > 0
+                        {
+                            return;
+                        }
+                        let cards = cards
+                            .into_iter()
+                            .map(|(person, image_bytes)| {
+                                let image = image_bytes
+                                    .as_deref()
+                                    .and_then(crate::thumbnails::image_from_bytes);
+                                crate::PerformerCardData {
+                                    id: person.id.into(),
+                                    name: person.name.into(),
+                                    role: person.role.as_deref().unwrap_or("Actor").into(),
+                                    has_image: image.is_some(),
+                                    image: image.unwrap_or_default(),
+                                }
+                            })
+                            .collect::<Vec<_>>();
+                        ui.set_detail_performer_cards(Rc::new(slint::VecModel::from(cards)).into());
+                    });
+                });
+            }
 
             // The library entry size is unreliable for referrals (.strm) and is
             // often absent entirely. Resolve the real media size off the UI
@@ -1510,8 +1623,7 @@ fn resolve_real_media_size(
 /// Extracts the Telegram ID from a `TvItem`.
 /// Inspects `provider_video_id` (stripping any `telegram:` prefix),
 /// then `item.id` if it starts with `telegram:`,
-/// then an optional extracted overview ID,
-/// and lastly `item.id` if `item.is_telegram()`.
+/// and lastly an optional extracted overview ID.
 pub fn resolve_item_telegram_id(
     item: &TvItem,
     overview_telegram_id: Option<&str>,
@@ -1531,13 +1643,6 @@ pub fn resolve_item_telegram_id(
     }
     if let Some(from_ov) = overview_telegram_id {
         let clean = from_ov.trim();
-        let stripped = clean.strip_prefix("telegram:").unwrap_or(clean).trim();
-        if !stripped.is_empty() {
-            return Some(stripped.to_string());
-        }
-    }
-    if item.is_telegram() {
-        let clean = item.id.trim();
         let stripped = clean.strip_prefix("telegram:").unwrap_or(clean).trim();
         if !stripped.is_empty() {
             return Some(stripped.to_string());

@@ -958,6 +958,31 @@ fn reported_catalog_total(
     }
 }
 
+/// Matches a catalog item against a lowercased, trimmed search query.
+///
+/// Titles, ids and overviews are matched by substring. A `telegram:` prefix is
+/// ignored for id matching so a pasted Telegram reference still finds its item.
+fn item_matches_query(item: &TvItem, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    let stripped = query.strip_prefix("telegram:").unwrap_or(query).trim();
+    item.title.to_lowercase().contains(query)
+        || item.id.to_lowercase().contains(query)
+        || item
+            .provider_video_id
+            .as_deref()
+            .is_some_and(|provider_id| {
+                let provider_id = provider_id.to_lowercase();
+                provider_id.contains(query)
+                    || (!stripped.is_empty() && provider_id.contains(stripped))
+            })
+        || item
+            .overview
+            .as_deref()
+            .is_some_and(|overview| overview.to_lowercase().contains(query))
+}
+
 fn get_resume_search_catalog_page(
     jellyfin: &JellyfinClient,
     session: &Session,
@@ -1022,20 +1047,7 @@ fn get_resume_search_catalog_page(
     }
 
     let query = query.trim().to_lowercase();
-    let query_stripped = query.strip_prefix("telegram:").unwrap_or(&query).trim();
-    items.retain(|item| {
-        (item.title.to_lowercase().contains(&query)
-            || item.provider_video_id.as_deref().is_some_and(|pvid| {
-                let p = pvid.to_lowercase();
-                p.contains(&query) || (!query_stripped.is_empty() && p.contains(query_stripped))
-            })
-            || item.id.to_lowercase().contains(&query)
-            || item
-                .overview
-                .as_ref()
-                .is_some_and(|overview| overview.to_lowercase().contains(&query)))
-            && filters.accepts(item)
-    });
+    items.retain(|item| item_matches_query(item, &query) && filters.accepts(item));
     match filters.sort {
         1 => items.sort_by_key(|item| item.title.to_lowercase()),
         2 => items.sort_by_key(|item| item.runtime_ticks.unwrap_or_default()),
@@ -1083,26 +1095,12 @@ fn get_catalog_page(
 ) -> std::result::Result<CatalogPage, JellyfinError> {
     if category == "Watch History" {
         let query = query.trim().to_lowercase();
-        let query_stripped = query.strip_prefix("telegram:").unwrap_or(&query).trim();
         let mut history = local_store
             .get_watch_history(100)
             .unwrap_or_default()
             .into_iter()
             .filter_map(|json| serde_json::from_str::<TvItem>(&json).ok())
-            .filter(|item| {
-                (query.is_empty()
-                    || item.title.to_lowercase().contains(&query)
-                    || item.provider_video_id.as_deref().is_some_and(|pvid| {
-                        let p = pvid.to_lowercase();
-                        p.contains(&query) || (!query_stripped.is_empty() && p.contains(query_stripped))
-                    })
-                    || item.id.to_lowercase().contains(&query)
-                    || item
-                        .overview
-                        .as_ref()
-                        .is_some_and(|overview| overview.to_lowercase().contains(&query)))
-                    && filters.accepts(item)
-            })
+            .filter(|item| item_matches_query(item, &query) && filters.accepts(item))
             .collect::<Vec<_>>();
         if filters.sort == 1 {
             history.sort_by_key(|a| a.title.to_lowercase());
@@ -1674,26 +1672,9 @@ fn get_search_movies_page_at(
         &session.access_token,
         &search_movie_query(query, start_index, filters, parent_id.as_deref()),
     )?;
-    let mut page = page;
-    if page.items.is_empty() && start_index == 0 {
-        let clean_q = query.trim().strip_prefix("telegram:").unwrap_or(query.trim());
-        if !clean_q.is_empty() {
-            let tg_prov = format!("telegram.{clean_q}");
-            let mut prov_query = search_movie_query(clean_q, start_index, filters, parent_id.as_deref());
-            prov_query.search_term = None;
-            prov_query.any_provider_id_equals = Some(&tg_prov);
-            if let Ok(prov_page) = jellyfin.get_items(
-                &session.server_url,
-                &session.user_id,
-                &session.access_token,
-                &prov_query,
-            ) {
-                if !prov_page.items.is_empty() {
-                    page = prov_page;
-                }
-            }
-        }
-    }
+    // Jellyfin cannot filter items by provider id (`AnyProviderIdEquals` is
+    // an Emby parameter the server ignores), so a `telegram:<id>` reference
+    // is resolved by the resolver search above instead of a server lookup.
     let server_count = page.items.len();
     let total_count = page.total_record_count;
     let items = page
@@ -5204,5 +5185,43 @@ mod tests {
         let query = search_movie_query("blonde", 0, &page_genre.filters, None);
         assert_eq!(query.genre, Some("Anal"));
         assert_eq!(query.search_term, Some("blonde"));
+    }
+
+    fn telegram_item() -> TvItem {
+        let mut item = TvItem::new("telegram:-1001234567890:456:789", "Beach Day");
+        item.provider_video_id = Some("-1001234567890:456:789".into());
+        item
+    }
+
+    #[test]
+    fn item_matches_query_by_title_and_empty_query() {
+        let item = telegram_item();
+        assert!(item_matches_query(&item, "beach"));
+        assert!(item_matches_query(&item, ""));
+        assert!(!item_matches_query(&item, "mountain"));
+    }
+
+    #[test]
+    fn item_matches_query_by_telegram_id_prefix_and_plain_id() {
+        let item = telegram_item();
+        // Pasting the full Telegram reference finds the item even though the
+        // title does not contain it.
+        assert!(item_matches_query(&item, "telegram:-1001234567890:456:789"));
+        assert!(item_matches_query(&item, "telegram:456"));
+        // The bare id still matches through provider/id substring search.
+        assert!(item_matches_query(&item, "456"));
+    }
+
+    #[test]
+    fn item_matches_query_ignores_unrelated_telegram_prefix() {
+        let item = telegram_item();
+        assert!(!item_matches_query(&item, "telegram:999"));
+    }
+
+    #[test]
+    fn item_matches_query_matches_overview() {
+        let mut item = TvItem::new("jellyfin-guid-42", "Untitled");
+        item.overview = Some("Recorded in Warsaw".into());
+        assert!(item_matches_query(&item, "warsaw"));
     }
 }

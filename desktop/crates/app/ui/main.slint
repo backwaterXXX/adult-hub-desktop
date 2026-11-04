@@ -574,20 +574,35 @@ component ActorChip inherits Rectangle {
     in property <string> role;
     in property <bool> has-image;
     in property <image> image;
+    out property <bool> has-focus: chip-focus.has-focus;
     callback clicked();
 
     width: 176px;
     height: 50px;
     border-radius: 8px;
-    background: chip-touch.has-hover ? #2a2232 : #181822;
-    border-width: 1px;
-    border-color: chip-touch.has-hover ? HubTheme.accent-outline : #FFFFFF18;
+    background: chip-touch.has-hover || root.has-focus ? #2a2232 : #181822;
+    border-width: root.has-focus ? 2px : 1px;
+    border-color: root.has-focus ? HubTheme.focus-ring : (chip-touch.has-hover ? HubTheme.accent-outline : #FFFFFF18);
     clip: true;
+    forward-focus: chip-focus;
     accessible-role: button;
     accessible-label: root.name;
+    accessible-action-default => { root.clicked(); }
 
     chip-touch := TouchArea {
-        clicked => { root.clicked(); }
+        clicked => { chip-focus.focus(); root.clicked(); }
+    }
+
+    chip-focus := FocusScope {
+        width: 0px;
+        height: 0px;
+        key-pressed(event) => {
+            if (event.text == Key.Space || event.text == Key.Return) {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
     }
 
     HorizontalLayout {
@@ -8106,9 +8121,14 @@ export component MainWindow inherits Window {
                                     }
 
                                     // Metadata stays with the title it belongs to.
-                                    HorizontalLayout {
-                                        spacing: HubTheme.space-3;
+                                    // It wraps instead of overflowing when a long
+                                    // studio name is present.
+                                    FlexboxLayout {
+                                        flex-direction: row;
+                                        flex-wrap: wrap;
                                         alignment: start;
+                                        spacing-horizontal: HubTheme.space-3;
+                                        spacing-vertical: HubTheme.space-2;
 
                                         if root.detail-duration != "" : Text {
                                             text: root.detail-duration;
@@ -8157,35 +8177,6 @@ export component MainWindow inherits Window {
 
                                             detail-studio-touch-fs := TouchArea {
                                                 clicked => { root.open-studio-profile(root.detail-studio); }
-                                            }
-                                        }
-
-                                        if root.detail-telegram-id != "" : Rectangle {
-                                            height: HubTheme.control-height - 12px;
-                                            border-radius: HubTheme.control-radius;
-                                            background: detail-tg-touch-hdr.has-hover ? #0088cc33 : HubTheme.surface-raised;
-                                            border-width: 1px;
-                                            border-color: root.detail-telegram-id-copied ? HubTheme.success : (detail-tg-touch-hdr.has-hover ? #29b6f6 : HubTheme.control-border);
-
-                                            HorizontalLayout {
-                                                padding-left: HubTheme.space-3;
-                                                padding-right: HubTheme.space-3;
-                                                spacing: 4px;
-                                                alignment: center;
-                                                Text {
-                                                    text: root.detail-telegram-id-copied ? "Copied ID!" : ("TG: " + root.detail-telegram-id);
-                                                    color: root.detail-telegram-id-copied ? HubTheme.success : (detail-tg-touch-hdr.has-hover ? #29b6f6 : HubTheme.text-secondary);
-                                                    font-size: HubTheme.metadata-size;
-                                                    font-weight: 700;
-                                                    vertical-alignment: center;
-                                                    overflow: elide;
-                                                    max-width: 220px;
-                                                }
-                                            }
-
-                                            detail-tg-touch-hdr := TouchArea {
-                                                mouse-cursor: pointer;
-                                                clicked => { root.copy-detail-telegram-id(root.detail-telegram-id); }
                                             }
                                         }
                                     }
@@ -8239,14 +8230,41 @@ export component MainWindow inherits Window {
                             }
                         }
 
+                        // Cast & Performers. Sits directly under the header so the
+                        // actors are the first thing after the title instead of
+                        // being buried below the synopsis.
+                        if root.detail-performer-cards.length > 0 : VerticalLayout {
+                            spacing: HubTheme.space-3;
+                            Text {
+                                text: "Cast & Performers";
+                                color: HubTheme.text-secondary;
+                                font-size: 13px;
+                                font-weight: 700;
+                            }
+
+                            FlexboxLayout {
+                                flex-direction: row;
+                                flex-wrap: wrap;
+                                spacing-horizontal: HubTheme.space-3;
+                                spacing-vertical: HubTheme.space-3;
+                                for performer in root.detail-performer-cards : ActorChip {
+                                    name: performer.name;
+                                    role: performer.role;
+                                    has-image: performer.has-image;
+                                    image: performer.image;
+                                    clicked => { root.open-performer-profile(performer.name); }
+                                }
+                            }
+                        }
+
                         // Description / Synopsis (only when non-empty). The line
                         // measure is capped: a full-width paragraph at 15px runs
                         // past 120 characters and is unreadable on wide windows.
                         // The cell height must come from the text measured at the
                         // capped width: the parent layout distributes the full
                         // column width, so a Text-level `width`/`max-width` gets
-                        // measured at the wrong width and the paragraph runs over
-                        // the Cast section. The inner layout pins its own width
+                        // measured at the wrong width and the paragraph runs past
+                        // the column edge. The inner layout pins its own width
                         // (like the technical-info cells) so the Rectangle's
                         // height equals the wrapped paragraph height.
                         if root.detail-overview != "" : Rectangle {
@@ -8270,31 +8288,6 @@ export component MainWindow inherits Window {
                                     line-height-factor: 1.35;
                                     wrap: word-wrap;
                                     vertical-alignment: top;
-                                }
-                            }
-                        }
-
-                        // Cast & Performers (Compact ActorChip elements with Flexbox wrapping)
-                        if root.detail-performer-cards.length > 0 : VerticalLayout {
-                            spacing: HubTheme.space-3;
-                            Text {
-                                text: "Cast & Performers";
-                                color: HubTheme.text-secondary;
-                                font-size: 13px;
-                                font-weight: 700;
-                            }
-
-                            FlexboxLayout {
-                                flex-direction: row;
-                                flex-wrap: wrap;
-                                spacing-horizontal: HubTheme.space-3;
-                                spacing-vertical: HubTheme.space-3;
-                                for performer in root.detail-performer-cards : ActorChip {
-                                    name: performer.name;
-                                    role: performer.role;
-                                    has-image: performer.has-image;
-                                    image: performer.image;
-                                    clicked => { root.open-performer-profile(performer.name); }
                                 }
                             }
                         }

@@ -62,13 +62,20 @@ pub struct GetItemsQuery<'a> {
     pub include_item_types: Option<&'a str>,
     pub person_types: Option<&'a str>,
     pub image_types: Option<&'a str>,
-    pub any_provider_id_equals: Option<&'a str>,
     /// Overrides the `Fields=` list. `Some("")` omits the parameter entirely
     /// (server defaults only); `None` keeps the full desktop field set.
     pub fields: Option<&'a str>,
 }
 
 const DEFAULT_ITEM_FIELDS: &str = "ProviderIds,Overview,Genres,Studios,People,MediaSources,ChildCount,Path,IsPlaceHolder,CommunityRating,Tags";
+
+/// Exact (case-insensitive) comparison of the Telegram provider id carried by
+/// a library item. Used to reject search hits that merely share a title.
+fn matches_telegram_provider_id(item: &TvItem, provider_video_id: &str) -> bool {
+    item.provider_video_id
+        .as_deref()
+        .is_some_and(|id| id.trim().eq_ignore_ascii_case(provider_video_id.trim()))
+}
 
 impl JellyfinClient {
     pub fn new(device_id: impl Into<String>) -> Self {
@@ -423,14 +430,6 @@ impl JellyfinClient {
                 url.push_str(&format!("&SearchTerm={}", crate::urlencoding(term.trim())));
             }
         }
-        if let Some(prov) = query.any_provider_id_equals {
-            if !prov.trim().is_empty() {
-                url.push_str(&format!(
-                    "&AnyProviderIdEquals={}",
-                    crate::urlencoding(prov.trim())
-                ));
-            }
-        }
         if let Some(prefix) = query.name_starts_with {
             if !prefix.trim().is_empty() {
                 url.push_str(&format!(
@@ -492,6 +491,50 @@ impl JellyfinClient {
             total_record_count: total,
             start_index: query.start_index,
         })
+    }
+
+    /// Looks up the library entry whose Telegram provider id equals
+    /// `provider_video_id` (for example `-100123:45:67`).
+    ///
+    /// Resolver listings carry no cast, so the detail screen uses this to find
+    /// the matching Jellyfin item and recover its `People` metadata.
+    ///
+    /// Jellyfin has no provider-id filter on `/Items` (`AnyProviderIdEquals`
+    /// is an Emby parameter that the server silently ignores). A bare
+    /// `Limit=1` query would therefore return the first item in the library and
+    /// every video would appear to share one cast. Instead the lookup searches
+    /// by title and only accepts an item whose `ProviderIds.telegram` matches
+    /// exactly.
+    pub fn find_telegram_item(
+        &self,
+        base_url: &str,
+        user_id: &str,
+        token: &str,
+        provider_video_id: &str,
+        title: &str,
+    ) -> Result<Option<TvItem>> {
+        let provider_video_id = provider_video_id.trim();
+        let title = title.trim();
+        if provider_video_id.is_empty() || title.is_empty() {
+            return Ok(None);
+        }
+        let query = GetItemsQuery {
+            start_index: 0,
+            limit: 25,
+            search_term: Some(title),
+            fields: Some("ProviderIds"),
+            ..Default::default()
+        };
+        let page = self.get_items(base_url, user_id, token, &query)?;
+        let Some(matched) = page
+            .items
+            .into_iter()
+            .find(|item| matches_telegram_provider_id(item, provider_video_id))
+        else {
+            return Ok(None);
+        };
+        self.get_item_details(base_url, user_id, token, &matched.id)
+            .map(Some)
     }
 
     pub fn get_person(
@@ -1337,5 +1380,40 @@ mod tests {
         assert!(err403.is_unauthorized());
         let err_api = JellyfinError::Api("general error".into());
         assert!(!err_api.is_unauthorized());
+    }
+
+    #[test]
+    fn find_telegram_item_short_circuits_empty_input() {
+        // Empty provider data must never hit the network: the cast lookup runs
+        // for every detail opening and must stay cheap when there is nothing
+        // to look up.
+        let client = JellyfinClient::new("test-device");
+        assert!(
+            client
+                .find_telegram_item("http://127.0.0.1:9", "user", "token", "", "Title")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            client
+                .find_telegram_item("http://127.0.0.1:9", "user", "token", "-100:1:2", "  ")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn telegram_provider_id_match_is_exact() {
+        let mut item = TvItem::new("abc", "Some title");
+        item.provider_video_id = Some("1001".into());
+        assert!(matches_telegram_provider_id(&item, "1001"));
+        assert!(matches_telegram_provider_id(&item, " 1001 "));
+        // A shared title is not enough; a different Telegram id must not match.
+        assert!(!matches_telegram_provider_id(&item, "1002"));
+        assert!(!matches_telegram_provider_id(&item, ""));
+
+        let mut without_id = TvItem::new("def", "Some title");
+        without_id.provider_video_id = None;
+        assert!(!matches_telegram_provider_id(&without_id, "1001"));
     }
 }
