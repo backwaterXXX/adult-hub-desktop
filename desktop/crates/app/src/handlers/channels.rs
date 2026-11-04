@@ -117,7 +117,7 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
     let channel_generation = Arc::new(AtomicU64::new(0));
     let category_ids = Arc::new(Mutex::new(HashMap::<String, String>::new()));
     let channel_offset_id = Arc::new(Mutex::new(None::<i64>));
-    let channel_items_cache = Arc::new(Mutex::new(Vec::<TvItem>::new()));
+    let channel_items_cache = ctx.channel_catalog.clone();
     let channel_cache_map = Arc::new(Mutex::new(HashMap::<String, ChannelCacheEntry>::new()));
     let saved_sort_mode = match local_store
         .get_setting("channel_sort_mode")

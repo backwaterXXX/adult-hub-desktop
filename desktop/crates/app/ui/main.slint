@@ -2800,7 +2800,9 @@ export component MainWindow inherits Window {
     in-out property <string> detail-original-title: "";
     in-out property <string> detail-channel: "";
     in-out property <string> detail-source-url: "";
+    in-out property <string> detail-telegram-id: "";
     in-out property <bool> detail-id-copied: false;
+    in-out property <bool> detail-telegram-id-copied: false;
     in-out property <string> detail-container: "";
     in-out property <string> detail-file-size: "";
     in-out property <image> detail-thumbnail;
@@ -2818,6 +2820,7 @@ export component MainWindow inherits Window {
     callback close-item-detail();
     callback open-detail-source-url(string);
     callback copy-detail-item-id(string);
+    callback copy-detail-telegram-id(string);
     callback toggle-detail-favorite(string);
     callback toggle-detail-played(string);
     callback play-detail-item(string, bool);
@@ -6926,6 +6929,83 @@ export component MainWindow inherits Window {
                                 }
                             }
 
+                            // Stats HUD toggle button (info icon)
+                            info-btn := Rectangle {
+                                width: 44px;
+                                height: 44px;
+                                y: (parent.height - self.height) / 2;
+                                border-radius: 22px;
+                                background: info-touch.has-hover || root.hud-visible ? #F5F6F822 : transparent;
+                                border-width: info-focus.has-focus ? 2px : (root.hud-visible ? 1px : 0px);
+                                border-color: info-focus.has-focus ? HubTheme.focus-ring : (root.hud-visible ? HubTheme.accent-text : transparent);
+                                forward-focus: info-focus;
+                                accessible-role: button;
+                                accessible-label: root.hud-visible ? "Hide stats HUD" : "Show stats HUD";
+
+                                Image {
+                                    source: @image-url("../../../assets/icons/info.svg");
+                                    width: 22px;
+                                    height: 22px;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                    image-fit: contain;
+                                    colorize: root.hud-visible ? HubTheme.accent-text : #F5F6F8;
+                                }
+
+                                info-touch := TouchArea {
+                                    mouse-cursor: pointer;
+                                    pointer-event(event) => {
+                                        if (event.kind == PointerEventKind.move) {
+                                            root.player-controls-visible = true;
+                                            player-controls-hide-timer.restart();
+                                        }
+                                    }
+                                    clicked => {
+                                        if (root.player-quality-panel-open) {
+                                            root.player-quality-panel-open = false;
+                                        }
+                                        if (root.download-panel-open) {
+                                            root.download-panel-open = false;
+                                        }
+                                        if (root.player-volume-flyout-open) {
+                                            root.player-volume-flyout-open = false;
+                                        }
+                                        if (root.player-more-controls-visible) {
+                                            root.player-more-controls-visible = false;
+                                        }
+                                        root.toggle-hud();
+                                        root.player-controls-visible = true;
+                                        player-controls-hide-timer.restart();
+                                    }
+                                }
+
+                                info-focus := FocusScope {
+                                    width: 0px;
+                                    height: 0px;
+                                    key-pressed(event) => {
+                                        if (event.text == Key.Space || event.text == Key.Return) {
+                                            if (root.player-quality-panel-open) {
+                                                root.player-quality-panel-open = false;
+                                            }
+                                            if (root.download-panel-open) {
+                                                root.download-panel-open = false;
+                                            }
+                                            if (root.player-volume-flyout-open) {
+                                                root.player-volume-flyout-open = false;
+                                            }
+                                            if (root.player-more-controls-visible) {
+                                                root.player-more-controls-visible = false;
+                                            }
+                                            root.toggle-hud();
+                                            root.player-controls-visible = true;
+                                            player-controls-hide-timer.restart();
+                                            return accept;
+                                        }
+                                        reject
+                                    }
+                                }
+                            }
+
                             // More options button (horizontal ellipsis icon)
                             more-btn := Rectangle {
                                 width: 44px;
@@ -7771,19 +7851,6 @@ export component MainWindow inherits Window {
                                     root.toggle-hwdec();
                                 }
                             }
-
-                            TvSecondaryButton {
-                                text: root.hud-visible ? "Hide Stats HUD" : "Show Stats HUD";
-                                active: root.hud-visible;
-                                custom-height: 34px;
-                                custom-width: 238px;
-                                activity => { root.player-controls-visible = true; player-controls-hide-timer.restart(); }
-                                clicked => {
-                                    root.toggle-hud();
-                                    root.player-more-controls-visible = false;
-                                    more-focus.focus();
-                                }
-                            }
                         }
                     }
                 }
@@ -8090,6 +8157,35 @@ export component MainWindow inherits Window {
 
                                             detail-studio-touch-fs := TouchArea {
                                                 clicked => { root.open-studio-profile(root.detail-studio); }
+                                            }
+                                        }
+
+                                        if root.detail-telegram-id != "" : Rectangle {
+                                            height: HubTheme.control-height - 12px;
+                                            border-radius: HubTheme.control-radius;
+                                            background: detail-tg-touch-hdr.has-hover ? #0088cc33 : HubTheme.surface-raised;
+                                            border-width: 1px;
+                                            border-color: root.detail-telegram-id-copied ? HubTheme.success : (detail-tg-touch-hdr.has-hover ? #29b6f6 : HubTheme.control-border);
+
+                                            HorizontalLayout {
+                                                padding-left: HubTheme.space-3;
+                                                padding-right: HubTheme.space-3;
+                                                spacing: 4px;
+                                                alignment: center;
+                                                Text {
+                                                    text: root.detail-telegram-id-copied ? "Copied ID!" : ("TG: " + root.detail-telegram-id);
+                                                    color: root.detail-telegram-id-copied ? HubTheme.success : (detail-tg-touch-hdr.has-hover ? #29b6f6 : HubTheme.text-secondary);
+                                                    font-size: HubTheme.metadata-size;
+                                                    font-weight: 700;
+                                                    vertical-alignment: center;
+                                                    overflow: elide;
+                                                    max-width: 220px;
+                                                }
+                                            }
+
+                                            detail-tg-touch-hdr := TouchArea {
+                                                mouse-cursor: pointer;
+                                                clicked => { root.copy-detail-telegram-id(root.detail-telegram-id); }
                                             }
                                         }
                                     }
@@ -8467,6 +8563,46 @@ export component MainWindow inherits Window {
                                             }
                                         }
 
+                                        if root.detail-telegram-id != "" : HorizontalLayout {
+                                            spacing: HubTheme.space-2;
+                                            Text {
+                                                min-width: 152px;
+                                                max-width: 152px;
+                                                text: "Telegram ID";
+                                                color: HubTheme.text-muted;
+                                                font-size: HubTheme.body-size;
+                                                vertical-alignment: top;
+                                            }
+                                            Rectangle {
+                                                horizontal-stretch: 1;
+                                                height: tg-id-text.preferred-height;
+                                                background: transparent;
+                                                tg-id-text := Text {
+                                                    width: 100%;
+                                                    text: root.detail-telegram-id;
+                                                    color: root.detail-telegram-id-copied ? HubTheme.success : (tg-id-touch.has-hover ? HubTheme.accent-text : HubTheme.text-muted);
+                                                    font-size: 12px;
+                                                    font-family: "Consolas";
+                                                    wrap: word-wrap;
+                                                }
+                                                tg-id-touch := TouchArea {
+                                                    mouse-cursor: pointer;
+                                                    clicked => { root.copy-detail-telegram-id(root.detail-telegram-id); }
+                                                }
+                                                tg-id-focus := FocusScope {
+                                                    width: 0px;
+                                                    height: 0px;
+                                                    key-pressed(event) => {
+                                                        if (event.text == Key.Return || event.text == Key.Space) {
+                                                            root.copy-detail-telegram-id(root.detail-telegram-id);
+                                                            return accept;
+                                                        }
+                                                        reject
+                                                    }
+                                                }
+                                            }
+                                        }
+
                                         HorizontalLayout {
                                             spacing: HubTheme.space-2;
                                             Text {
@@ -8490,6 +8626,7 @@ export component MainWindow inherits Window {
                                                     wrap: word-wrap;
                                                 }
                                                 item-id-touch := TouchArea {
+                                                    mouse-cursor: pointer;
                                                     clicked => { root.copy-detail-item-id(root.detail-id); }
                                                 }
                                                 item-id-focus := FocusScope {

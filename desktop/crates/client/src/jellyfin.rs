@@ -62,6 +62,7 @@ pub struct GetItemsQuery<'a> {
     pub include_item_types: Option<&'a str>,
     pub person_types: Option<&'a str>,
     pub image_types: Option<&'a str>,
+    pub any_provider_id_equals: Option<&'a str>,
     /// Overrides the `Fields=` list. `Some("")` omits the parameter entirely
     /// (server defaults only); `None` keeps the full desktop field set.
     pub fields: Option<&'a str>,
@@ -420,6 +421,14 @@ impl JellyfinClient {
         if let Some(term) = query.search_term {
             if !term.trim().is_empty() {
                 url.push_str(&format!("&SearchTerm={}", crate::urlencoding(term.trim())));
+            }
+        }
+        if let Some(prov) = query.any_provider_id_equals {
+            if !prov.trim().is_empty() {
+                url.push_str(&format!(
+                    "&AnyProviderIdEquals={}",
+                    crate::urlencoding(prov.trim())
+                ));
             }
         }
         if let Some(prefix) = query.name_starts_with {

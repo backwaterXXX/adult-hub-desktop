@@ -1022,8 +1022,14 @@ fn get_resume_search_catalog_page(
     }
 
     let query = query.trim().to_lowercase();
+    let query_stripped = query.strip_prefix("telegram:").unwrap_or(&query).trim();
     items.retain(|item| {
         (item.title.to_lowercase().contains(&query)
+            || item.provider_video_id.as_deref().is_some_and(|pvid| {
+                let p = pvid.to_lowercase();
+                p.contains(&query) || (!query_stripped.is_empty() && p.contains(query_stripped))
+            })
+            || item.id.to_lowercase().contains(&query)
             || item
                 .overview
                 .as_ref()
@@ -1077,6 +1083,7 @@ fn get_catalog_page(
 ) -> std::result::Result<CatalogPage, JellyfinError> {
     if category == "Watch History" {
         let query = query.trim().to_lowercase();
+        let query_stripped = query.strip_prefix("telegram:").unwrap_or(&query).trim();
         let mut history = local_store
             .get_watch_history(100)
             .unwrap_or_default()
@@ -1085,6 +1092,11 @@ fn get_catalog_page(
             .filter(|item| {
                 (query.is_empty()
                     || item.title.to_lowercase().contains(&query)
+                    || item.provider_video_id.as_deref().is_some_and(|pvid| {
+                        let p = pvid.to_lowercase();
+                        p.contains(&query) || (!query_stripped.is_empty() && p.contains(query_stripped))
+                    })
+                    || item.id.to_lowercase().contains(&query)
                     || item
                         .overview
                         .as_ref()
@@ -1662,6 +1674,26 @@ fn get_search_movies_page_at(
         &session.access_token,
         &search_movie_query(query, start_index, filters, parent_id.as_deref()),
     )?;
+    let mut page = page;
+    if page.items.is_empty() && start_index == 0 {
+        let clean_q = query.trim().strip_prefix("telegram:").unwrap_or(query.trim());
+        if !clean_q.is_empty() {
+            let tg_prov = format!("telegram.{clean_q}");
+            let mut prov_query = search_movie_query(clean_q, start_index, filters, parent_id.as_deref());
+            prov_query.search_term = None;
+            prov_query.any_provider_id_equals = Some(&tg_prov);
+            if let Ok(prov_page) = jellyfin.get_items(
+                &session.server_url,
+                &session.user_id,
+                &session.access_token,
+                &prov_query,
+            ) {
+                if !prov_page.items.is_empty() {
+                    page = prov_page;
+                }
+            }
+        }
+    }
     let server_count = page.items.len();
     let total_count = page.total_record_count;
     let items = page
@@ -3742,9 +3774,10 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     let resolver = resolver.clone();
                     let resolver_url = resolver_url.clone();
                     let q = query_str.clone();
+                    let clean_term = q.trim().strip_prefix("telegram:").unwrap_or(q.trim()).to_string();
                     std::thread::spawn(move || {
                         resolver
-                            .search_with_timeout(&resolver_url, &q, "telegram", CHANNEL_SEARCH_TIMEOUT)
+                            .search_with_timeout(&resolver_url, &clean_term, "telegram", CHANNEL_SEARCH_TIMEOUT)
                             .map(|videos| videos.into_iter().map(TvItem::from).collect::<Vec<_>>())
                             .map_err(|e| {
                                 crate::diagnostics::GLOBAL_LOG.w(

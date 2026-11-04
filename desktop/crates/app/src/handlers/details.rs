@@ -44,11 +44,38 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
         ui.on_copy_detail_item_id(move |item_id| {
             let Some(ui) = weak.upgrade() else { return };
             match crate::copy_text_to_clipboard(item_id.as_str()) {
-                Ok(()) => ui.set_detail_id_copied(true),
+                Ok(()) => {
+                    ui.set_detail_id_copied(true);
+                    ui.set_toast_message("Item ID copied to clipboard".into());
+                    ui.set_toast_type("info".into());
+                    ui.set_toast_action_text("".into());
+                    ui.set_toast_visible(true);
+                }
                 Err(error) => {
                     eprintln!("Could not copy item ID: {error}");
                     ui.set_detail_id_copied(false);
                     ui.set_status("Could not copy item ID to clipboard".into());
+                }
+            }
+        });
+    }
+
+    {
+        let weak = ui.as_weak();
+        ui.on_copy_detail_telegram_id(move |tg_id| {
+            let Some(ui) = weak.upgrade() else { return };
+            match crate::copy_text_to_clipboard(tg_id.as_str()) {
+                Ok(()) => {
+                    ui.set_detail_telegram_id_copied(true);
+                    ui.set_toast_message("Telegram ID copied to clipboard".into());
+                    ui.set_toast_type("info".into());
+                    ui.set_toast_action_text("".into());
+                    ui.set_toast_visible(true);
+                }
+                Err(error) => {
+                    eprintln!("Could not copy Telegram ID: {error}");
+                    ui.set_detail_telegram_id_copied(false);
+                    ui.set_status("Could not copy Telegram ID to clipboard".into());
                 }
             }
         });
@@ -78,6 +105,17 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
             let target_item = ctx_detail.find_catalog_item(&id).or_else(|| {
                 if id == "sample" {
                     Some(sample_catalog_tv_items()[0].clone())
+                } else if id.starts_with("telegram:") {
+                    let prov_id = id.strip_prefix("telegram:").unwrap_or(&id).to_string();
+                    Some(TvItem {
+                        id: id.clone(),
+                        title: format!("Telegram video {prov_id}"),
+                        genres: vec!["Telegram".into()],
+                        provider_video_id: Some(prov_id),
+                        source_provider: Some("telegram".into()),
+                        container: Some("mp4".into()),
+                        ..Default::default()
+                    })
                 } else {
                     None
                 }
@@ -140,6 +178,7 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
             let mut overview_str = target_item.overview.clone().unwrap_or_default();
             let mut extracted_channel = String::new();
             let mut extracted_source_url = String::new();
+            let mut extracted_telegram_id = String::new();
 
             // Clean up overview by extracting raw source/channel metadata and removing title repetitions
             let clean_title = target_item.title.trim();
@@ -175,6 +214,27 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                         let trimmed = val.trim();
                         if !trimmed.is_empty() && extracted_source_url.is_empty() {
                             extracted_source_url = trimmed.to_string();
+                        }
+                    }
+                    continue;
+                }
+                if lower.starts_with("telegram id:")
+                    || lower.starts_with("telegram_id:")
+                    || lower.starts_with("id telegram:")
+                    || lower.starts_with("tg id:")
+                    || lower.starts_with("tg_id:")
+                    || lower.starts_with("msg id:")
+                    || lower.starts_with("message id:")
+                {
+                    if let Some((_, val)) = line.split_once(':') {
+                        let trimmed = val.trim();
+                        let clean_val = trimmed.strip_prefix("telegram:").unwrap_or(trimmed).trim();
+                        if !clean_val.is_empty()
+                            && !clean_val.starts_with("http://")
+                            && !clean_val.starts_with("https://")
+                            && extracted_telegram_id.is_empty()
+                        {
+                            extracted_telegram_id = clean_val.to_string();
                         }
                     }
                     continue;
@@ -418,12 +478,20 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                 }
             });
 
+            let telegram_id_str = resolve_item_telegram_id(
+                &target_item,
+                (!extracted_telegram_id.is_empty()).then_some(&extracted_telegram_id),
+            )
+            .unwrap_or_default();
+
             ui.set_detail_id(target_item.id.clone().into());
+            ui.set_detail_telegram_id(telegram_id_str.into());
             ui.set_detail_title(crate::catalog::display_title(&target_item).into());
             ui.set_detail_original_title(original_title_str.into());
             ui.set_detail_channel(extracted_channel.into());
             ui.set_detail_source_url(extracted_source_url.into());
             ui.set_detail_id_copied(false);
+            ui.set_detail_telegram_id_copied(false);
             ui.set_detail_overview(overview_str.into());
             ui.set_detail_year(year_str.into());
             ui.set_detail_duration(duration_str.into());
@@ -1437,4 +1505,94 @@ fn resolve_real_media_size(
     }
 
     None
+}
+
+/// Extracts the Telegram ID from a `TvItem`.
+/// Inspects `provider_video_id` (stripping any `telegram:` prefix),
+/// then `item.id` if it starts with `telegram:`,
+/// then an optional extracted overview ID,
+/// and lastly `item.id` if `item.is_telegram()`.
+pub fn resolve_item_telegram_id(
+    item: &TvItem,
+    overview_telegram_id: Option<&str>,
+) -> Option<String> {
+    if let Some(ref pvid) = item.provider_video_id {
+        let clean = pvid.trim();
+        let stripped = clean.strip_prefix("telegram:").unwrap_or(clean).trim();
+        if !stripped.is_empty() {
+            return Some(stripped.to_string());
+        }
+    }
+    if let Some(stripped) = item.id.strip_prefix("telegram:") {
+        let clean = stripped.trim();
+        if !clean.is_empty() {
+            return Some(clean.to_string());
+        }
+    }
+    if let Some(from_ov) = overview_telegram_id {
+        let clean = from_ov.trim();
+        let stripped = clean.strip_prefix("telegram:").unwrap_or(clean).trim();
+        if !stripped.is_empty() {
+            return Some(stripped.to_string());
+        }
+    }
+    if item.is_telegram() {
+        let clean = item.id.trim();
+        let stripped = clean.strip_prefix("telegram:").unwrap_or(clean).trim();
+        if !stripped.is_empty() {
+            return Some(stripped.to_string());
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_item_telegram_id_from_provider_video_id() {
+        let mut item = TvItem::new("jellyfin-guid-1234", "Sample Video");
+        item.provider_video_id = Some("-100123456789:456:789".into());
+        assert_eq!(
+            resolve_item_telegram_id(&item, None),
+            Some("-100123456789:456:789".to_string())
+        );
+
+        // Strips redundant telegram: prefix
+        item.provider_video_id = Some("telegram:chan:999".into());
+        assert_eq!(
+            resolve_item_telegram_id(&item, None),
+            Some("chan:999".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_item_telegram_id_from_id_prefix() {
+        let item = TvItem::new("telegram:-100987654321:111:222", "Channel Video");
+        assert_eq!(
+            resolve_item_telegram_id(&item, None),
+            Some("-100987654321:111:222".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_item_telegram_id_from_overview() {
+        let item = TvItem::new("regular-id-777", "Overview ID Video");
+        assert_eq!(
+            resolve_item_telegram_id(&item, Some("5551234")),
+            Some("5551234".to_string())
+        );
+        // Strips redundant prefix
+        assert_eq!(
+            resolve_item_telegram_id(&item, Some("telegram:5551234")),
+            Some("5551234".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_item_telegram_id_empty_for_regular_media() {
+        let item = TvItem::new("regular-id-888", "Standard Movie");
+        assert_eq!(resolve_item_telegram_id(&item, None), None);
+    }
 }

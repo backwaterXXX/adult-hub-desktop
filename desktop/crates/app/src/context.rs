@@ -59,6 +59,7 @@ pub struct AppContext {
     pub home_catalog: Arc<Mutex<Vec<TvItem>>>,
     pub performer_catalog: Arc<Mutex<Vec<TvItem>>>,
     pub studio_catalog: Arc<Mutex<Vec<TvItem>>>,
+    pub channel_catalog: Arc<Mutex<Vec<TvItem>>>,
     pub autoplay_active: Arc<AtomicBool>,
     pub hwdec_active: Arc<AtomicBool>,
     pub player_paused_for_details: Arc<AtomicBool>,
@@ -198,6 +199,15 @@ impl AppContext {
         }
         if let Some(item) = self
             .studio_catalog
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|i| i.id == id)
+        {
+            return Some(item.clone());
+        }
+        if let Some(item) = self
+            .channel_catalog
             .lock()
             .unwrap()
             .iter()
