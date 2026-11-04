@@ -33,7 +33,7 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                 return;
             }
             if let Err(error) = webbrowser::open(parsed.as_str()) {
-                eprintln!("Could not open source URL: {error}");
+                log::warn!("Could not open source URL: {error}");
                 ui.set_status("Could not open source URL".into());
             }
         });
@@ -52,7 +52,7 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                     ui.set_toast_visible(true);
                 }
                 Err(error) => {
-                    eprintln!("Could not copy item ID: {error}");
+                    log::warn!("Could not copy item ID: {error}");
                     ui.set_detail_id_copied(false);
                     ui.set_status("Could not copy item ID to clipboard".into());
                 }
@@ -73,7 +73,7 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                     ui.set_toast_visible(true);
                 }
                 Err(error) => {
-                    eprintln!("Could not copy Telegram ID: {error}");
+                    log::warn!("Could not copy Telegram ID: {error}");
                     ui.set_detail_telegram_id_copied(false);
                     ui.set_status("Could not copy Telegram ID to clipboard".into());
                 }

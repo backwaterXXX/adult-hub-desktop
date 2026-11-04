@@ -824,12 +824,11 @@ fn handle_event(
             prefix,
             text,
         } => {
-            let message = format!("{}: {}", prefix, text);
+            let message = format!("{prefix}: {text}");
             if matches!(level.as_str(), "fatal" | "error") {
-                eprintln!("libmpv {level}: {message}");
-                crate::diagnostics::GLOBAL_LOG.e("libmpv", &message);
+                log::error!(target: "libmpv", "{message}");
             } else {
-                crate::diagnostics::GLOBAL_LOG.w("libmpv", &message);
+                log::warn!(target: "libmpv", "{message}");
             }
         }
         PlayerEvent::Shutdown => {

@@ -1751,7 +1751,7 @@ mod tests {
                 let _ = std::fs::remove_file("test_ao.wav");
             }
             Err(e) => {
-                eprintln!("Player::new failed: {e}");
+                log::warn!("Player::new failed: {e}");
             }
         }
     }

@@ -4677,7 +4677,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                             // Keep the loaded cards; surface the failure at the
                             // end of the list with its own retry affordance.
                             let message = format!("Could not load more items: {error}");
-                            eprintln!("[catalog] {message}");
+                            log::warn!(target: "catalog", "{message}");
                             ui.set_catalog_more_error(message.into());
                         }
                     }

@@ -77,7 +77,7 @@ impl PlaybackReporter {
                     )
                 })
                 .map_err(|e| {
-                    eprintln!("Failed to spawn playback-reporter thread: {e}");
+                    log::error!("Failed to spawn playback-reporter thread: {e}");
                     e
                 })
                 .ok()

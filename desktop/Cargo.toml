@@ -22,6 +22,7 @@ uuid = { version = "1.10", features = ["v4"] }
 thiserror = "2.0"
 regex = "1.11"
 ring = "0.17"
+log = "0.4"
 windows-sys = { version = "=0.61.2", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
@@ -35,6 +36,7 @@ sysinfo = { version = "0.39.6", default-features = false, features = ["system"] 
 
 [workspace.lints.clippy]
 dbg_macro = "warn"
+print_stderr = "warn"
 cognitive_complexity = { level = "warn", priority = -1 }
 
 # Keep source locations in backtraces without full type/variable debug data.

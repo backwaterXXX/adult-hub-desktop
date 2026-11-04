@@ -190,6 +190,50 @@ impl AppLog {
 // Global logger instance
 pub static GLOBAL_LOG: LazyLock<AppLog> = LazyLock::new(AppLog::new);
 
+pub struct AppLogger;
+
+static LOGGER: AppLogger = AppLogger;
+
+impl log::Log for AppLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        if metadata.level() <= log::Level::Info {
+            true
+        } else {
+            crate::debug_logging_enabled()
+        }
+    }
+
+    #[allow(clippy::print_stderr)]
+    fn log(&self, record: &log::Record) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+
+        let target = record.target();
+        let message = record.args().to_string();
+
+        match record.level() {
+            log::Level::Error => GLOBAL_LOG.e(target, &message),
+            log::Level::Warn => GLOBAL_LOG.w(target, &message),
+            log::Level::Info => GLOBAL_LOG.i(target, &message),
+            log::Level::Debug | log::Level::Trace => GLOBAL_LOG.d(target, &message),
+        }
+
+        let stamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        eprintln!("[{stamp}] [{}] [{target}] {message}", record.level());
+    }
+
+    fn flush(&self) {}
+}
+
+pub fn init_logger() {
+    let _ = log::set_logger(&LOGGER);
+    log::set_max_level(log::LevelFilter::Debug);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

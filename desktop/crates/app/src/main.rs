@@ -74,6 +74,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         AttachConsole(ATTACH_PARENT_PROCESS);
     }
 
+    crate::diagnostics::init_logger();
+
     let options = Options::parse(std::env::args().skip(1))?;
     DEBUG_MODE.store(options.debug, std::sync::atomic::Ordering::Relaxed);
 
@@ -81,8 +83,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let local_store = match LocalStore::open(&db_path) {
         Ok(store) => Arc::new(store),
         Err(err) => {
-            eprintln!(
-                "warning: opening local store at {db_path:?} failed ({err}), falling back to in-memory store"
+            log::warn!(
+                "opening local store at {db_path:?} failed ({err}), falling back to in-memory store"
             );
             Arc::new(LocalStore::open_in_memory().expect("in-memory sqlite store"))
         }
@@ -154,7 +156,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } {
         Ok(player) => Some(Arc::new(player)),
         Err(error) => {
-            eprintln!("Player::new failed: {error}");
+            log::error!("Player::new failed: {error}");
             show_error(&ui, error.to_string());
             None
         }
@@ -163,7 +165,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(player) = &player {
         if let Err(error) = player.set_volume(100.0) {
-            eprintln!("cannot set initial volume: {error}");
+            log::warn!("cannot set initial volume: {error}");
         }
     }
 
@@ -175,7 +177,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(adult_hub_player::BufferProfile::Standard);
     if let Some(player) = &player {
         if let Err(error) = player.set_buffer_profile(initial_buffer_profile) {
-            eprintln!("cannot set initial buffer profile: {error}");
+            log::warn!("cannot set initial buffer profile: {error}");
         }
     }
     ui.set_buffer_profile(initial_buffer_profile.id().into());
@@ -637,7 +639,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let phash_coord = phash_coord.clone();
             Box::new(move || {
                 let Some(ui) = ui_weak.upgrade() else { return };
-                eprintln!("on_renderer_ready invoked: initial={initial}");
+                log::info!("on_renderer_ready invoked: initial={initial}");
                 if initial == "sample" {
                     let sample_item = sample_catalog_tv_items()[0].clone();
                     start_item_playback(
@@ -1078,6 +1080,7 @@ pub(crate) fn log_debug(message: &str) {
     }
 }
 
+#[allow(clippy::print_stderr)]
 pub(crate) fn log_startup(message: &str) {
     let path = startup_log_path();
     if let Some(dir) = path.parent() {
@@ -1118,8 +1121,9 @@ pub(crate) fn log_startup(message: &str) {
     }
 }
 
+#[allow(clippy::print_stderr)]
 fn fatal_startup_error(message: &str) {
-    eprintln!("fatal startup error: {message}");
+    log::error!("fatal startup error: {message}");
     let text = format!(
         "Adult Hub Desktop cannot start.\n\n{message}\n\n\
          Log file: {}\n\

@@ -589,7 +589,7 @@ pub fn install_renderer(
         .set_rendering_notifier(move |state, graphics_api| match state {
             slint::RenderingState::RenderingSetup => {
                 let slint::GraphicsAPI::NativeOpenGL { get_proc_address } = graphics_api else {
-                    eprintln!("RenderingSetup: graphics_api is NOT NativeOpenGL!");
+                    log::error!("RenderingSetup: graphics_api is NOT NativeOpenGL!");
                     if let Some(ui) = ui_weak.upgrade() {
                         crate::playback::show_error(
                             &ui,
@@ -600,7 +600,7 @@ pub fn install_renderer(
                 };
                 match Renderer::new(Arc::clone(&player), get_proc_address, flip_y) {
                     Ok(mut created) => {
-                        eprintln!("RenderingSetup: Renderer initialized successfully");
+                        log::info!("RenderingSetup: Renderer initialized successfully");
                         let pending = frame_pending.clone();
                         let w = ui_weak.clone();
                         created.set_update_callback(move || {

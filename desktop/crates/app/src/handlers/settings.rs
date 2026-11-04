@@ -1044,7 +1044,7 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
                     ui.set_toast_visible(true);
                 }
                 Err(err) => {
-                    eprintln!("Failed to copy build ID: {err}");
+                    log::warn!("Failed to copy build ID: {err}");
                     ui.set_status("Failed to copy build ID to clipboard".into());
                 }
             }
