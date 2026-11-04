@@ -1,0 +1,4 @@
+# Clippy configuration
+# Cognitive complexity threshold set cautiously to accommodate complex GUI event handlers
+# while preventing overly monolithic logic.
+cognitive-complexity-threshold = 50

@@ -6,6 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 description = "Adult Hub Desktop player prototype"
 
+[lints]
+workspace = true
+
 [dependencies]
 adult-hub-player = { path = "../player" }
 adult-hub-client = { path = "../client" }

@@ -6,6 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 description = "Narrow, safe wrapper around the libmpv client and OpenGL render APIs"
 
+[lints]
+workspace = true
+
 [dependencies]
 libloading.workspace = true
 serde_json.workspace = true
