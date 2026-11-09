@@ -686,7 +686,11 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
                 let pos_ms = (player.position().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
                 let dur_ms = (player.duration().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
                 let _ = player.set_muted(true);
-                if let Some(item) = current_item.lock().unwrap().as_ref() {
+                if let Some(item) = current_item
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_ref()
+                {
                     session_ctrl.checkpoint_progress(item, pos_ms, dur_ms, false);
                 }
                 reporter.stop_session(pos_ms);
@@ -757,7 +761,10 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
                 ui.invoke_refresh_home();
             } else if ui.get_active_category() == "Watch History" {
                 set_catalog(&ui, Vec::new());
-                cached_catalog.lock().unwrap().clear();
+                cached_catalog
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clear();
             }
         });
     }

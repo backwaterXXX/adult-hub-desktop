@@ -8,6 +8,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN_DIR="${ROOT_DIR}/bin"
 VERSION="${1:-0.1.0}"
+if [[ ! "${VERSION}" =~ ^[0-9A-Za-z][0-9A-Za-z.+-]*$ ]]; then
+    echo "Error: invalid release version: ${VERSION}" >&2
+    exit 1
+fi
 MANIFEST_FILE="${BIN_DIR}/adult-hub-update-manifest.json"
 SIG_FILE="${BIN_DIR}/adult-hub-update-manifest.json.sig"
 KEY_FILE="${ROOT_DIR}/dev/release-signing-key.pem"
@@ -19,7 +23,12 @@ fi
 
 echo "==> Generating release update manifest for v${VERSION}..."
 
-python3 - << EOF
+# Values reach Python through the environment, never through the source text.
+export RELEASE_BIN_DIR="${BIN_DIR}"
+export RELEASE_VERSION="${VERSION}"
+export RELEASE_MANIFEST_PATH="${MANIFEST_FILE}"
+
+python3 - <<'EOF'
 import os, json, hashlib, subprocess
 
 def valid_repository(value):
@@ -47,8 +56,8 @@ if not valid_repository(repository):
 if not valid_repository(repository):
     repository = "adult-hub/adult-hub-desktop"
 
-bin_dir = "${BIN_DIR}"
-version = "${VERSION}"
+bin_dir = os.environ["RELEASE_BIN_DIR"]
+version = os.environ["RELEASE_VERSION"]
 
 packages = []
 
@@ -98,7 +107,7 @@ manifest = {
     "packages": packages,
 }
 
-manifest_path = "${MANIFEST_FILE}"
+manifest_path = os.environ["RELEASE_MANIFEST_PATH"]
 with open(manifest_path, "w", encoding="utf-8") as f:
     json.dump(manifest, f, indent=2)
 

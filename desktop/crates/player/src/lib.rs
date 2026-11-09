@@ -577,7 +577,10 @@ impl Player {
             start_position,
         };
         self.issue_load(&request)?;
-        *self.last_load.lock().unwrap() = Some(request);
+        *self
+            .last_load
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(request);
         self.load_generation.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -627,10 +630,19 @@ impl Player {
         if request.url.trim().is_empty() {
             return Err(PlayerError::InvalidArgument("empty media URL".into()));
         }
-        *self.last_load_time.lock().unwrap() = Some(Instant::now());
+        *self
+            .last_load_time
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Instant::now());
         self.reset_stall_stats();
-        *self.transfer_sampler.lock().unwrap() = None;
-        let active_prof = *self.active_profile.lock().unwrap();
+        *self
+            .transfer_sampler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        let active_prof = *self
+            .active_profile
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _ = self.set_buffer_profile(active_prof);
         if !request.headers.is_empty() {
             if let Err(e) =
@@ -701,32 +713,50 @@ impl Player {
     }
 
     pub fn seek_absolute(&self, seconds: f64) -> Result<()> {
-        *self.last_seek.lock().unwrap() = Some(Instant::now());
+        *self
+            .last_seek
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Instant::now());
         self.set_property_string("time-pos", &format!("{seconds:.3}"))
     }
 
     pub fn seek_relative(&self, seconds: f64) -> Result<()> {
-        *self.last_seek.lock().unwrap() = Some(Instant::now());
+        *self
+            .last_seek
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Instant::now());
         self.command(&["seek", &format!("{seconds:.3}"), "relative"])
     }
 
     pub fn last_seek_time(&self) -> Option<Instant> {
-        *self.last_seek.lock().unwrap()
+        *self
+            .last_seek
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub fn last_load_time(&self) -> Option<Instant> {
-        *self.last_load_time.lock().unwrap()
+        *self
+            .last_load_time
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub fn update_stall_summary(&self, count: u32, total_dur: f64, diag: Option<String>) {
-        let mut s = self.stall_summary.lock().unwrap();
+        let mut s = self
+            .stall_summary
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         s.stall_count = count;
         s.total_stalled_duration_secs = total_dur;
         s.last_stall_diagnosis = diag;
     }
 
     pub fn reset_stall_stats(&self) {
-        let mut s = self.stall_summary.lock().unwrap();
+        let mut s = self
+            .stall_summary
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *s = StallSummary::default();
     }
 
@@ -831,12 +861,18 @@ impl Player {
         self.set_property_string("demuxer-max-back-bytes", profile.demuxer_max_back_bytes())?;
         self.set_property_string("demuxer-readahead-secs", profile.demuxer_readahead_secs())?;
         self.set_property_string("cache-secs", profile.cache_secs())?;
-        *self.active_profile.lock().unwrap() = profile;
+        *self
+            .active_profile
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = profile;
         Ok(())
     }
 
     pub fn buffer_profile(&self) -> BufferProfile {
-        *self.active_profile.lock().unwrap()
+        *self
+            .active_profile
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub fn effective_buffer_params(&self) -> (String, String, String, String, String) {
@@ -969,7 +1005,10 @@ impl Player {
             .or_else(|| {
                 if let Some(total) = cache_total_bytes {
                     let now = Instant::now();
-                    let mut sampler = self.transfer_sampler.lock().unwrap();
+                    let mut sampler = self
+                        .transfer_sampler
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     if let Some((last_time, last_bytes, prev_speed)) = *sampler {
                         let elapsed = now.saturating_duration_since(last_time).as_secs_f64();
                         if elapsed >= 0.8 {
@@ -996,7 +1035,11 @@ impl Player {
         let audio_bitrate = self.get_f64("audio-bitrate");
         let active_prof = self.buffer_profile();
 
-        let stall = self.stall_summary.lock().unwrap().clone();
+        let stall = self
+            .stall_summary
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
 
         PlaybackStats {
             video_codec: video_codec.clone(),
@@ -1032,16 +1075,26 @@ impl Player {
             total_stalled_duration_secs: stall.total_stalled_duration_secs,
             last_stall_diagnosis: stall.last_stall_diagnosis,
             file_size: self.get_u64("file-size"),
-            quality_variant: self.current_quality.lock().unwrap().clone(),
+            quality_variant: self
+                .current_quality
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
         }
     }
 
     pub fn quality_variant(&self) -> Option<String> {
-        self.current_quality.lock().unwrap().clone()
+        self.current_quality
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub fn set_quality_variant(&self, variant: Option<String>) {
-        *self.current_quality.lock().unwrap() = variant;
+        *self
+            .current_quality
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = variant;
     }
 
     pub fn get_string(&self, name: &str) -> Option<String> {
@@ -1410,10 +1463,10 @@ impl sys::MpvApi {
             }
         }
 
-        if cfg!(windows) {
-            candidates.push(PathBuf::from("libmpv-2.dll"));
-            candidates.push(PathBuf::from("mpv-2.dll"));
-        } else {
+        // Bare library names are deliberately not searched on Windows: LoadLibrary
+        // would then look in the current directory, which may be untrusted. Only
+        // the copy beside the executable is loaded there.
+        if !cfg!(windows) {
             for name in ["libmpv.so.2", "libmpv.so.1", "libmpv.so"] {
                 candidates.push(PathBuf::from(name));
             }

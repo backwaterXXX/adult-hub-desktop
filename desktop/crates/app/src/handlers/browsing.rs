@@ -221,7 +221,9 @@ pub fn restore_saved_home_data(
         return false;
     }
 
-    *home_catalog.lock().unwrap() = cache.all_items;
+    *home_catalog
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = cache.all_items;
 
     let shelves = cache
         .shelves
@@ -723,7 +725,10 @@ fn save_catalog_view(
     if ui.get_is_loading_catalog() {
         return;
     }
-    let mut page = paging.lock().unwrap().clone();
+    let mut page = paging
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
     if page.category.is_empty() {
         return;
     }
@@ -734,7 +739,10 @@ fn save_catalog_view(
         .collect::<Vec<_>>();
     let snapshot = CatalogViewSnapshot {
         cards,
-        items: cached_items.lock().unwrap().clone(),
+        items: cached_items
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone(),
         page: page.clone(),
         total_count: ui.get_catalog_total_count(),
         has_more: ui.get_catalog_has_more(),
@@ -791,8 +799,12 @@ fn restore_catalog_view(
     if page.category == "Performers" {
         ui.set_performer_search_query(page.query.clone().into());
     }
-    *paging.lock().unwrap() = page;
-    *cached_items.lock().unwrap() = snapshot.items.clone();
+    *paging
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = page;
+    *cached_items
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = snapshot.items.clone();
 
     set_catalog(ui, snapshot.cards.clone());
     ui.set_catalog_total_count(snapshot.total_count);
@@ -2224,10 +2236,15 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             reporter.set_auth(None, None);
             crate::thumbnails::set_resolver_auth_token(None);
             phash_coord.update_auth("", None);
-            home_catalog.lock().unwrap().clear();
+            home_catalog
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clear();
             let raw_items = Vec::new();
             let cards = raw_items.iter().map(tv_item_to_card).collect::<Vec<_>>();
-            *cached_catalog.lock().unwrap() = raw_items;
+            *cached_catalog
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = raw_items;
             ui.set_is_logged_in(false);
             ui.set_logged_in_user("".into());
             set_home_shelves(
@@ -2662,7 +2679,10 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
 
             std::thread::spawn(move || {
                 let Some(session) = credential_store.get().ok().flatten() else {
-                    home_catalog.lock().unwrap().clear();
+                    home_catalog
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clear();
                     slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak.upgrade() {
                             ui.set_home_is_loading(false);
@@ -2972,7 +2992,9 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     }
                 }
 
-                *home_catalog.lock().unwrap() = all_items;
+                *home_catalog
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = all_items;
                 let categories_for_ui = categories.clone();
                 let selected_categories_for_ui = selected_categories.clone();
                 let server_url = session.server_url.clone();
@@ -3086,7 +3108,10 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             let Some(ui) = weak.upgrade() else { return };
             let kind = kind.to_string();
             let Some(session) = credential_store.get().ok().flatten() else {
-                catalog_filter_options.lock().unwrap().clear();
+                catalog_filter_options
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clear();
                 ui.set_catalog_filter_options_loading(false);
                 ui.set_catalog_filter_options_message("Sign in to load filter choices".into());
                 ui.set_catalog_filter_options(
@@ -3107,7 +3132,10 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             };
             ui.set_catalog_filter_options_loading(true);
             ui.set_catalog_filter_options_message("".into());
-            catalog_filter_options.lock().unwrap().clear();
+            catalog_filter_options
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clear();
             ui.set_catalog_filter_options(
                 Rc::new(slint::VecModel::from(Vec::<HomeCategoryOption>::new())).into(),
             );
@@ -3165,7 +3193,9 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                         if ui.get_catalog_filter_picker_kind().as_str() != kind {
                             return;
                         }
-                        *catalog_filter_options.lock().unwrap() = options.clone();
+                        *catalog_filter_options
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = options.clone();
                         ui.set_catalog_filter_options_loading(false);
                         let query = ui.get_catalog_filter_options_query().to_lowercase();
                         let visible_options = options
@@ -3208,7 +3238,10 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
         ui.on_filter_catalog_filter_options(move |query| {
             let Some(ui) = weak.upgrade() else { return };
             let query = query.trim().to_lowercase();
-            let options = catalog_filter_options.lock().unwrap().clone();
+            let options = catalog_filter_options
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             let option_count = options.len();
             let match_count = options
                 .iter()
@@ -3299,7 +3332,10 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     })
                     .or_else(|| {
                         let mut fallback = filter_catalog_items(
-                            cached_catalog.lock().unwrap().clone(),
+                            cached_catalog
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .clone(),
                             &local_store,
                         )
                         .into_iter()
@@ -3646,7 +3682,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                             if !catalog_generation_is_current(&catalog_generation, request_id) {
                                 return;
                             }
-                            *catalog_paging.lock().unwrap() = CatalogPageState {
+                            *catalog_paging.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = CatalogPageState {
                                 category: "Latest".into(),
                                 is_search: !query.is_empty(),
                                 query,
@@ -3662,7 +3698,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                                 filters,
                                 supplemental_total,
                             };
-                            *cached_catalog.lock().unwrap() = filtered.clone();
+                            *cached_catalog.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = filtered.clone();
                             let cards = filtered
                                 .iter()
                                 .map(|item| {
@@ -3840,10 +3876,10 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     });
 
                     (
-                        movie_task.join().unwrap(),
-                        people_task.join().unwrap(),
-                        studio_task.join().unwrap(),
-                        tag_task.join().unwrap(),
+                        movie_task.join().unwrap_or_else(|_| Err(JellyfinError::Api("search worker panicked".into()))),
+                        people_task.join().unwrap_or_default(),
+                        studio_task.join().unwrap_or_default(),
+                        tag_task.join().unwrap_or_default(),
                     )
                 });
 
@@ -3991,7 +4027,10 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 return;
             }
 
-            let items = cached_catalog.lock().unwrap().clone();
+            let items = cached_catalog
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             let filtered = items
                 .into_iter()
                 .filter(|item| match kind.as_str() {
@@ -4029,7 +4068,9 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 .collect::<Vec<_>>();
 
             let request_id = catalog_generation.fetch_add(1, Ordering::SeqCst) + 1;
-            let mut paging = catalog_paging.lock().unwrap();
+            let mut paging = catalog_paging
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             paging.loading_more = false;
             // The sectioned "All" view is a capped preview, so it never pages;
             // the flat Movies tab owns pagination and filters each mixed page
@@ -4283,19 +4324,24 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                         if !catalog_generation_is_current(&catalog_generation, request_id) {
                             return;
                         }
-                        *cached_catalog.lock().unwrap() = raw_items;
-                        *catalog_paging.lock().unwrap() = CatalogPageState {
-                            category: cat,
-                            query,
-                            drilldown,
-                            is_search: false,
-                            library_id,
-                            next_start,
-                            has_more,
-                            loading_more: false,
-                            filters,
-                            supplemental_total,
-                        };
+                        *cached_catalog
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = raw_items;
+                        *catalog_paging
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            CatalogPageState {
+                                category: cat,
+                                query,
+                                drilldown,
+                                is_search: false,
+                                library_id,
+                                next_start,
+                                has_more,
+                                loading_more: false,
+                                filters,
+                                supplemental_total,
+                            };
                         let cards = display_items
                             .iter()
                             .map(|item| {
@@ -4378,10 +4424,16 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             }
 
             let request_id = catalog_generation.fetch_add(1, Ordering::SeqCst) + 1;
-            catalog_paging.lock().unwrap().loading_more = false;
+            catalog_paging
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .loading_more = false;
             ui.set_is_loading_more(false);
             ui.set_catalog_more_error("".into());
-            let items = cached_catalog.lock().unwrap().clone();
+            let items = cached_catalog
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             let filtered = filter_performer_results(
                 &items,
                 &ui.get_performer_letter(),
@@ -4484,7 +4536,9 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             if ui.get_catalog_more_error() != "" && !force_retry {
                 return;
             }
-            let mut page_state = catalog_paging.lock().unwrap();
+            let mut page_state = catalog_paging
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if page_state.loading_more {
                 return;
             }
@@ -4541,7 +4595,9 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                             let supplemental_total = requested_page.supplemental_total;
                             let is_search = requested_page.is_search;
                             let items = {
-                                let mut cached = cached_catalog.lock().unwrap();
+                                let mut cached = cached_catalog
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                                 if requested_page.category == "Studios" {
                                     let mut seen = cached
                                         .iter()
@@ -4568,7 +4624,9 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                                 }
                                 filter_catalog_items(cached.clone(), &local_store)
                             };
-                            *cached_catalog.lock().unwrap() = items.clone();
+                            *cached_catalog
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) = items.clone();
                             let display_items = if requested_page.category == "Performers" {
                                 filter_performer_results(
                                     &items,
@@ -4586,12 +4644,15 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
 
                             let is_studios = requested_page.category == "Studios";
                             let requested_query = requested_page.query.clone();
-                            *catalog_paging.lock().unwrap() = CatalogPageState {
-                                next_start: page.next_start,
-                                has_more: page.has_more,
-                                loading_more: false,
-                                ..requested_page
-                            };
+                            *catalog_paging
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                CatalogPageState {
+                                    next_start: page.next_start,
+                                    has_more: page.has_more,
+                                    loading_more: false,
+                                    ..requested_page
+                                };
                             // A typed search tab holds only its own type, so
                             // append the matching subset of this mixed page;
                             // cached_catalog keeps everything for the All tab.
@@ -4665,7 +4726,9 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                             );
                         }
                         Err(error) => {
-                            let mut paging = catalog_paging.lock().unwrap();
+                            let mut paging = catalog_paging
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
                             paging.loading_more = false;
                             // Stop the scroll-driven prefetch from hammering a
                             // failing endpoint: the banner's Retry is the only
@@ -4790,7 +4853,12 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 return;
             }
 
-            ctx_play.set_playback_context(cached_catalog.lock().unwrap().clone());
+            ctx_play.set_playback_context(
+                cached_catalog
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone(),
+            );
             crate::playback::start_item_playback_with_resume_ctx(&ui, &ctx_play, target_item, None);
         });
     }

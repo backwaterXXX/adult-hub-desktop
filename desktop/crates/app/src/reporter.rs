@@ -96,7 +96,10 @@ impl PlaybackReporter {
     }
 
     pub fn set_auth(&self, base_url: Option<String>, token: Option<String>) {
-        let mut lock = self.server_auth.lock().unwrap();
+        let mut lock = self
+            .server_auth
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         match (base_url, token) {
             (Some(url), Some(tok)) if !url.trim().is_empty() && !tok.trim().is_empty() => {
                 *lock = Some((url, tok));
@@ -127,12 +130,18 @@ impl PlaybackReporter {
             has_started: false,
         };
 
-        let mut lock = self.current_session.lock().unwrap();
+        let mut lock = self
+            .current_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *lock = Some(session);
     }
 
     pub fn report_start(&self, position_ms: u64, can_seek: bool) {
-        let mut lock = self.current_session.lock().unwrap();
+        let mut lock = self
+            .current_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(session) = lock.as_mut() else { return };
         if session.has_started {
             return;
@@ -149,7 +158,10 @@ impl PlaybackReporter {
 
     pub fn report_progress_now(&self, position_ms: u64, is_paused: bool) {
         let session = {
-            let lock = self.current_session.lock().unwrap();
+            let lock = self
+                .current_session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             lock.clone()
         };
         let Some(session) = session else { return };
@@ -158,14 +170,20 @@ impl PlaybackReporter {
         }
 
         // Flush directly or via debounce
-        let mut pending = self.pending_progress.lock().unwrap();
+        let mut pending = self
+            .pending_progress
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *pending = Some((session, position_ms, is_paused, Instant::now()));
     }
 
     pub fn tick_periodic(&self, current_pos_ms: u64, is_paused: bool) {
         // 1. Check pending coalesced progress
         let should_send_pending = {
-            let mut pending = self.pending_progress.lock().unwrap();
+            let mut pending = self
+                .pending_progress
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some((session, pos, paused, timestamp)) = pending.as_ref() {
                 if timestamp.elapsed() >= PROGRESS_COALESCE_DELAY {
                     let cmd = ReportCommand::Progress {
@@ -187,7 +205,10 @@ impl PlaybackReporter {
         // 2. If no pending coalesced update, send periodic report if session is started
         if should_send_pending {
             let session = {
-                let lock = self.current_session.lock().unwrap();
+                let lock = self
+                    .current_session
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 lock.clone()
             };
             if let Some(session) = session {
@@ -205,7 +226,10 @@ impl PlaybackReporter {
     pub fn stop_session(&self, final_position_ms: u64) {
         // Flush any pending progress first
         let pending = {
-            let mut lock = self.pending_progress.lock().unwrap();
+            let mut lock = self
+                .pending_progress
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             lock.take()
         };
         if let Some((session, pos, paused, _)) = pending {
@@ -217,7 +241,10 @@ impl PlaybackReporter {
         }
 
         let session = {
-            let mut lock = self.current_session.lock().unwrap();
+            let mut lock = self
+                .current_session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             lock.take()
         };
 
@@ -233,13 +260,19 @@ impl PlaybackReporter {
 
     #[allow(dead_code)]
     pub fn current_session_id(&self) -> Option<u64> {
-        let lock = self.current_session.lock().unwrap();
+        let lock = self
+            .current_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         lock.as_ref().map(|s| s.session_id)
     }
 
     #[allow(dead_code)]
     pub fn is_active_session(&self, session_id: u64) -> bool {
-        let lock = self.current_session.lock().unwrap();
+        let lock = self
+            .current_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         lock.as_ref().is_some_and(|s| s.session_id == session_id)
     }
 }
@@ -280,7 +313,9 @@ fn worker_loop(
                 position_ms,
             } => {
                 let is_current = {
-                    let lock = current_session.lock().unwrap();
+                    let lock = current_session
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     lock.as_ref()
                         .is_some_and(|s| s.session_id == session.session_id)
                 };
@@ -293,7 +328,9 @@ fn worker_loop(
                 }
 
                 let auth = {
-                    let lock = server_auth.lock().unwrap();
+                    let lock = server_auth
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     lock.clone()
                 };
                 if let Some((base_url, token)) = auth {
@@ -318,7 +355,9 @@ fn worker_loop(
                 is_paused,
             } => {
                 let is_current = {
-                    let lock = current_session.lock().unwrap();
+                    let lock = current_session
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     lock.as_ref()
                         .is_some_and(|s| s.session_id == session.session_id)
                 };
@@ -331,7 +370,9 @@ fn worker_loop(
                 }
 
                 let auth = {
-                    let lock = server_auth.lock().unwrap();
+                    let lock = server_auth
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     lock.clone()
                 };
                 if let Some((base_url, token)) = auth {
@@ -360,7 +401,9 @@ fn worker_loop(
                 }
 
                 let auth = {
-                    let lock = server_auth.lock().unwrap();
+                    let lock = server_auth
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     lock.clone()
                 };
                 if let Some((base_url, token)) = auth {
@@ -413,7 +456,10 @@ mod tests {
         reporter.report_start(1000, true);
 
         {
-            let lock = reporter.current_session.lock().unwrap();
+            let lock = reporter
+                .current_session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let session = lock.as_ref().unwrap();
             assert!(session.has_started);
             assert!(session.can_seek);
@@ -422,7 +468,10 @@ mod tests {
         // Second report_start should be ignored
         reporter.report_start(2000, false);
         {
-            let lock = reporter.current_session.lock().unwrap();
+            let lock = reporter
+                .current_session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let session = lock.as_ref().unwrap();
             assert!(session.can_seek); // remains true
         }

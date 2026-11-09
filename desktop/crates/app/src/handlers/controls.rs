@@ -117,7 +117,11 @@ pub fn select_random_candidate(ctx: &AppContext, current_id: Option<&str>) -> Op
     };
 
     chosen_item.or_else(|| {
-        let catalog = ctx.cached_catalog.lock().unwrap().clone();
+        let catalog = ctx
+            .cached_catalog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         let filtered = filter_catalog_items(catalog, &ctx.local_store);
         ctx.shuffle_engine.select_candidate(&filtered, current_id)
     })
@@ -148,7 +152,11 @@ pub fn trigger_movie_switch(ui: &MainWindow, ctx: &AppContext, is_random: bool) 
     let pos_ms = (pos * 1000.0) as u64;
     let dur_ms = (dur * 1000.0) as u64;
 
-    let outgoing = ctx.current_playing_item.lock().unwrap().take();
+    let outgoing = ctx
+        .current_playing_item
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
     if let Some(prev) = outgoing.as_ref() {
         if pos_ms >= 5000 {
             ctx.session_ctrl
@@ -184,8 +192,12 @@ pub fn trigger_movie_switch(ui: &MainWindow, ctx: &AppContext, is_random: bool) 
     ui.set_player_selected_quality_id("original".into());
     ui.set_player_selected_quality_label("Original".into());
     ui.set_player_quality_options(slint::ModelRc::default());
-    *ctx.active_quality_id.lock().unwrap() = "original".to_string();
-    *ctx.current_video_variants.lock().unwrap() = Vec::new();
+    *ctx.active_quality_id
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = "original".to_string();
+    *ctx.current_video_variants
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Vec::new();
     if let Some(player) = &ctx.player {
         player.set_quality_variant(None);
     }
@@ -234,7 +246,11 @@ pub fn trigger_movie_switch(ui: &MainWindow, ctx: &AppContext, is_random: bool) 
                         .is_empty()
                     {
                         ctx_worker.set_playback_context(
-                            ctx_worker.cached_catalog.lock().unwrap().clone(),
+                            ctx_worker
+                                .cached_catalog
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .clone(),
                         );
                     }
                     ui.set_status(format!("Playing {}", target.title).into());
@@ -320,7 +336,11 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
         ui.on_retry_current_playback(move || {
             let Some(ui) = weak.upgrade() else { return };
             ui.set_player_error_message(String::new().into());
-            let current_item = ctx_retry.current_playing_item.lock().unwrap().clone();
+            let current_item = ctx_retry
+                .current_playing_item
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             if let Some(item) = current_item {
                 crate::playback::start_item_playback_with_resume_ctx(&ui, &ctx_retry, item, None);
             } else if let Some(player) = &ctx_retry.player {
@@ -782,7 +802,10 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
         let ctx_det = ctx.clone();
         ui.on_open_current_item_details(move || {
             let Some(ui) = weak.upgrade() else { return };
-            let maybe_item = current_item.lock().unwrap().clone();
+            let maybe_item = current_item
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             if let Some(item) = maybe_item {
                 let was_playing = ui.get_playing();
                 ctx_det
@@ -815,7 +838,10 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
                     return;
                 }
             }
-            let maybe_item = current_item.lock().unwrap().clone();
+            let maybe_item = current_item
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             if let Some(item) = maybe_item {
                 ui.invoke_play_item(item.id.into());
             }
@@ -840,7 +866,10 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
                     return;
                 }
             }
-            let maybe_item = current_item.lock().unwrap().clone();
+            let maybe_item = current_item
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             if let Some(item) = maybe_item {
                 crate::playback::start_item_playback_with_resume_ctx(
                     &ui,
@@ -869,7 +898,11 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
         let ctx_dl = ctx.clone();
         ui.on_trigger_download(move || {
             let Some(ui) = ui_weak.upgrade() else { return };
-            let current_item = ctx_dl.current_playing_item.lock().unwrap().clone();
+            let current_item = ctx_dl
+                .current_playing_item
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             let Some(item) = current_item else {
                 ui.set_toast_message("No active video to download".into());
                 ui.set_toast_type("info".into());
@@ -973,9 +1006,13 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
             let Some(ui) = ui_weak.upgrade() else { return };
             let task = ctx_dl.download_manager.current_task();
             let Some(task) = task else { return };
-            let item = ctx_dl
-                .find_catalog_item(&task.item_id)
-                .or_else(|| ctx_dl.current_playing_item.lock().unwrap().clone());
+            let item = ctx_dl.find_catalog_item(&task.item_id).or_else(|| {
+                ctx_dl
+                    .current_playing_item
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+            });
             let Some(item) = item else { return };
 
             ui.set_download_panel_open(true);

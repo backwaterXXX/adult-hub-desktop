@@ -222,7 +222,11 @@ pub fn stop_active_playback_for_navigation(
     let position_ms = (position * 1000.0) as u64;
     let duration_ms = (duration * 1000.0) as u64;
 
-    if let Some(item) = current_item.lock().unwrap().take() {
+    if let Some(item) = current_item
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+    {
         session_ctrl.checkpoint_progress(
             &item,
             position_ms,
@@ -313,7 +317,11 @@ pub fn start_item_playback_with_resume(
     session_ctrl.next_request_id();
 
     // 1. Persist outgoing video's progress and stop session
-    if let Some(prev) = current_item.lock().unwrap().take() {
+    if let Some(prev) = current_item
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+    {
         let pos = (player.position().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
         let dur = (player.duration().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
         session_ctrl.checkpoint_progress(&prev, pos, dur, false);
@@ -350,7 +358,10 @@ pub fn start_item_playback_with_resume(
                         ui.set_toast_action_text("Configure".into());
                         ui.set_toast_visible(true);
                     } else {
-                        *current_item.lock().unwrap() = Some(item.clone());
+                        *current_item
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            Some(item.clone());
                         ui.set_has_active_media(true);
                         ui.set_player_title(crate::catalog::display_title(&item).into());
                         ui.set_player_subtitle(format_player_subtitle(&item).into());
@@ -386,7 +397,9 @@ pub fn start_item_playback_with_resume(
                     )
                 }
                 Err(err) => {
-                    *current_item.lock().unwrap() = Some(item.clone());
+                    *current_item
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(item.clone());
                     ui.set_has_active_media(true);
                     ui.set_player_title(crate::catalog::display_title(&item).into());
                     ui.set_player_subtitle(format_player_subtitle(&item).into());
@@ -434,7 +447,9 @@ pub fn start_item_playback_with_resume(
     }
 
     // 4. Update UI & current item
-    *current_item.lock().unwrap() = Some(item.clone());
+    *current_item
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(item.clone());
     ui.set_has_active_media(true);
     ui.set_playing(true);
     ui.set_player_state("loading".into());
@@ -570,7 +585,12 @@ pub fn start_item_playback_with_resume_ctx(
     // 1. Checkpoint outgoing video's progress BEFORE touching playback state
     let pos = (player.position().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
     let dur = (player.duration().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
-    if let Some(prev) = ctx.current_playing_item.lock().unwrap().take() {
+    if let Some(prev) = ctx
+        .current_playing_item
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+    {
         if pos >= 5000 && prev.id != item.id {
             ctx.session_ctrl.checkpoint_progress(&prev, pos, dur, false);
         }
@@ -581,7 +601,9 @@ pub fn start_item_playback_with_resume_ctx(
     let _ = player.set_pause(true);
 
     // 2. Immediately update UI to show player screen and loading/resolving overlay
-    *ctx.current_playing_item.lock().unwrap() = Some(item.clone());
+    *ctx.current_playing_item
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(item.clone());
     ui.set_has_active_media(true);
     ui.set_playing(true);
     ui.set_player_is_favorite(item.is_favorite);
@@ -611,8 +633,12 @@ pub fn start_item_playback_with_resume_ctx(
     ui.set_player_selected_quality_id("original".into());
     ui.set_player_selected_quality_label("Original".into());
     ui.set_player_quality_options(slint::ModelRc::default());
-    *ctx.active_quality_id.lock().unwrap() = "original".to_string();
-    *ctx.current_video_variants.lock().unwrap() = Vec::new();
+    *ctx.active_quality_id
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = "original".to_string();
+    *ctx.current_video_variants
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Vec::new();
     player.set_quality_variant(None);
 
     if ui.get_active_screen() != "player" {
@@ -664,9 +690,16 @@ pub fn start_item_playback_with_resume_ctx(
                         if !ctx_variants.session_ctrl.is_request_current(request_id) {
                             return;
                         }
-                        *ctx_variants.current_video_variants.lock().unwrap() =
+                        *ctx_variants
+                            .current_video_variants
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
                             response.variants.clone();
-                        let active_id = ctx_variants.active_quality_id.lock().unwrap().clone();
+                        let active_id = ctx_variants
+                            .active_quality_id
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .clone();
 
                         if response.has_alternatives && response.variants.len() > 1 {
                             let opts = format_variant_options(&response.variants, &active_id);
@@ -863,7 +896,10 @@ pub fn start_item_playback_with_resume_ctx(
                 } else {
                     None
                 };
-                *ctx_clone.pending_resume_position.lock().unwrap() = start_pos_opt;
+                *ctx_clone
+                    .pending_resume_position
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = start_pos_opt;
 
                 let path = resolve_media_input(&stream_url);
                 reset_playback_speed(&ui, &player);
@@ -1079,7 +1115,11 @@ pub fn switch_video_quality(ui: &MainWindow, ctx: &AppContext, target_variant_id
     let Some(player) = ctx.player.clone() else {
         return;
     };
-    let current_variant = ctx.active_quality_id.lock().unwrap().clone();
+    let current_variant = ctx
+        .active_quality_id
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
     if current_variant == target_variant_id {
         return;
     }
@@ -1087,7 +1127,11 @@ pub fn switch_video_quality(ui: &MainWindow, ctx: &AppContext, target_variant_id
         return;
     }
 
-    let item = ctx.current_playing_item.lock().unwrap().clone();
+    let item = ctx
+        .current_playing_item
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
     let Some(item) = item else {
         return;
     };
@@ -1139,7 +1183,10 @@ pub fn switch_video_quality(ui: &MainWindow, ctx: &AppContext, target_variant_id
 
                     // Fresh position right before load
                     let target_pos = player_clone.position().unwrap_or(current_pos_secs);
-                    *ctx_clone.pending_resume_position.lock().unwrap() = if target_pos > 0.0 {
+                    *ctx_clone
+                        .pending_resume_position
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = if target_pos > 0.0 {
                         Some(target_pos)
                     } else {
                         None
@@ -1173,10 +1220,18 @@ pub fn switch_video_quality(ui: &MainWindow, ctx: &AppContext, target_variant_id
                     ui.set_playing(!was_paused);
                     ui.set_url_text(new_stream_url.into());
 
-                    *ctx_clone.active_quality_id.lock().unwrap() = target_variant_id.clone();
+                    *ctx_clone
+                        .active_quality_id
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        target_variant_id.clone();
                     ui.set_player_selected_quality_id(target_variant_id.clone().into());
 
-                    let variants = ctx_clone.current_video_variants.lock().unwrap().clone();
+                    let variants = ctx_clone
+                        .current_video_variants
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone();
                     let opts = format_variant_options(&variants, &target_variant_id);
                     let active_label = opts
                         .iter()

@@ -158,8 +158,12 @@ fn load_performer_profile_data(ui: &MainWindow, ctx: &AppContext, p_name: String
     // 1. Find matching local items
     let mut local_items = Vec::new();
     {
-        let cached = cached_catalog.lock().unwrap();
-        let home = home_catalog.lock().unwrap();
+        let cached = cached_catalog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = home_catalog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut seen = std::collections::HashSet::new();
         for item in cached.iter().chain(home.iter()) {
             if item
@@ -251,7 +255,9 @@ fn load_performer_profile_data(ui: &MainWindow, ctx: &AppContext, p_name: String
             }
         }
         let filtered_items = filter_catalog_items(merged, &local_store);
-        *performer_catalog.lock().unwrap() = filtered_items.clone();
+        *performer_catalog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = filtered_items.clone();
 
         // 5. Update UI on event loop
         let p_name_clone = p_name.clone();
@@ -338,8 +344,12 @@ fn load_studio_profile_data(ui: &MainWindow, ctx: &AppContext, s_name: String) {
     // 1. Find matching local items
     let mut local_items = Vec::new();
     {
-        let cached = cached_catalog.lock().unwrap();
-        let home = home_catalog.lock().unwrap();
+        let cached = cached_catalog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = home_catalog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut seen = std::collections::HashSet::new();
         for item in cached.iter().chain(home.iter()) {
             if item.studios.iter().any(|s| s.eq_ignore_ascii_case(&s_name))
@@ -381,7 +391,9 @@ fn load_studio_profile_data(ui: &MainWindow, ctx: &AppContext, s_name: String) {
             }
         }
         let filtered_items = filter_catalog_items(merged, &local_store);
-        *studio_catalog.lock().unwrap() = filtered_items.clone();
+        *studio_catalog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = filtered_items.clone();
 
         let s_name_clone = s_name.clone();
         let _ = slint::invoke_from_event_loop(move || {

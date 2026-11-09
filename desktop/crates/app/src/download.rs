@@ -74,9 +74,15 @@ impl DownloadManager {
     }
 
     pub fn is_downloading(&self) -> bool {
-        let lock = self.active_task.lock().unwrap();
+        let lock = self
+            .active_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(task) = lock.as_ref() {
-            let status = task.status.lock().unwrap();
+            let status = task
+                .status
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             matches!(
                 *status,
                 DownloadStatus::Preparing | DownloadStatus::Downloading | DownloadStatus::Paused
@@ -89,7 +95,10 @@ impl DownloadManager {
     pub fn is_active_or_queued_for_item(&self, item_id: &str) -> bool {
         if let Some(task) = self.current_task() {
             if task.item_id == item_id {
-                let status = task.status.lock().unwrap();
+                let status = task
+                    .status
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if matches!(
                     *status,
                     DownloadStatus::Preparing
@@ -100,12 +109,18 @@ impl DownloadManager {
                 }
             }
         }
-        let queue = self.queue.lock().unwrap();
+        let queue = self
+            .queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         queue.iter().any(|t| t.item_id == item_id)
     }
 
     pub fn cancel(&self) {
-        let lock = self.active_task.lock().unwrap();
+        let lock = self
+            .active_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(task) = lock.as_ref() {
             task.cancel_flag.store(true, Ordering::SeqCst);
             if let Ok(mut child_lock) = task.child_process.lock() {
@@ -113,24 +128,42 @@ impl DownloadManager {
                     let _ = child.kill();
                 }
             }
-            let mut st = task.status.lock().unwrap();
+            let mut st = task
+                .status
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             *st = DownloadStatus::Error("Download cancelled".to_string());
             let _ = std::fs::remove_file(&task.temp_path);
         }
-        self.speed_samples.lock().unwrap().clear();
-        *self.smoothed_speed_bps.lock().unwrap() = 0.0;
+        self.speed_samples
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        *self
+            .smoothed_speed_bps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = 0.0;
     }
 
     pub fn cancel_queued(&self, item_id: &str) {
-        let mut q = self.queue.lock().unwrap();
+        let mut q = self
+            .queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         q.retain(|t| t.item_id != item_id);
     }
 
     pub fn pause(&self) {
-        let lock = self.active_task.lock().unwrap();
+        let lock = self
+            .active_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(task) = lock.as_ref() {
             task.pause_flag.store(true, Ordering::SeqCst);
-            *task.status.lock().unwrap() = DownloadStatus::Paused;
+            *task
+                .status
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = DownloadStatus::Paused;
         }
     }
 
@@ -138,13 +171,19 @@ impl DownloadManager {
         let task = self.current_task();
         if let Some(task) = task {
             let is_paused = {
-                let st = task.status.lock().unwrap();
+                let st = task
+                    .status
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 matches!(*st, DownloadStatus::Paused)
             };
             if is_paused {
                 task.pause_flag.store(false, Ordering::SeqCst);
                 task.cancel_flag.store(false, Ordering::SeqCst);
-                *task.status.lock().unwrap() = DownloadStatus::Preparing;
+                *task
+                    .status
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = DownloadStatus::Preparing;
                 let mgr = self.clone();
                 let task_clone = task.clone();
                 let ctx_clone = ctx.clone();
@@ -192,7 +231,10 @@ impl DownloadManager {
         });
 
         {
-            let mut q = self.queue.lock().unwrap();
+            let mut q = self
+                .queue
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             q.push_back(task);
         }
 
@@ -200,11 +242,17 @@ impl DownloadManager {
     }
 
     pub fn advance_queue_if_idle(&self, ctx: &crate::context::AppContext) {
-        let mut active = self.active_task.lock().unwrap();
+        let mut active = self
+            .active_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let is_idle = match active.as_ref() {
             None => true,
             Some(t) => {
-                let st = t.status.lock().unwrap();
+                let st = t
+                    .status
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 matches!(
                     *st,
                     DownloadStatus::Idle
@@ -215,16 +263,31 @@ impl DownloadManager {
         };
 
         if is_idle {
-            let mut q = self.queue.lock().unwrap();
+            let mut q = self
+                .queue
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(next_task) = q.pop_front() {
-                *next_task.status.lock().unwrap() = DownloadStatus::Preparing;
+                *next_task
+                    .status
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = DownloadStatus::Preparing;
                 *active = Some(next_task.clone());
                 drop(active);
                 drop(q);
 
-                self.speed_samples.lock().unwrap().clear();
-                *self.smoothed_speed_bps.lock().unwrap() = 0.0;
-                *self.last_speed_calc.lock().unwrap() = Instant::now();
+                self.speed_samples
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clear();
+                *self
+                    .smoothed_speed_bps
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = 0.0;
+                *self
+                    .last_speed_calc
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Instant::now();
 
                 let mgr = self.clone();
                 let ctx_clone = ctx.clone();
@@ -236,19 +299,33 @@ impl DownloadManager {
     }
 
     pub fn current_task(&self) -> Option<Arc<DownloadTask>> {
-        self.active_task.lock().unwrap().clone()
+        self.active_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub fn queued_tasks(&self) -> Vec<Arc<DownloadTask>> {
-        self.queue.lock().unwrap().iter().cloned().collect()
+        self.queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .cloned()
+            .collect()
     }
 
     pub fn history_items(&self) -> Vec<CompletedDownloadItem> {
-        self.history.lock().unwrap().clone()
+        self.history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub fn add_history_item(&self, item: CompletedDownloadItem) {
-        let mut hist = self.history.lock().unwrap();
+        let mut hist = self
+            .history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         hist.retain(|h| h.item_id != item.item_id && h.file_path != item.file_path);
         hist.insert(0, item);
         if hist.len() > 30 {
@@ -258,24 +335,48 @@ impl DownloadManager {
 
     #[allow(dead_code)]
     pub fn set_task(&self, task: Arc<DownloadTask>) {
-        *self.active_task.lock().unwrap() = Some(task);
-        self.speed_samples.lock().unwrap().clear();
-        *self.smoothed_speed_bps.lock().unwrap() = 0.0;
-        *self.last_speed_calc.lock().unwrap() = Instant::now();
+        *self
+            .active_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task);
+        self.speed_samples
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        *self
+            .smoothed_speed_bps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = 0.0;
+        *self
+            .last_speed_calc
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Instant::now();
     }
 
     #[allow(dead_code)]
     pub fn clear_task(&self) {
-        *self.active_task.lock().unwrap() = None;
-        self.speed_samples.lock().unwrap().clear();
-        *self.smoothed_speed_bps.lock().unwrap() = 0.0;
+        *self
+            .active_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        self.speed_samples
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        *self
+            .smoothed_speed_bps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = 0.0;
     }
 
     /// Sample downloaded bytes and calculate smoothed speed over a short rolling window (~2-3s).
     /// Updates the calculated speed roughly once per second.
     pub fn sample_speed(&self, current_bytes: u64, total_bytes: u64) -> (f64, Option<String>) {
         let now = Instant::now();
-        let mut samples = self.speed_samples.lock().unwrap();
+        let mut samples = self
+            .speed_samples
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         samples.push_back((now, current_bytes));
 
         // Retain samples within the last 2.5 seconds
@@ -287,8 +388,14 @@ impl DownloadManager {
             }
         }
 
-        let mut last_calc = self.last_speed_calc.lock().unwrap();
-        let mut smoothed = self.smoothed_speed_bps.lock().unwrap();
+        let mut last_calc = self
+            .last_speed_calc
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut smoothed = self
+            .smoothed_speed_bps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         if now.duration_since(*last_calc) >= Duration::from_millis(900) || *smoothed == 0.0 {
             if let (Some(&(oldest_time, oldest_bytes)), Some(&(newest_time, newest_bytes))) =
@@ -693,7 +800,10 @@ fn run_download_task(
     if let Some(parent) = task.target_path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
             crate::log_debug(&format!("download: cannot create target directory: {e}"));
-            *task.status.lock().unwrap() =
+            *task
+                .status
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
                 DownloadStatus::Error(format!("Cannot create directory: {e}"));
             manager.advance_queue_if_idle(ctx);
             return;
@@ -746,7 +856,10 @@ fn run_download_task(
         || item_opt.as_ref().is_some_and(|it| it.is_telegram())
     {
         let Some(resolver) = resolver_url.as_deref().filter(|s| !s.is_empty()) else {
-            *task.status.lock().unwrap() = DownloadStatus::Error(
+            *task
+                .status
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = DownloadStatus::Error(
                 "Resolver URL is required to download Telegram videos. Configure it in Settings."
                     .into(),
             );
@@ -774,7 +887,10 @@ fn run_download_task(
             Ok((url, _)) => download_url = url,
             Err(e) => {
                 let formatted = e.replace("to play Telegram content", "to download Telegram video");
-                *task.status.lock().unwrap() =
+                *task
+                    .status
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
                     DownloadStatus::Error(format!("Download error: {formatted}"));
                 manager.advance_queue_if_idle(ctx);
                 return;
@@ -784,19 +900,17 @@ fn run_download_task(
         // Jellyfin media item: prefer direct static stream (the original unmodified media)
         let server = server_url.unwrap_or("").trim_end_matches('/');
         if server.is_empty() {
-            *task.status.lock().unwrap() =
+            *task
+                .status
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
                 DownloadStatus::Error("Jellyfin server URL is required".into());
             manager.advance_queue_if_idle(ctx);
             return;
         }
-        let token_param = match access_token {
-            Some(t) if !t.is_empty() => format!("&api_key={t}"),
-            _ => String::new(),
-        };
-        download_url = format!(
-            "{server}/Videos/{}/stream?static=true{token_param}",
-            task.item_id
-        );
+        // The token travels in the X-Emby-Token header only, never in the URL,
+        // so it stays out of logs and copied URLs.
+        download_url = format!("{server}/Videos/{}/stream?static=true", task.item_id);
         if let Some(token) = access_token {
             if !token.is_empty() {
                 download_headers.push(("X-Emby-Token".to_string(), token.to_string()));
@@ -805,7 +919,11 @@ fn run_download_task(
     }
 
     if task.cancel_flag.load(Ordering::SeqCst) {
-        *task.status.lock().unwrap() = DownloadStatus::Error("Download cancelled".into());
+        *task
+            .status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            DownloadStatus::Error("Download cancelled".into());
         let _ = std::fs::remove_file(&task.temp_path);
         manager.advance_queue_if_idle(ctx);
         return;
@@ -813,10 +931,16 @@ fn run_download_task(
 
     // Step 3: Handle direct local media copy
     if is_local_file {
-        *task.status.lock().unwrap() = DownloadStatus::Downloading;
+        *task
+            .status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = DownloadStatus::Downloading;
         let src_path = Path::new(&download_url);
         if !src_path.is_file() {
-            *task.status.lock().unwrap() =
+            *task
+                .status
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
                 DownloadStatus::Error(format!("Local source file not found: {}", download_url));
             manager.advance_queue_if_idle(ctx);
             return;
@@ -825,7 +949,11 @@ fn run_download_task(
             task.total_bytes.store(meta.len(), Ordering::SeqCst);
         }
         if let Err(e) = std::fs::copy(src_path, &task.temp_path) {
-            *task.status.lock().unwrap() = DownloadStatus::Error(format!("Copy error: {e}"));
+            *task
+                .status
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                DownloadStatus::Error(format!("Copy error: {e}"));
             let _ = std::fs::remove_file(&task.temp_path);
             manager.advance_queue_if_idle(ctx);
             return;
@@ -847,15 +975,44 @@ fn run_download_task(
     }
 
     // Step 4: Stream download via HTTP with Range support
-    *task.status.lock().unwrap() = DownloadStatus::Downloading;
+    *task
+        .status
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = DownloadStatus::Downloading;
+
+    // A request that carries the account token may only follow redirects within
+    // its own origin. reqwest does not strip custom headers such as X-Emby-Token
+    // on cross-host redirects, so the default policy would leak the token.
+    let redirect_policy = if download_headers.is_empty() {
+        reqwest::redirect::Policy::default()
+    } else {
+        let origin = url::Url::parse(&download_url)
+            .ok()
+            .map(|url| url.origin().ascii_serialization())
+            .unwrap_or_default();
+        reqwest::redirect::Policy::custom(move |attempt| {
+            if attempt.previous().len() >= 10 {
+                attempt.error("too many redirects")
+            } else if attempt.url().origin().ascii_serialization() == origin {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
+        })
+    };
 
     let client = match reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(300))
+        .redirect(redirect_policy)
         .build()
     {
         Ok(c) => c,
         Err(e) => {
-            *task.status.lock().unwrap() = DownloadStatus::Error(format!("HTTP client error: {e}"));
+            *task
+                .status
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                DownloadStatus::Error(format!("HTTP client error: {e}"));
             manager.advance_queue_if_idle(ctx);
             return;
         }
@@ -874,7 +1031,10 @@ fn run_download_task(
         Ok(resp) => {
             if !resp.status().is_success() && resp.status() != reqwest::StatusCode::PARTIAL_CONTENT
             {
-                *task.status.lock().unwrap() =
+                *task
+                    .status
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
                     DownloadStatus::Error(format!("Server returned HTTP {}", resp.status()));
                 manager.advance_queue_if_idle(ctx);
                 return;
@@ -883,7 +1043,11 @@ fn run_download_task(
         }
         Err(e) => {
             crate::log_debug(&format!("download: connection error: {e}"));
-            *task.status.lock().unwrap() = DownloadStatus::Error(format!("Connection error: {e}"));
+            *task
+                .status
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                DownloadStatus::Error(format!("Connection error: {e}"));
             manager.advance_queue_if_idle(ctx);
             return;
         }
@@ -953,7 +1117,10 @@ fn run_download_task(
 
             match cmd.spawn() {
                 Ok(child) => {
-                    *task.child_process.lock().unwrap() = Some(child);
+                    *task
+                        .child_process
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(child);
                     loop {
                         std::thread::sleep(Duration::from_millis(250));
                         if task.cancel_flag.load(Ordering::SeqCst) {
@@ -963,7 +1130,10 @@ fn run_download_task(
                                 }
                             }
                             let _ = std::fs::remove_file(&task.temp_path);
-                            *task.status.lock().unwrap() =
+                            *task
+                                .status
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) =
                                 DownloadStatus::Error("Download cancelled".into());
                             manager.advance_queue_if_idle(ctx);
                             return;
@@ -978,9 +1148,13 @@ fn run_download_task(
                                         break;
                                     } else {
                                         let _ = std::fs::remove_file(&task.temp_path);
-                                        *task.status.lock().unwrap() = DownloadStatus::Error(
-                                            "Transcoding stream failed".into(),
-                                        );
+                                        *task
+                                            .status
+                                            .lock()
+                                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                            DownloadStatus::Error(
+                                                "Transcoding stream failed".into(),
+                                            );
                                         manager.advance_queue_if_idle(ctx);
                                         return;
                                     }
@@ -1020,7 +1194,10 @@ fn run_download_task(
         {
             Ok(f) => f,
             Err(e) => {
-                *task.status.lock().unwrap() =
+                *task
+                    .status
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
                     DownloadStatus::Error(format!("Cannot resume file: {e}"));
                 manager.advance_queue_if_idle(ctx);
                 return;
@@ -1031,7 +1208,10 @@ fn run_download_task(
         match File::create(&task.temp_path) {
             Ok(f) => f,
             Err(e) => {
-                *task.status.lock().unwrap() =
+                *task
+                    .status
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
                     DownloadStatus::Error(format!("Cannot write file: {e}"));
                 manager.advance_queue_if_idle(ctx);
                 return;
@@ -1046,7 +1226,11 @@ fn run_download_task(
         if task.cancel_flag.load(Ordering::SeqCst) {
             drop(out_file);
             let _ = std::fs::remove_file(&task.temp_path);
-            *task.status.lock().unwrap() = DownloadStatus::Error("Download cancelled".into());
+            *task
+                .status
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                DownloadStatus::Error("Download cancelled".into());
             manager.advance_queue_if_idle(ctx);
             return;
         }
@@ -1054,7 +1238,10 @@ fn run_download_task(
         if task.pause_flag.load(Ordering::SeqCst) {
             let _ = out_file.flush();
             drop(out_file);
-            *task.status.lock().unwrap() = DownloadStatus::Paused;
+            *task
+                .status
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = DownloadStatus::Paused;
             return;
         }
 
@@ -1067,7 +1254,10 @@ fn run_download_task(
                     ));
                     drop(out_file);
                     let _ = std::fs::remove_file(&task.temp_path);
-                    *task.status.lock().unwrap() =
+                    *task
+                        .status
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
                         DownloadStatus::Error(format!("Write error (disk full?): {e}"));
                     manager.advance_queue_if_idle(ctx);
                     return;
@@ -1082,7 +1272,10 @@ fn run_download_task(
                 ));
                 drop(out_file);
                 let _ = std::fs::remove_file(&task.temp_path);
-                *task.status.lock().unwrap() =
+                *task
+                    .status
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
                     DownloadStatus::Error(format!("Network read error: {e}"));
                 manager.advance_queue_if_idle(ctx);
                 return;
@@ -1093,7 +1286,11 @@ fn run_download_task(
     if let Err(e) = out_file.flush() {
         drop(out_file);
         let _ = std::fs::remove_file(&task.temp_path);
-        *task.status.lock().unwrap() = DownloadStatus::Error(format!("Flush error: {e}"));
+        *task
+            .status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            DownloadStatus::Error(format!("Flush error: {e}"));
         manager.advance_queue_if_idle(ctx);
         return;
     }
@@ -1140,7 +1337,9 @@ fn finalize_download(
         // Fallback to copy + remove if across filesystem boundary
         if let Err(ce) = std::fs::copy(temp_path, &final_dest) {
             let _ = std::fs::remove_file(temp_path);
-            *status.lock().unwrap() =
+            *status
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
                 DownloadStatus::Error(format!("Failed to save final file: {ce} (rename err: {e})"));
             return None;
         }
@@ -1151,7 +1350,9 @@ fn finalize_download(
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
-    *status.lock().unwrap() = DownloadStatus::Completed {
+    *status
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = DownloadStatus::Completed {
         folder_path: folder,
         file_path: final_dest.clone(),
     };
@@ -1307,15 +1508,25 @@ mod tests {
         // Pause
         manager.pause();
         assert!(task.pause_flag.load(Ordering::SeqCst));
-        assert!(matches!(*status.lock().unwrap(), DownloadStatus::Paused));
+        assert!(matches!(
+            *status
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            DownloadStatus::Paused
+        ));
 
         // Resume (mocking a dummy context without running worker)
         // Resume directly clears pause flag and updates status to downloading
-        *task.status.lock().unwrap() = DownloadStatus::Downloading;
+        *task
+            .status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = DownloadStatus::Downloading;
         task.pause_flag.store(false, Ordering::SeqCst);
         assert!(!task.pause_flag.load(Ordering::SeqCst));
         assert!(matches!(
-            *status.lock().unwrap(),
+            *status
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
             DownloadStatus::Downloading
         ));
 
@@ -1333,7 +1544,11 @@ mod tests {
             status: Arc::new(Mutex::new(DownloadStatus::Queued)),
             child_process: Arc::new(Mutex::new(None)),
         });
-        manager.queue.lock().unwrap().push_back(queued_task);
+        manager
+            .queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_back(queued_task);
         assert_eq!(manager.queued_tasks().len(), 1);
         assert!(manager.is_active_or_queued_for_item("test-task-2"));
 

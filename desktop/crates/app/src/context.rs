@@ -74,11 +74,18 @@ pub struct AppContext {
 
 impl AppContext {
     pub fn set_playback_context(&self, items: Vec<TvItem>) {
-        *self.active_playback_context.lock().unwrap() = items;
+        *self
+            .active_playback_context
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = items;
     }
 
     pub fn get_next_contextual_item(&self, current_id: Option<&str>) -> Option<TvItem> {
-        let items = self.active_playback_context.lock().unwrap().clone();
+        let items = self
+            .active_playback_context
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         if items.is_empty() {
             return None;
         }
@@ -139,7 +146,10 @@ impl AppContext {
         {
             return;
         }
-        let mut history = self.nav_history.lock().unwrap();
+        let mut history = self
+            .nav_history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Self::push_history(&mut history, dest);
     }
 
@@ -154,7 +164,10 @@ impl AppContext {
     }
 
     pub fn pop_nav_destination(&self) -> Option<NavDestination> {
-        self.nav_history.lock().unwrap().pop()
+        self.nav_history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop()
     }
 
     /// Common item lookup mechanism for Home, Continue Watching, Watch History,
@@ -169,12 +182,22 @@ impl AppContext {
         {
             return Some(item.clone());
         }
-        if let Some(item) = self.detail_active_item.lock().unwrap().as_ref() {
+        if let Some(item) = self
+            .detail_active_item
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
             if item.id == id {
                 return Some(item.clone());
             }
         }
-        if let Some(item) = self.current_playing_item.lock().unwrap().as_ref() {
+        if let Some(item) = self
+            .current_playing_item
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
             if item.id == id {
                 return Some(item.clone());
             }
@@ -252,7 +275,9 @@ mod tests {
                 ..Default::default()
             },
         ];
-        *active_context.lock().unwrap() = list.clone();
+        *active_context
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = list.clone();
 
         // Sequential: from vid-1 -> vid-2
         let pos1 = list.iter().position(|it| it.id == "vid-1").unwrap();

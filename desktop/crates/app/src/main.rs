@@ -80,12 +80,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     DEBUG_MODE.store(options.debug, std::sync::atomic::Ordering::Relaxed);
 
     let db_path = default_db_path();
+    let mut store_fallback_reason: Option<String> = None;
     let local_store = match LocalStore::open(&db_path) {
         Ok(store) => Arc::new(store),
         Err(err) => {
             log::warn!(
                 "opening local store at {db_path:?} failed ({err}), falling back to in-memory store"
             );
+            store_fallback_reason = Some(err.to_string());
             Arc::new(LocalStore::open_in_memory().expect("in-memory sqlite store"))
         }
     };
@@ -107,6 +109,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_software_ui_renderer(software_mode);
     if software_mode {
         ui.set_status("Software fallback: video opens in its own window".into());
+    }
+    if let Some(reason) = &store_fallback_reason {
+        ui.set_status(
+            format!(
+                "Settings and history won't be saved this session (database unavailable: {reason})"
+            )
+            .into(),
+        );
     }
     // An explicit size from the environment is used by the automated layout
     // checks. Restoring the saved geometry there would fight it, and storing it
@@ -189,9 +199,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Ok(None) = credential_store.get()
         && let Ok(Some(legacy_session)) = local_store.load_legacy_session()
     {
-        // Migrate the previous plaintext session to Windows Credential Manager.
-        // If secure persistence is unavailable, keep it only for this run and
-        // remove the old plaintext copy from SQLite.
+        // Move a session saved by an older release (plaintext in SQLite) into the
+        // platform credential store: Windows Credential Manager, or the owner-only
+        // session file on other systems. The plaintext copy is removed either way.
         let _ = credential_store.save(legacy_session);
         let _ = local_store.clear_session();
     }
@@ -432,7 +442,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &home_catalog,
             );
         } else {
-            *pending_http_restore.lock().unwrap() = Some(session.clone());
+            *pending_http_restore
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(session.clone());
             if let ServiceUrlValidation::Valid(url) =
                 ServiceUrlPolicy::inspect(&session.server_url, false)
             {
@@ -543,7 +555,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "resolver-test" => ui.invoke_test_resolver_connection(),
                 "check-connections" => ui.invoke_check_connections(),
                 "restore-session" => {
-                    if let Some(session) = pending_http_restore.lock().unwrap().take() {
+                    if let Some(session) = pending_http_restore
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take()
+                    {
                         let resolver_url = if initial_resolver_url.is_empty() {
                             session.server_url.clone()
                         } else {
@@ -2623,9 +2639,17 @@ mod tests {
 
         // When starting new item, pending_resume_position is correctly applied
         let pending = Arc::new(Mutex::new(Some(23.0f64)));
-        let resume_target = pending.lock().unwrap().take();
+        let resume_target = pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
         assert_eq!(resume_target, Some(23.0));
-        assert_eq!(*pending.lock().unwrap(), None);
+        assert_eq!(
+            *pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            None
+        );
     }
 
     #[test]

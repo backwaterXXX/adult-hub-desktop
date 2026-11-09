@@ -186,7 +186,7 @@ pub fn install_polling(ui: &MainWindow, ctx: &AppContext, frame_pending: Arc<Ato
 
         // Synchronize download task status to UI
         if let Some(task) = download_mgr.current_task() {
-            let status = task.status.lock().unwrap().clone();
+            let status = task.status.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
             let bytes = task.bytes_downloaded.load(Ordering::Relaxed);
             let total = task.total_bytes.load(Ordering::Relaxed);
             ui.set_download_can_pause(task.supports_range.load(Ordering::Relaxed));
@@ -532,7 +532,7 @@ pub fn install_polling(ui: &MainWindow, ctx: &AppContext, frame_pending: Arc<Ato
 
         // Update pHash video matching status in player overlay
         if tick % 5 == 0 {
-            if let Some(item) = cur_item.lock().unwrap().as_ref() {
+            if let Some(item) = cur_item.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
                 if let Some(vid) = phash::adult_hub_video_id(item) {
                     if let Some(st) = phash_ref.get_status(&vid) {
                         ui.set_phash_status_text(st.message.into());
@@ -552,7 +552,7 @@ pub fn install_polling(ui: &MainWindow, ctx: &AppContext, frame_pending: Arc<Ato
             let pos_ms = (player.position().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
             let dur_ms = (player.duration().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
             rep.tick_periodic(pos_ms, paused);
-            if let Some(item) = cur_item.lock().unwrap().as_ref() {
+            if let Some(item) = cur_item.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
                 sctrl.checkpoint_progress(item, pos_ms, dur_ms, false);
             }
         }
@@ -612,7 +612,10 @@ fn handle_event(
             update_texture_size(ui, width, height);
 
             // Enforce pending resume position if libmpv did not seek automatically on loadfile
-            let resume_target = pending_resume.lock().unwrap().take();
+            let resume_target = pending_resume
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
             if let Some(target_sec) = resume_target {
                 if target_sec > 0.0 {
                     let cur_sec = player.position().unwrap_or(0.0);
@@ -642,7 +645,10 @@ fn handle_event(
             } else {
                 (player.position().unwrap_or(0.0) * 1000.0).max(0.0) as u64
             };
-            let current_item = current_item.lock().unwrap().clone();
+            let current_item = current_item
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             ui.set_player_title(
                 current_item
                     .as_ref()
@@ -705,7 +711,11 @@ fn handle_event(
                     );
                     ui.set_status_color(slint::Color::from_rgb_u8(255, 180, 100));
 
-                    if let Some(item) = current_item.lock().unwrap().clone() {
+                    if let Some(item) = current_item
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone()
+                    {
                         start_item_playback(
                             ui,
                             player,
@@ -786,7 +796,10 @@ fn handle_event(
                 crate::diagnostics::GLOBAL_LOG.i("Player", "Playback completed EOF");
                 let pos_ms = (player.position().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
                 let dur_ms = (player.duration().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
-                let finished_item = current_item.lock().unwrap().take();
+                let finished_item = current_item
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
                 if let Some(ref item) = finished_item {
                     session_ctrl.checkpoint_progress(item, pos_ms, dur_ms, true);
                 }

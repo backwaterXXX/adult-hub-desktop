@@ -122,7 +122,10 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
             });
             let target_item = match target_item {
                 Some(item) => {
-                    *ctx_detail.detail_active_item.lock().unwrap() = Some(item.clone());
+                    *ctx_detail
+                        .detail_active_item
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(item.clone());
                     item
                 }
                 None => {
@@ -660,7 +663,10 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
             }
 
             // Stage 7: Similar Items ("More Like This")
-            let all_items = cached_catalog.lock().unwrap().clone();
+            let all_items = cached_catalog
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             let mut scored: Vec<(i32, TvItem)> = all_items
                 .into_iter()
                 .filter(|i| i.id != target_item.id)
@@ -1060,7 +1066,9 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
             let new_fav = !ui.get_detail_is_favorite();
             ui.set_detail_is_favorite(new_fav);
 
-            let mut list = cached_catalog.lock().unwrap();
+            let mut list = cached_catalog
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(item) = list.iter_mut().find(|i| i.id == id) {
                 item.is_favorite = new_fav;
             }
@@ -1088,7 +1096,9 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(ui) = weak.upgrade() {
                                 ui.set_detail_is_favorite(!new_fav);
-                                let mut items = cached_catalog.lock().unwrap();
+                                let mut items = cached_catalog
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                                 if let Some(item) = items.iter_mut().find(|item| item.id == item_id)
                                 {
                                     item.is_favorite = !new_fav;
@@ -1126,7 +1136,11 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
         let jellyfin = jellyfin.clone();
         ui.on_toggle_player_favorite(move || {
             let Some(ui) = weak.upgrade() else { return };
-            let Some(mut item) = current_item.lock().unwrap().clone() else {
+            let Some(mut item) = current_item
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+            else {
                 show_error(&ui, "No active Jellyfin item to favorite");
                 return;
             };
@@ -1142,7 +1156,9 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
 
             let new_favorite = !item.is_favorite;
             item.is_favorite = new_favorite;
-            *current_item.lock().unwrap() = Some(item.clone());
+            *current_item
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(item.clone());
             for catalog in [&cached_catalog, &home_catalog] {
                 if let Some(cached) = catalog
                     .lock()
@@ -1155,7 +1171,9 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
             }
             ui.set_player_is_favorite(new_favorite);
             {
-                let catalog = cached_catalog.lock().unwrap();
+                let catalog = cached_catalog
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 set_catalog(&ui, catalog.iter().map(tv_item_to_card).collect());
             }
 
@@ -1196,7 +1214,11 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
                         let mut current_matches = false;
-                        if let Some(item) = current_item.lock().unwrap().as_mut() {
+                        if let Some(item) = current_item
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .as_mut()
+                        {
                             if item.id == item_id {
                                 item.is_favorite = !new_favorite;
                                 current_matches = true;
@@ -1215,7 +1237,9 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                                 item.is_favorite = !new_favorite;
                             }
                         }
-                        let catalog = cached_catalog.lock().unwrap();
+                        let catalog = cached_catalog
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
                         set_catalog(&ui, catalog.iter().map(tv_item_to_card).collect());
                         ui.set_status("Could not update favorite state on Jellyfin".into());
                         ui.set_status_color(slint::Color::from_rgb_u8(244, 67, 54));
@@ -1239,7 +1263,9 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
             let new_played = !ui.get_detail_is_played();
             ui.set_detail_is_played(new_played);
 
-            let mut list = cached_catalog.lock().unwrap();
+            let mut list = cached_catalog
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(item) = list.iter_mut().find(|i| i.id == id) {
                 item.is_played = new_played;
             }
@@ -1317,7 +1343,13 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
 
             let target_item = ctx_play
                 .find_catalog_item(&id)
-                .or_else(|| ctx_play.detail_active_item.lock().unwrap().clone())
+                .or_else(|| {
+                    ctx_play
+                        .detail_active_item
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone()
+                })
                 .or_else(|| {
                     if id == "sample" {
                         Some(sample_catalog_tv_items()[0].clone())
@@ -1336,7 +1368,12 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                 }
             };
 
-            ctx_play.set_playback_context(cached_catalog.lock().unwrap().clone());
+            ctx_play.set_playback_context(
+                cached_catalog
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone(),
+            );
             crate::playback::start_item_playback_with_resume_ctx(
                 &ui,
                 &ctx_play,
@@ -1352,7 +1389,10 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
         let ctx_random = ctx.clone();
         ui.on_play_random_contextual(move |mode| {
             let Some(ui) = weak.upgrade() else { return };
-            let catalog = cached_catalog.lock().unwrap().clone();
+            let catalog = cached_catalog
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             let current_id = ui.get_detail_id().to_string();
             let Some(current) = catalog.iter().find(|item| item.id == current_id) else {
                 show_error(

@@ -841,7 +841,9 @@ fn fetch_image_result(
         if let ThumbnailFailure::HttpStatus(404) = final_failure {
             static SEEN_404: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(None);
             let is_new = {
-                let mut guard = SEEN_404.lock().unwrap();
+                let mut guard = SEEN_404
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let set = guard.get_or_insert_with(std::collections::HashSet::new);
                 if set.len() > 200 {
                     set.clear();
@@ -1114,7 +1116,9 @@ mod tests {
 
     #[test]
     fn resolver_thumbnail_request_sends_token_only_to_configured_origin() {
-        let _guard = RESOLVER_REQUEST_TEST_LOCK.lock().unwrap();
+        let _guard = RESOLVER_REQUEST_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let resolver = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let resolver_address = resolver.local_addr().unwrap();
         let cdn = TcpListener::bind(("127.0.0.1", 0)).unwrap();

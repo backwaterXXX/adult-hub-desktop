@@ -191,7 +191,7 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
                     }
                     ids.insert(category.title, category.id);
                 }
-                *category_ids.lock().unwrap() = ids;
+                *category_ids.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = ids;
                 let names_clone = names.clone();
                 let local_store_clone = local_store.clone();
                 let _ = slint::invoke_from_event_loop(move || {
@@ -230,7 +230,10 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
         let channel_cache_map = channel_cache_map.clone();
         ui.on_hide_current_channel(move || {
             let Some(ui) = weak.upgrade() else { return };
-            let channel_id = current_channel_id.lock().unwrap().clone();
+            let channel_id = current_channel_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             if channel_id == "main"
                 || channel_id.is_empty()
                 || local_store.hide_channel(&channel_id).is_err()
@@ -239,7 +242,10 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
             }
 
             local_store.set_selected_channel(None).ok();
-            channel_cache_map.lock().unwrap().remove(&channel_id);
+            channel_cache_map
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&channel_id);
 
             let mut hidden = local_store.get_hidden_channels().unwrap_or_default();
             hidden.sort();
@@ -252,7 +258,9 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
             ));
             ui.set_hidden_channels_list(hidden_model.into());
 
-            let ids = category_ids.lock().unwrap();
+            let ids = category_ids
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut visible_categories = vec![slint::SharedString::from("All Channels")];
             visible_categories.extend(
                 ids.iter()
@@ -263,8 +271,12 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
             drop(ids);
             ui.set_channels_categories(Rc::new(slint::VecModel::from(visible_categories)).into());
             // Return to channel chooser rather than forcing All Channels
-            *current_channel_id.lock().unwrap() = String::new();
-            *channel_items_cache.lock().unwrap() = Vec::new();
+            *current_channel_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = String::new();
+            *channel_items_cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Vec::new();
             ui.set_active_channel_category("".into());
             set_channel_catalog(&ui, vec![]);
             ui.set_channel_loading(false);
@@ -281,7 +293,9 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
         ui.on_cycle_channel_sort(move || {
             let Some(ui) = weak.upgrade() else { return };
             let next = {
-                let mut mode = channel_sort_mode.lock().unwrap();
+                let mut mode = channel_sort_mode
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 *mode = (*mode + 1) % 3;
                 *mode
             };
@@ -297,9 +311,14 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
             let request_id = channel_generation.fetch_add(1, Ordering::SeqCst) + 1;
             ui.set_channel_loading(false);
             let items = filter_sort_channel_items(
-                channel_items_cache.lock().unwrap().clone(),
+                channel_items_cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone(),
                 ui.get_channel_search_query().as_str(),
-                *channel_duration_filter.lock().unwrap(),
+                *channel_duration_filter
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
                 next,
             );
             let cards = items.iter().map(tv_item_to_card).collect::<Vec<_>>();
@@ -323,7 +342,9 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
         ui.on_cycle_channel_duration_filter(move || {
             let Some(ui) = weak.upgrade() else { return };
             let next = {
-                let mut filter = channel_duration_filter.lock().unwrap();
+                let mut filter = channel_duration_filter
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 *filter = (*filter + 1) % 4;
                 *filter
             };
@@ -331,10 +352,15 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
             let request_id = channel_generation.fetch_add(1, Ordering::SeqCst) + 1;
             ui.set_channel_loading(false);
             let items = filter_sort_channel_items(
-                channel_items_cache.lock().unwrap().clone(),
+                channel_items_cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone(),
                 ui.get_channel_search_query().as_str(),
                 next,
-                *channel_sort_mode.lock().unwrap(),
+                *channel_sort_mode
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
             );
             let cards = items.iter().map(tv_item_to_card).collect::<Vec<_>>();
             set_channel_catalog(&ui, cards.clone());
@@ -394,20 +420,20 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
                     .cloned()
                     .unwrap_or_else(|| cat_str.to_lowercase().replace(' ', "_"))
             };
-            *current_channel_id.lock().unwrap() = chan_id.clone();
-            *channel_offset_id.lock().unwrap() = None;
+            *current_channel_id.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = chan_id.clone();
+            *channel_offset_id.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
             let request_id = channel_generation.fetch_add(1, Ordering::SeqCst) + 1;
 
             // Check cache first for instant display
-            let cached_entry = channel_cache_map_sel.lock().unwrap().get(&chan_id).cloned();
+            let cached_entry = channel_cache_map_sel.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&chan_id).cloned();
             if let Some(entry) = cached_entry {
-                *channel_items_cache.lock().unwrap() = entry.items.clone();
-                *channel_offset_id.lock().unwrap() = entry.next_offset;
+                *channel_items_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = entry.items.clone();
+                *channel_offset_id.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = entry.next_offset;
                 let display_items = filter_sort_channel_items(
                     filter_catalog_items(entry.items.clone(), &local_store),
                     ui.get_channel_search_query().as_str(),
-                    *channel_duration_filter.lock().unwrap(),
-                    *channel_sort_mode.lock().unwrap(),
+                    *channel_duration_filter.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+                    *channel_sort_mode.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
                 );
                 let cards = display_items.iter().map(tv_item_to_card).collect::<Vec<_>>();
                 set_channel_catalog(&ui, cards.clone());
@@ -425,7 +451,7 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
 
             // Not in cache: immediately clear previous cards so user does NOT see old items under new header!
             set_channel_catalog(&ui, vec![]);
-            *channel_items_cache.lock().unwrap() = Vec::new();
+            *channel_items_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Vec::new();
             ui.set_channel_loading(true);
             ui.set_channel_search_query("".into());
 
@@ -455,7 +481,7 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak.upgrade() {
                             if channel_generation.load(Ordering::SeqCst) == request_id
-                                && *current_channel_id.lock().unwrap() == chan_id
+                                && *current_channel_id.lock().unwrap_or_else(std::sync::PoisonError::into_inner) == chan_id
                             {
                                 ui.set_channel_loading(false);
                                 ui.set_channel_error_kind("connection".into());
@@ -475,7 +501,7 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
                             let _ = slint::invoke_from_event_loop(move || {
                                 if let Some(ui) = weak.upgrade() {
                                     if channel_generation.load(Ordering::SeqCst) == request_id
-                                        && *current_channel_id.lock().unwrap() == chan_id
+                                        && *current_channel_id.lock().unwrap_or_else(std::sync::PoisonError::into_inner) == chan_id
                                     {
                                         ui.set_channel_loading(false);
                                         ui.set_channel_error_kind(resolver_error_kind(&err).into());
@@ -491,7 +517,7 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
                     };
 
                     let hidden = local_store.get_hidden_channels().unwrap_or_default();
-                    let mut ids = category_ids.lock().unwrap();
+                    let mut ids = category_ids.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     for category in &categories {
                         ids.insert(category.title.clone(), category.id.clone());
                     }
@@ -508,12 +534,12 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
                     // Stream results incrementally from each category
                     for cat in visible_categories.iter().take(6) {
                         if channel_generation.load(Ordering::SeqCst) != request_id
-                            || *current_channel_id.lock().unwrap() != "main"
+                            || *current_channel_id.lock().unwrap_or_else(std::sync::PoisonError::into_inner) != "main"
                         {
                             return;
                         }
 
-                        let cat_videos = if let Some(cached) = channel_cache_map.lock().unwrap().get(&cat.id) {
+                        let cat_videos = if let Some(cached) = channel_cache_map.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&cat.id) {
                             cached.items.clone()
                         } else {
                             let fetched = if let Ok(history) = resolver.get_channel_history(&res_url, &cat.id, 8, None) {
@@ -524,7 +550,7 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
                                 Vec::new()
                             };
                             if !fetched.is_empty() {
-                                channel_cache_map.lock().unwrap().insert(cat.id.clone(), ChannelCacheEntry {
+                                channel_cache_map.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(cat.id.clone(), ChannelCacheEntry {
                                     items: fetched.clone(),
                                     next_offset: None,
                                     has_more: false,
@@ -543,8 +569,8 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
                         let partial_display = filter_sort_channel_items(
                             filter_catalog_items(items.clone(), &local_store),
                             "",
-                            *channel_duration_filter.lock().unwrap(),
-                            *channel_sort_mode.lock().unwrap(),
+                            *channel_duration_filter.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+                            *channel_sort_mode.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
                         );
                         let weak_partial = weak.clone();
                         let generation_partial = channel_generation.clone();
@@ -553,7 +579,7 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(ui) = weak_partial.upgrade() {
                                 if generation_partial.load(Ordering::SeqCst) == request_id
-                                    && *current_channel_partial.lock().unwrap() == "main"
+                                    && *current_channel_partial.lock().unwrap_or_else(std::sync::PoisonError::into_inner) == "main"
                                 {
                                     let cards = partial_display.iter().map(tv_item_to_card).collect::<Vec<_>>();
                                     set_channel_catalog(&ui, cards);
@@ -564,16 +590,16 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
                     }
 
                     if channel_generation.load(Ordering::SeqCst) != request_id
-                        || *current_channel_id.lock().unwrap() != "main"
+                        || *current_channel_id.lock().unwrap_or_else(std::sync::PoisonError::into_inner) != "main"
                     {
                         return;
                     }
 
                     let filtered = filter_catalog_items(items, &local_store);
-                    *channel_offset_id.lock().unwrap() = None;
-                    *channel_items_cache.lock().unwrap() = filtered.clone();
+                    *channel_offset_id.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                    *channel_items_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = filtered.clone();
 
-                    channel_cache_map.lock().unwrap().insert("main".to_string(), ChannelCacheEntry {
+                    channel_cache_map.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert("main".to_string(), ChannelCacheEntry {
                         items: filtered.clone(),
                         next_offset: None,
                         has_more: false,
@@ -581,7 +607,7 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
 
                     // Merge into cached_catalog
                     {
-                        let mut cat_lock = cached_catalog.lock().unwrap();
+                        let mut cat_lock = cached_catalog.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         for it in &filtered {
                             if !cat_lock.iter().any(|x| x.id == it.id) {
                                 cat_lock.push(it.clone());
@@ -593,8 +619,8 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
                     let display_items = filter_sort_channel_items(
                         filtered,
                         "",
-                        *channel_duration_filter.lock().unwrap(),
-                        *channel_sort_mode.lock().unwrap(),
+                        *channel_duration_filter.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+                        *channel_sort_mode.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
                     );
                     let weak_final = weak.clone();
                     let generation_final = channel_generation.clone();
@@ -604,7 +630,7 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
                     let _ = slint::invoke_from_event_loop(move || {
                         let Some(ui) = weak_final.upgrade() else { return };
                         if generation_final.load(Ordering::SeqCst) != request_id
-                            || *channel_id_final.lock().unwrap() != "main"
+                            || *channel_id_final.lock().unwrap_or_else(std::sync::PoisonError::into_inner) != "main"
                         {
                             return;
                         }
@@ -631,7 +657,7 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
                     // Single channel fetch
                     let mut effective_channel_id = chan_id.clone();
                     if let Ok(categories) = resolver.get_categories(&res_url) {
-                        let mut ids = category_ids.lock().unwrap();
+                        let mut ids = category_ids.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         for category in &categories {
                             ids.insert(category.title.clone(), category.id.clone());
                         }
@@ -670,8 +696,8 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
                         }
                     }
 
-                    let duration_filter = *channel_duration_filter.lock().unwrap();
-                    let sort_mode = *channel_sort_mode.lock().unwrap();
+                    let duration_filter = *channel_duration_filter.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let sort_mode = *channel_sort_mode.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     let mut empty_page_attempts = 0;
                     loop {
                         let visible = filter_sort_channel_items(
@@ -714,11 +740,11 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
 
                     // Strict currency check: verify BOTH request_id AND current channel ID
                     if channel_generation.load(Ordering::SeqCst) != request_id
-                        || *current_channel_id.lock().unwrap() != chan_id
+                        || *current_channel_id.lock().unwrap_or_else(std::sync::PoisonError::into_inner) != chan_id
                     {
                         // Cache the result for future visits, but do NOT touch the UI
                         if !items.is_empty() {
-                            channel_cache_map.lock().unwrap().insert(chan_id, ChannelCacheEntry {
+                            channel_cache_map.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(chan_id, ChannelCacheEntry {
                                 items: filter_catalog_items(items, &local_store),
                                 next_offset,
                                 has_more,
@@ -728,10 +754,10 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
                     }
 
                     let filtered = filter_catalog_items(items, &local_store);
-                    *channel_offset_id.lock().unwrap() = next_offset;
-                    *channel_items_cache.lock().unwrap() = filtered.clone();
+                    *channel_offset_id.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = next_offset;
+                    *channel_items_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = filtered.clone();
 
-                    channel_cache_map.lock().unwrap().insert(chan_id.clone(), ChannelCacheEntry {
+                    channel_cache_map.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(chan_id.clone(), ChannelCacheEntry {
                         items: filtered.clone(),
                         next_offset,
                         has_more,
@@ -739,7 +765,7 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
 
                     // Merge into cached_catalog
                     {
-                        let mut cat_lock = cached_catalog.lock().unwrap();
+                        let mut cat_lock = cached_catalog.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         for it in &filtered {
                             if !cat_lock.iter().any(|x| x.id == it.id) {
                                 cat_lock.push(it.clone());
@@ -750,8 +776,8 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
                     let display_items = filter_sort_channel_items(
                         filtered.clone(),
                         "",
-                        *channel_duration_filter.lock().unwrap(),
-                        *channel_sort_mode.lock().unwrap(),
+                        *channel_duration_filter.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+                        *channel_sort_mode.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
                     );
                     let refresh_items = channel_items_cache.clone();
                     let refresh_generation = channel_generation.clone();
@@ -765,7 +791,7 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
                     slint::invoke_from_event_loop(move || {
                         let Some(ui) = weak.upgrade() else { return };
                         if channel_generation.load(Ordering::SeqCst) != request_id
-                            || *current_channel_id.lock().unwrap() != chan_id
+                            || *current_channel_id.lock().unwrap_or_else(std::sync::PoisonError::into_inner) != chan_id
                         {
                             return;
                         }
@@ -811,7 +837,7 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
 
         ui.on_load_more_channel_videos(move || {
             let Some(ui) = weak.upgrade() else { return };
-            let chan_id = current_channel_id.lock().unwrap().clone();
+            let chan_id = current_channel_id.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
             if chan_id == "main" || chan_id.is_empty() {
                 ui.set_channel_loading(false);
                 ui.set_channel_has_more(false);
@@ -825,8 +851,8 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
             let credential_store = credential_store.clone();
             let resolver = resolver.clone();
             let cached_catalog = cached_catalog.clone();
-            let chan_id = current_channel_id.lock().unwrap().clone();
-            let offset = *channel_offset_id.lock().unwrap();
+            let chan_id = current_channel_id.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+            let offset = *channel_offset_id.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let channel_offset_id = channel_offset_id.clone();
             let channel_items_cache = channel_items_cache.clone();
             let channel_cache_map = channel_cache_map.clone();
@@ -875,15 +901,15 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
                 }
 
                 if channel_generation.load(Ordering::SeqCst) != request_id
-                    || *current_channel_id.lock().unwrap() != chan_id
+                    || *current_channel_id.lock().unwrap_or_else(std::sync::PoisonError::into_inner) != chan_id
                 {
                     return;
                 }
 
                 let filtered_new = filter_catalog_items(new_items, &local_store);
-                *channel_offset_id.lock().unwrap() = next_offset;
+                *channel_offset_id.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = next_offset;
 
-                let mut all_channel_items = channel_items_cache.lock().unwrap();
+                let mut all_channel_items = channel_items_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 for item in &filtered_new {
                     if !all_channel_items
                         .iter()
@@ -893,7 +919,7 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
                     }
                 }
 
-                channel_cache_map.lock().unwrap().insert(chan_id.clone(), ChannelCacheEntry {
+                channel_cache_map.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(chan_id.clone(), ChannelCacheEntry {
                     items: all_channel_items.clone(),
                     next_offset,
                     has_more,
@@ -902,8 +928,8 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
                 let display_items = filter_sort_channel_items(
                     all_channel_items.clone(),
                     &query,
-                    *channel_duration_filter.lock().unwrap(),
-                    *channel_sort_mode.lock().unwrap(),
+                    *channel_duration_filter.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+                    *channel_sort_mode.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
                 );
                 let refresh_items = channel_items_cache.clone();
                 let refresh_generation = channel_generation.clone();
@@ -912,7 +938,7 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
 
                 // Merge into cached_catalog
                 {
-                    let mut cat_lock = cached_catalog.lock().unwrap();
+                    let mut cat_lock = cached_catalog.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     for it in &filtered_new {
                         if !cat_lock.iter().any(|x| x.id == it.id) {
                             cat_lock.push(it.clone());
@@ -924,7 +950,7 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
                 slint::invoke_from_event_loop(move || {
                     let Some(ui) = weak.upgrade() else { return };
                     if channel_generation.load(Ordering::SeqCst) != request_id
-                        || *current_channel_id_loop.lock().unwrap() != chan_id
+                        || *current_channel_id_loop.lock().unwrap_or_else(std::sync::PoisonError::into_inner) != chan_id
                     {
                         return;
                     }
@@ -977,12 +1003,19 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
                 super::browsing::refresh_recent_searches_for_context(&ui, &local_store);
             }
             let q = trimmed.to_lowercase();
-            let all = channel_items_cache.lock().unwrap().clone();
+            let all = channel_items_cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             let filtered = filter_sort_channel_items(
                 all,
                 &q,
-                *channel_duration_filter.lock().unwrap(),
-                *channel_sort_mode.lock().unwrap(),
+                *channel_duration_filter
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+                *channel_sort_mode
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
             );
             ui.set_channel_loading(false);
 
@@ -1074,7 +1107,9 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
                 String::new()
             };
             initial_items = filter_catalog_items(initial_items, &local_store);
-            *category_ids.lock().unwrap() = ids;
+            *category_ids
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = ids;
             let weak_categories = weak.clone();
             slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak_categories.upgrade() {
@@ -1091,10 +1126,16 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
             if channel_generation.load(Ordering::SeqCst) != request_id {
                 return;
             }
-            *channel_offset_id.lock().unwrap() = next_offset;
-            *channel_items_cache.lock().unwrap() = initial_items.clone();
+            *channel_offset_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = next_offset;
+            *channel_items_cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = initial_items.clone();
             {
-                let mut catalog = cached_catalog.lock().unwrap();
+                let mut catalog = cached_catalog
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 for item in &initial_items {
                     if !catalog.iter().any(|existing| existing.id == item.id) {
                         catalog.push(item.clone());
@@ -1104,8 +1145,12 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
             let display_items = filter_sort_channel_items(
                 initial_items,
                 "",
-                *channel_duration_filter.lock().unwrap(),
-                *channel_sort_mode.lock().unwrap(),
+                *channel_duration_filter
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+                *channel_sort_mode
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
             );
             let refresh_items = channel_items_cache.clone();
             let refresh_generation = channel_generation.clone();
@@ -1149,42 +1194,64 @@ mod tests {
         let channel_generation = Arc::new(AtomicUsize::new(0));
 
         // Initial state: empty channel picker
-        assert_eq!(*current_channel_id.lock().unwrap(), "");
+        assert_eq!(
+            *current_channel_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ""
+        );
 
         // User selects "channel-1" (request 1)
         let req1 = channel_generation.fetch_add(1, Ordering::SeqCst) + 1;
-        *current_channel_id.lock().unwrap() = "channel-1".to_string();
+        *current_channel_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = "channel-1".to_string();
 
         let item1 = TvItem {
             id: "v1".into(),
             title: "Video 1".into(),
             ..Default::default()
         };
-        cache.lock().unwrap().insert(
-            "channel-1".to_string(),
-            ChannelCacheEntry {
-                items: vec![item1.clone()],
-                next_offset: Some(10),
-                has_more: true,
-            },
-        );
+        cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                "channel-1".to_string(),
+                ChannelCacheEntry {
+                    items: vec![item1.clone()],
+                    next_offset: Some(10),
+                    has_more: true,
+                },
+            );
 
         // User quickly switches to "channel-2" (request 2) before background thread for channel-1 completes
         let req2 = channel_generation.fetch_add(1, Ordering::SeqCst) + 1;
-        *current_channel_id.lock().unwrap() = "channel-2".to_string();
+        *current_channel_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = "channel-2".to_string();
 
         // Background thread for request 1 tries to update UI with channel-1
         let is_valid_req1 = channel_generation.load(Ordering::SeqCst) == req1
-            && *current_channel_id.lock().unwrap() == "channel-1";
+            && *current_channel_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                == "channel-1";
         assert!(!is_valid_req1, "Stale request 1 must be rejected");
 
         // Background thread for request 2 checks currency
         let is_valid_req2 = channel_generation.load(Ordering::SeqCst) == req2
-            && *current_channel_id.lock().unwrap() == "channel-2";
+            && *current_channel_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                == "channel-2";
         assert!(is_valid_req2, "Current request 2 must be accepted");
 
         // Switching back to channel-1 hits cache instantly
-        let cached = cache.lock().unwrap().get("channel-1").cloned();
+        let cached = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get("channel-1")
+            .cloned();
         assert!(cached.is_some());
         let cached_entry = cached.unwrap();
         assert_eq!(cached_entry.items.len(), 1);

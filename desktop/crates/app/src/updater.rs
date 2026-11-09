@@ -425,6 +425,16 @@ pub fn download_and_verify_package(
         if count == 0 {
             break;
         }
+        // The manifest's size is signed, so a body larger than it is never valid.
+        // Stop before writing it instead of filling the disk.
+        if downloaded + count as u64 > package.size_bytes {
+            drop(file);
+            let _ = std::fs::remove_file(&staging_path);
+            return Err(UpdateError::SizeMismatch {
+                expected: package.size_bytes,
+                actual: downloaded + count as u64,
+            });
+        }
         file.write_all(&buffer[..count]).map_err(|e| {
             let _ = std::fs::remove_file(&staging_path);
             UpdateError::Io(e.to_string())
@@ -477,14 +487,15 @@ pub fn launch_installation(
             })?;
             let _ = std::fs::remove_file(write_probe);
 
-            let quote_ps = |path: &Path| path.to_string_lossy().replace('\'', "''");
-            let executable = quote_ps(&current_exe);
-            let downloaded = quote_ps(file_path);
-            let runtime_install = runtime_dll_path.map_or_else(String::new, |path| {
-                let source = quote_ps(path);
-                let destination = quote_ps(&parent.join("libmpv-2.dll"));
-                format!("$runtimeSrc='{}'; $runtimeDst='{}'; $runtimeStage=$runtimeDst+'.update'; $runtimeBackup=$runtimeDst+'.previous'; Copy-Item -LiteralPath $runtimeSrc -Destination $runtimeStage -Force; if (Test-Path -LiteralPath $runtimeDst) {{ Move-Item -LiteralPath $runtimeDst -Destination $runtimeBackup -Force }}; Move-Item -LiteralPath $runtimeStage -Destination $runtimeDst -Force;", source, destination)
-            });
+            // Paths reach PowerShell only through environment variables. They are
+            // never spliced into the script text, so no quote character in a path
+            // can end a string literal.
+            let runtime_destination = parent.join("libmpv-2.dll");
+            let runtime_install = if runtime_dll_path.is_some() {
+                "$runtimeSrc=$env:AH_UPDATE_RUNTIME_SRC; $runtimeDst=$env:AH_UPDATE_RUNTIME_DST; $runtimeStage=$runtimeDst+'.update'; $runtimeBackup=$runtimeDst+'.previous'; Copy-Item -LiteralPath $runtimeSrc -Destination $runtimeStage -Force; if (Test-Path -LiteralPath $runtimeDst) { Move-Item -LiteralPath $runtimeDst -Destination $runtimeBackup -Force }; Move-Item -LiteralPath $runtimeStage -Destination $runtimeDst -Force;"
+            } else {
+                ""
+            };
             let runtime_cleanup = if runtime_dll_path.is_some() {
                 "if (Test-Path -LiteralPath $runtimeBackup) { Remove-Item -LiteralPath $runtimeBackup -Force }; Remove-Item -LiteralPath $runtimeSrc -Force;"
             } else {
@@ -496,11 +507,8 @@ pub fn launch_installation(
                 ""
             };
             let wait_and_replace = format!(
-                "$ErrorActionPreference='Stop'; $appPid={}; $src='{}'; $dst='{}'; $stage=$dst+'.update'; $backup=$dst+'.previous'; {}; try {{ Wait-Process -Id $appPid; Copy-Item -LiteralPath $src -Destination $stage -Force; Move-Item -LiteralPath $dst -Destination $backup -Force; try {{ {} Move-Item -LiteralPath $stage -Destination $dst -Force; $updated=Start-Process -FilePath $dst -PassThru; Start-Sleep -Seconds 5; if ($updated.HasExited) {{ throw 'Updated process exited during startup' }}; Remove-Item -LiteralPath $backup -Force; {}; Remove-Item -LiteralPath $src -Force }} catch {{ if (Test-Path -LiteralPath $backup) {{ Remove-Item -LiteralPath $dst -Force -ErrorAction SilentlyContinue; Move-Item -LiteralPath $backup -Destination $dst -Force }}; {}; throw }} }} catch {{ if ((Test-Path -LiteralPath $backup) -and !(Test-Path -LiteralPath $dst)) {{ Move-Item -LiteralPath $backup -Destination $dst -Force }}; {} }}",
+                "$ErrorActionPreference='Stop'; $appPid={}; $src=$env:AH_UPDATE_SRC; $dst=$env:AH_UPDATE_DST; $stage=$dst+'.update'; $backup=$dst+'.previous'; try {{ Wait-Process -Id $appPid; Copy-Item -LiteralPath $src -Destination $stage -Force; Move-Item -LiteralPath $dst -Destination $backup -Force; try {{ {} Move-Item -LiteralPath $stage -Destination $dst -Force; $updated=Start-Process -FilePath $dst -PassThru; Start-Sleep -Seconds 5; if ($updated.HasExited) {{ throw 'Updated process exited during startup' }}; Remove-Item -LiteralPath $backup -Force; {}; Remove-Item -LiteralPath $src -Force }} catch {{ if (Test-Path -LiteralPath $backup) {{ Remove-Item -LiteralPath $dst -Force -ErrorAction SilentlyContinue; Move-Item -LiteralPath $backup -Destination $dst -Force }}; {}; throw }} }} catch {{ if ((Test-Path -LiteralPath $backup) -and !(Test-Path -LiteralPath $dst)) {{ Move-Item -LiteralPath $backup -Destination $dst -Force }}; {} }}",
                 std::process::id(),
-                downloaded,
-                executable,
-                "",
                 runtime_install,
                 runtime_cleanup,
                 runtime_rollback,
@@ -515,6 +523,13 @@ pub fn launch_installation(
                     "-Command",
                     &wait_and_replace,
                 ])
+                .env("AH_UPDATE_SRC", file_path)
+                .env("AH_UPDATE_DST", &current_exe)
+                .env(
+                    "AH_UPDATE_RUNTIME_SRC",
+                    runtime_dll_path.unwrap_or(file_path),
+                )
+                .env("AH_UPDATE_RUNTIME_DST", &runtime_destination)
                 .spawn()
                 .map_err(|e| UpdateError::Io(format!("failed to schedule EXE replacement: {e}")))?;
             std::process::exit(0);

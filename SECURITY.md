@@ -20,5 +20,6 @@ If you discover a security vulnerability in Adult Hub Desktop, please report it 
 ## Security Practices
 
 - **In-App Updates**: Update manifests are authenticated via detached Ed25519 digital signatures and checked against pinned public keys. Downloaded binaries are verified using SHA-256 digests.
-- **Credential Storage**: Access tokens and sensitive server credentials use platform keyring / DPAPI encryption where available.
+- **Credential Storage**: On Windows, the session is stored in Windows Credential Manager (DPAPI-protected). On Linux no OS keyring is used. The session is stored in `session.json` in the app data directory, owner-only (`0600`, directory `0700`). Sessions saved by older releases in the SQLite database are moved out and removed on first start.
+- **Local Database**: `store.db` is created and kept owner-only (`0600`) on Unix.
 - **Diagnostics Redaction**: Automated diagnostics log entries sanitize UUIDs, authorization tokens, usernames, server URLs, and media titles before export.

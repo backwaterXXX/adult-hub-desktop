@@ -16,7 +16,9 @@ pub fn install_stage9_handlers(ui: &MainWindow, ctx: &AppContext) {
         ui.on_video_canvas_clicked(move || {
             let Some(ui) = weak.upgrade() else { return };
             let now = std::time::Instant::now();
-            let mut last = last_click.lock().unwrap();
+            let mut last = last_click
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if now.duration_since(*last) < Duration::from_millis(350) {
                 // Double click: toggle fullscreen
                 *last = now - Duration::from_secs(10);

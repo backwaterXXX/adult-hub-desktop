@@ -141,9 +141,13 @@ impl LocalStore {
     }
 
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        if let Some(parent) = path.as_ref().parent() {
-            std::fs::create_dir_all(parent)?;
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            create_private_dir(parent)?;
         }
+        // Create the database file owner-only before SQLite opens it. SQLite
+        // gives its journal and WAL files the database file's permissions.
+        ensure_private_file(path)?;
         let conn = Connection::open(path)?;
         let store = Self {
             conn: Mutex::new(conn),
@@ -977,6 +981,8 @@ impl LocalStore {
                 tx.execute("DELETE FROM settings WHERE key = 'resolver_base_url'", [])?;
                 tx.execute("DELETE FROM settings WHERE key = 'resolver_url'", [])?;
             } else {
+                validate_imported_resolver_url(sanitized)?;
+
                 tx.execute(
                     "INSERT INTO settings (key, value) VALUES ('resolver_base_url', ?1)
                      ON CONFLICT(key) DO UPDATE SET value = ?1",
@@ -1176,6 +1182,34 @@ impl LocalStore {
     }
 }
 
+/// An imported resolver URL must be a plain HTTP(S) base URL. Credentials, query
+/// strings and fragments are rejected. Cleartext and host checks happen when the
+/// app loads the setting at startup.
+fn validate_imported_resolver_url(raw: &str) -> Result<()> {
+    let parsed = url::Url::parse(raw)
+        .map_err(|_| StorageError::Custom("resolverBaseUrl is not a valid URL".into()))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(StorageError::Custom(
+            "resolverBaseUrl must use http or https".into(),
+        ));
+    }
+    if parsed.host_str().is_none_or(str::is_empty) {
+        return Err(StorageError::Custom(
+            "resolverBaseUrl must include a host".into(),
+        ));
+    }
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(StorageError::Custom(
+            "resolverBaseUrl cannot include credentials, a query, or a fragment".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub fn default_db_path() -> std::path::PathBuf {
     #[cfg(windows)]
     {
@@ -1198,6 +1232,67 @@ pub fn default_db_path() -> std::path::PathBuf {
     std::path::PathBuf::from("adult_hub.db")
 }
 
+/// Session file location next to `store.db` (used only where no OS credential
+/// store is available).
+pub fn default_session_file() -> std::path::PathBuf {
+    default_db_path().with_file_name("session.json")
+}
+
+/// Create a directory that only the owner can enter (`0700` on Unix).
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)
+    }
+}
+
+/// Open options for a new file that only the owner can read and write (`0600`).
+#[cfg(unix)]
+fn private_file_options() -> std::fs::OpenOptions {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut options = std::fs::OpenOptions::new();
+    options.mode(0o600);
+    options
+}
+
+#[cfg(not(unix))]
+fn private_file_options() -> std::fs::OpenOptions {
+    std::fs::OpenOptions::new()
+}
+
+/// Create an owner-only file when none exists yet, and tighten an existing
+/// file to owner-only access (`0600` on Unix).
+fn ensure_private_file(path: &Path) -> std::io::Result<()> {
+    if path.exists() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        return Ok(());
+    }
+    private_file_options()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map(|_| ())
+        .or_else(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        })
+}
+
 /// CredentialStore handles active session tokens and user identity.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Session {
@@ -1210,6 +1305,9 @@ pub struct Session {
 
 pub struct CredentialStore {
     in_memory: std::sync::RwLock<Option<Session>>,
+    /// Session file used on platforms without an OS credential store (Linux).
+    /// Windows ignores it and uses Credential Manager.
+    session_file: std::path::PathBuf,
 }
 
 impl Default for CredentialStore {
@@ -1220,8 +1318,14 @@ impl Default for CredentialStore {
 
 impl CredentialStore {
     pub fn new() -> Self {
+        Self::with_session_file(default_session_file())
+    }
+
+    pub fn with_session_file(session_file: std::path::PathBuf) -> Self {
+        let loaded = load_platform_session(&session_file);
         Self {
-            in_memory: std::sync::RwLock::new(load_platform_session()),
+            in_memory: std::sync::RwLock::new(loaded),
+            session_file,
         }
     }
 
@@ -1231,7 +1335,7 @@ impl CredentialStore {
             .write()
             .map_err(|_| StorageError::Custom("lock error".into()))?;
         *lock = Some(session.clone());
-        persist_platform_session(&session)
+        persist_platform_session(&self.session_file, &session)
     }
 
     pub fn get(&self) -> Result<Option<Session>> {
@@ -1243,7 +1347,7 @@ impl CredentialStore {
             return Ok(lock.clone());
         }
         drop(lock);
-        let loaded = load_platform_session();
+        let loaded = load_platform_session(&self.session_file);
         if loaded.is_some() {
             *self
                 .in_memory
@@ -1259,12 +1363,12 @@ impl CredentialStore {
             .write()
             .map_err(|_| StorageError::Custom("lock error".into()))?;
         *lock = None;
-        clear_platform_session()
+        clear_platform_session(&self.session_file)
     }
 }
 
 #[cfg(windows)]
-fn load_platform_session() -> Option<Session> {
+fn load_platform_session(_session_file: &std::path::Path) -> Option<Session> {
     use std::ffi::c_void;
     use windows_sys::Win32::Security::Credentials::{
         CRED_TYPE_GENERIC, CREDENTIALW, CredFree, CredReadW,
@@ -1293,12 +1397,13 @@ fn load_platform_session() -> Option<Session> {
 }
 
 #[cfg(not(windows))]
-fn load_platform_session() -> Option<Session> {
-    None
+fn load_platform_session(session_file: &std::path::Path) -> Option<Session> {
+    let bytes = std::fs::read(session_file).ok()?;
+    serde_json::from_slice(&bytes).ok()
 }
 
 #[cfg(windows)]
-fn persist_platform_session(session: &Session) -> Result<()> {
+fn persist_platform_session(_session_file: &std::path::Path, session: &Session) -> Result<()> {
     use windows_sys::Win32::Foundation::FILETIME;
     use windows_sys::Win32::Security::Credentials::{
         CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC, CREDENTIALW, CredWriteW,
@@ -1340,12 +1445,33 @@ fn persist_platform_session(session: &Session) -> Result<()> {
 }
 
 #[cfg(not(windows))]
-fn persist_platform_session(_session: &Session) -> Result<()> {
+fn persist_platform_session(session_file: &std::path::Path, session: &Session) -> Result<()> {
+    use std::io::Write;
+
+    let serialized = serde_json::to_vec(session)?;
+    let dir = session_file
+        .parent()
+        .ok_or_else(|| StorageError::Custom("session file has no parent directory".into()))?;
+    create_private_dir(dir)?;
+
+    // Write to a fresh owner-only file, then rename over the old one so a crash
+    // never leaves a half-written session. `create_new` refuses to follow a
+    // pre-existing symlink or reuse a file another process created.
+    let temp = session_file.with_extension("json.tmp");
+    let _ = std::fs::remove_file(&temp);
+    let mut file = private_file_options()
+        .write(true)
+        .create_new(true)
+        .open(&temp)?;
+    file.write_all(&serialized)?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(&temp, session_file)?;
     Ok(())
 }
 
 #[cfg(windows)]
-fn clear_platform_session() -> Result<()> {
+fn clear_platform_session(_session_file: &std::path::Path) -> Result<()> {
     use windows_sys::Win32::Foundation::GetLastError;
     use windows_sys::Win32::Security::Credentials::{CRED_TYPE_GENERIC, CredDeleteW};
 
@@ -1366,8 +1492,12 @@ fn clear_platform_session() -> Result<()> {
 }
 
 #[cfg(not(windows))]
-fn clear_platform_session() -> Result<()> {
-    Ok(())
+fn clear_platform_session(session_file: &std::path::Path) -> Result<()> {
+    match std::fs::remove_file(session_file) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[cfg(test)]
@@ -1485,7 +1615,8 @@ mod tests {
 
     #[test]
     fn credential_store_lifecycle() {
-        let store = CredentialStore::new();
+        let dir = std::env::temp_dir().join(format!("ah-storage-test-{}", uuid::Uuid::new_v4()));
+        let store = CredentialStore::with_session_file(dir.join("session.json"));
         assert!(store.get().unwrap().is_none());
 
         let session = Session {
@@ -1502,6 +1633,53 @@ mod tests {
 
         store.clear().unwrap();
         assert!(store.get().unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn imported_resolver_url_must_be_plain_http_base() {
+        assert!(validate_imported_resolver_url("https://resolver.example.com").is_ok());
+        assert!(validate_imported_resolver_url("http://192.168.1.5:8080/base").is_ok());
+        assert!(validate_imported_resolver_url("javascript:alert(1)").is_err());
+        assert!(validate_imported_resolver_url("https://user:pw@host.example").is_err());
+        assert!(validate_imported_resolver_url("https://host.example/?token=x").is_err());
+        assert!(validate_imported_resolver_url("https://host.example/#frag").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_file_and_database_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("ah-storage-perm-{}", uuid::Uuid::new_v4()));
+        let session_file = dir.join("session.json");
+        let store = CredentialStore::with_session_file(session_file.clone());
+        store
+            .save(Session {
+                server_url: "http://localhost:8096".into(),
+                user_id: "u1".into(),
+                username: "tester".into(),
+                access_token: "tok".into(),
+                server_name: String::new(),
+            })
+            .unwrap();
+        let mode = std::fs::metadata(&session_file)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+        let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700);
+
+        // A database created with lax permissions is tightened on open.
+        let db_path = dir.join("store.db");
+        std::fs::write(&db_path, b"").unwrap();
+        std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let _ = LocalStore::open(&db_path).unwrap();
+        let db_mode = std::fs::metadata(&db_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(db_mode, 0o600);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

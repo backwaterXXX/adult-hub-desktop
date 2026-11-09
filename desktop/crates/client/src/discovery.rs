@@ -1,7 +1,10 @@
 use crate::models::ServerInfo;
+use crate::policy::{ServiceUrlPolicy, ServiceUrlValidation};
 use serde::Deserialize;
 use std::net::UdpSocket;
 use std::time::Duration;
+
+const MAX_SERVER_NAME_CHARS: usize = 100;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct JellyfinBroadcastResponse {
@@ -60,11 +63,23 @@ pub fn discover_servers_with_socket(
                 if let Ok(text) = std::str::from_utf8(&buf[..len]) {
                     if let Ok(dto) = serde_json::from_str::<JellyfinBroadcastResponse>(text) {
                         let id = dto.id.unwrap_or_default();
-                        let name = dto.name.unwrap_or_else(|| "Jellyfin Server".into());
-                        let raw_url = dto
+                        // Any host on the LAN can answer this broadcast, so the address
+                        // is untrusted. Accept only URLs that pass the same policy as
+                        // manually entered server URLs.
+                        let advertised = dto
                             .address
                             .or(dto.endpoint_address)
                             .unwrap_or_else(|| format!("http://{}:8096", peer.ip()));
+                        let raw_url = match ServiceUrlPolicy::inspect(&advertised, false) {
+                            ServiceUrlValidation::Valid(valid) => valid.normalized,
+                            ServiceUrlValidation::Invalid(_) => continue,
+                        };
+                        let name: String = dto
+                            .name
+                            .unwrap_or_else(|| "Jellyfin Server".into())
+                            .chars()
+                            .take(MAX_SERVER_NAME_CHARS)
+                            .collect();
 
                         let exists = servers.iter().any(|s: &ServerInfo| {
                             (!id.is_empty() && s.id == id) || s.url == raw_url
@@ -106,6 +121,34 @@ mod tests {
         assert_eq!(dto.address.as_deref(), Some("http://192.168.1.111:8096"));
         assert_eq!(dto.id.as_deref(), Some("8be2a082dd814cec8ae83ea4cfcb83bf"));
         assert_eq!(dto.name.as_deref(), Some("wtr"));
+    }
+
+    #[test]
+    fn discovery_drops_advertised_addresses_that_fail_policy() {
+        let server_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let server_addr = server_sock.local_addr().unwrap();
+        let client_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+
+        let handle = std::thread::spawn(move || {
+            let mut buf = [0u8; 128];
+            let (_, peer) = server_sock.recv_from(&mut buf).unwrap();
+            // Public cleartext HTTP must be rejected; a LAN address is accepted.
+            let hostile = br#"{"Address":"http://example.com:8096","Id":"evil","Name":"Hostile"}"#;
+            server_sock.send_to(hostile, peer).unwrap();
+            let lan = br#"{"Address":"http://192.168.1.50:8096","Id":"lan","Name":"Lan"}"#;
+            server_sock.send_to(lan, peer).unwrap();
+        });
+
+        let servers = discover_servers_with_socket(
+            &client_sock,
+            &server_addr.to_string(),
+            Duration::from_millis(1000),
+        );
+        handle.join().unwrap();
+
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].id, "lan");
+        assert_eq!(servers[0].url, "http://192.168.1.50:8096");
     }
 
     #[test]

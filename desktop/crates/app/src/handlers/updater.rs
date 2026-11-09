@@ -7,6 +7,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+/// Manifests are a few KB. The limit only stops a hostile or broken server from
+/// making the client buffer an unbounded body before the signature check.
+const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
+const MAX_SIGNATURE_BYTES: u64 = 4 * 1024;
+
+/// Read at most `limit` bytes of a response body. Returns `None` when the body
+/// is longer than the limit or cannot be read.
+fn read_limited(response: reqwest::blocking::Response, limit: u64) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    response.take(limit + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() as u64 <= limit).then_some(bytes)
+}
+
 fn set_checking_ui(weak: slint::Weak<MainWindow>, checking: bool, status: Option<String>) {
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = weak.upgrade() {
@@ -111,8 +125,8 @@ pub fn install_stage5_handlers(ui: &MainWindow, ctx: &AppContext) {
                     (Ok(m_resp), Ok(s_resp))
                         if m_resp.status().is_success() && s_resp.status().is_success() =>
                     {
-                        let m_bytes = m_resp.bytes().unwrap_or_default();
-                        let s_bytes = s_resp.bytes().unwrap_or_default();
+                        let m_bytes = read_limited(m_resp, MAX_MANIFEST_BYTES).unwrap_or_default();
+                        let s_bytes = read_limited(s_resp, MAX_SIGNATURE_BYTES).unwrap_or_default();
 
                         match updater::parse_and_verify_manifest(
                             &m_bytes,
@@ -165,12 +179,15 @@ pub fn install_stage5_handlers(ui: &MainWindow, ctx: &AppContext) {
                                                     )
                                                     .into(),
                                                 );
-                                                *pending_thread.lock().unwrap() =
-                                                    Some((manifest_clone, p));
+                                                *pending_thread.lock().unwrap_or_else(
+                                                    std::sync::PoisonError::into_inner,
+                                                ) = Some((manifest_clone, p));
                                             } else {
                                                 ui.set_update_available(false);
                                                 ui.set_update_ready(false);
-                                                *pending_thread.lock().unwrap() = None;
+                                                *pending_thread.lock().unwrap_or_else(
+                                                    std::sync::PoisonError::into_inner,
+                                                ) = None;
                                                 if !silent_if_uptodate {
                                                     ui.set_update_status(format!(
                                                         "Version {} is available, but this platform has no supported installer package.",
@@ -183,7 +200,9 @@ pub fn install_stage5_handlers(ui: &MainWindow, ctx: &AppContext) {
                                         } else if !silent_if_uptodate {
                                             ui.set_update_available(false);
                                             ui.set_update_ready(false);
-                                            *pending_thread.lock().unwrap() = None;
+                                            *pending_thread.lock().unwrap_or_else(
+                                                std::sync::PoisonError::into_inner,
+                                            ) = None;
                                             ui.set_update_status(
                                                 format!(
                                                     "You are on the latest version (v{}).",
@@ -244,7 +263,11 @@ pub fn install_stage5_handlers(ui: &MainWindow, ctx: &AppContext) {
         let pending = pending_update.clone();
         let downloaded = downloaded_installer.clone();
         ui.on_start_update_download(move || {
-            let pkg_opt = pending.lock().unwrap().as_ref().map(|(_, p)| p.clone());
+            let pkg_opt = pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .map(|(_, p)| p.clone());
             if let Some(package) = pkg_opt {
                 let runtime_dll = package.runtime_dll.as_deref().cloned();
                 if let Some(ui) = weak.upgrade() {
@@ -324,7 +347,10 @@ pub fn install_stage5_handlers(ui: &MainWindow, ctx: &AppContext) {
 
                     match res {
                         Ok(verified_paths) => {
-                            *downloaded_thread.lock().unwrap() = Some(verified_paths);
+                            *downloaded_thread
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                Some(verified_paths);
                             let _ = slint::invoke_from_event_loop(move || {
                                 if let Some(ui) = weak_thread.upgrade() {
                                     ui.set_update_downloading(false);
@@ -360,7 +386,10 @@ pub fn install_stage5_handlers(ui: &MainWindow, ctx: &AppContext) {
                 .unwrap()
                 .as_ref()
                 .map(|(_, p)| p.package_type.clone());
-            let paths_opt = downloaded.lock().unwrap().clone();
+            let paths_opt = downloaded
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             if let (Some(ptype), Some((path, runtime_dll))) = (pkg_type, paths_opt) {
                 let playback_active = weak.upgrade().is_some_and(|ui| {
                     ui.get_active_screen() == "player"

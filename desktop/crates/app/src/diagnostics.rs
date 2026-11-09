@@ -273,7 +273,10 @@ mod tests {
             log.i("TEST", &format!("Event number {i}"));
         }
 
-        let snapshot = log.entries.lock().unwrap();
+        let snapshot = log
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(snapshot.len(), 500);
         // The first 100 should have been dropped
         assert!(snapshot[0].contains("Event number 100"));

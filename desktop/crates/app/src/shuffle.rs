@@ -40,7 +40,10 @@ impl ShuffleEngine {
             return Some(choice);
         }
 
-        let mut history = self.history.lock().unwrap();
+        let mut history = self
+            .history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         // Dynamically compute usable history length:
         // E.g., for 2 items: 0 (can alternate cleanly).
@@ -105,7 +108,10 @@ impl ShuffleEngine {
     }
 
     pub fn record_choice(&self, id: &str) {
-        let mut history = self.history.lock().unwrap();
+        let mut history = self
+            .history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         history.retain(|i| i != id);
         history.push_front(id.to_string());
         while history.len() > self.max_history {
@@ -114,11 +120,17 @@ impl ShuffleEngine {
     }
 
     pub fn history_len(&self) -> usize {
-        self.history.lock().unwrap().len()
+        self.history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
     }
 
     pub fn clear_history(&self) {
-        self.history.lock().unwrap().clear();
+        self.history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
     }
 }
 
