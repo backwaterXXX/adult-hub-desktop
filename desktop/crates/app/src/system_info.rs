@@ -36,26 +36,45 @@ fn vulkan_loader_status() -> String {
 }
 
 pub fn snapshot() -> SystemSnapshot {
-    let mut system =
-        System::new_with_specifics(RefreshKind::nothing().with_cpu(CpuRefreshKind::everything()));
-    system.refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
+    let os_name = System::name().unwrap_or_else(|_| std::env::consts::OS.to_owned());
+    let os_version = System::long_os_version().unwrap_or_else(|_| "Unknown".into());
 
-    let os_name = System::name().unwrap_or_else(|| std::env::consts::OS.to_owned());
-    let os_version = System::long_os_version().unwrap_or_else(|| "Unknown".into());
-    let cpu_brand = system
-        .cpus()
-        .first()
-        .map(|cpu| cpu.brand().trim().to_owned())
-        .filter(|brand| !brand.is_empty())
-        .unwrap_or_else(|| "Unknown processor".into());
+    let (cpu_brand, logical_processors, total_memory_mb, available_memory_mb) =
+        match System::new_with_specifics(
+            RefreshKind::nothing()
+                .with_cpu(CpuRefreshKind::everything())
+                .with_memory(MemoryRefreshKind::nothing().with_ram()),
+        ) {
+            Ok(system) => {
+                let cpu_brand = system
+                    .cpus()
+                    .first()
+                    .map(|cpu| cpu.brand().trim().to_owned())
+                    .filter(|brand| !brand.is_empty())
+                    .unwrap_or_else(|| "Unknown processor".into());
+                let logical_processors = system.cpus().len();
+                let total_memory_mb = system.total_memory() / (1024 * 1024);
+                let available_memory_mb = system.available_memory() / (1024 * 1024);
+                (
+                    cpu_brand,
+                    logical_processors,
+                    total_memory_mb,
+                    available_memory_mb,
+                )
+            }
+            Err(err) => {
+                log::warn!("Failed to initialize sysinfo: {err}");
+                ("Unknown processor".into(), 0, 0, 0)
+            }
+        };
 
     SystemSnapshot {
         os_name,
         os_version,
         cpu_brand,
-        logical_processors: system.cpus().len(),
-        total_memory_mb: system.total_memory() / (1024 * 1024),
-        available_memory_mb: system.available_memory() / (1024 * 1024),
+        logical_processors,
+        total_memory_mb,
+        available_memory_mb,
         vulkan_loader: vulkan_loader_status(),
     }
 }
