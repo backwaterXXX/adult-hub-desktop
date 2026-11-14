@@ -519,6 +519,7 @@ struct CatalogViewSnapshot {
     cards: Vec<VideoCardData>,
     items: Vec<TvItem>,
     page: CatalogPageState,
+    cached_at: std::time::Instant,
     total_count: i32,
     has_more: bool,
     scroll_y: f32,
@@ -744,6 +745,7 @@ fn save_catalog_view(
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone(),
         page: page.clone(),
+        cached_at: std::time::Instant::now(),
         total_count: ui.get_catalog_total_count(),
         has_more: ui.get_catalog_has_more(),
         scroll_y: ui.get_catalog_scroll_y(),
@@ -790,6 +792,10 @@ fn restore_catalog_view(
     search_generation: &Arc<AtomicU64>,
 ) -> Option<(u64, Vec<VideoCardData>)> {
     let snapshot = views.borrow().get(key).cloned()?;
+    if !snapshot.is_search && snapshot.cached_at.elapsed() > std::time::Duration::from_secs(60) {
+        views.borrow_mut().remove(key);
+        return None;
+    }
     let request_id = generation.fetch_add(1, Ordering::SeqCst) + 1;
     search_generation.fetch_add(1, Ordering::SeqCst);
     let mut page = snapshot.page.clone();
@@ -2660,8 +2666,11 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 ui.invoke_refresh_home();
             });
         }
+        let catalog_views_for_home = catalog_views.clone();
         ui.on_refresh_home(move || {
             let Some(ui) = weak.upgrade() else { return };
+            catalog_views_for_home.borrow_mut().clear();
+            let _ = local_store.remove_setting("home_shelves_cache_v1");
             let request_id = home_generation.fetch_add(1, Ordering::SeqCst) + 1;
             ui.set_home_is_loading(true);
             ui.set_home_error_message(String::new().into());
@@ -4157,7 +4166,13 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     }
                 }
             }
-            if save_current_view {
+            let is_reclick_refresh = ui.get_active_screen() == "browse"
+                && ui.get_active_category() == cat
+                && !ui.get_catalog_category_drilldown()
+                && ui.get_search_query().is_empty();
+            if is_reclick_refresh {
+                catalog_views.borrow_mut().retain(|k, _| !k.starts_with(cat.as_str()));
+            } else if save_current_view {
                 save_catalog_view(&ui, &catalog_paging, &cached_catalog, &catalog_views);
             }
             performer_search_generation.fetch_add(1, Ordering::SeqCst);
@@ -4940,6 +4955,7 @@ mod tests {
                 cards: Vec::new(),
                 items: Vec::new(),
                 page,
+                cached_at: std::time::Instant::now(),
                 total_count: 0,
                 has_more: false,
                 scroll_y: 0.0,

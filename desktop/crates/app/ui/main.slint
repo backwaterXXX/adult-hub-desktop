@@ -3028,6 +3028,18 @@ export component MainWindow inherits Window {
                 return accept;
             }
 
+            // Global Refresh: F5 or Ctrl+R
+            if (event.text == Key.F5 || (event.modifiers.control && (event.text == "r" || event.text == "R"))) {
+                if (root.active-screen == "home") {
+                    root.refresh-home();
+                    return accept;
+                }
+                if (root.active-screen == "browse") {
+                    root.filter-category(root.active-category);
+                    return accept;
+                }
+            }
+
             if (event.modifiers.control && (event.text == "f" || event.text == "F") && root.active-screen == "browse") {
                 if (root.active-category == "Performers" && !root.is-catalog-search-results) {
                     root.search-focus-target = "performer";

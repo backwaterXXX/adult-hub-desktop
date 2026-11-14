@@ -1020,6 +1020,8 @@ pub(crate) fn display_title(item: &TvItem) -> String {
         && !title.starts_with("direct:")
         && !title.eq_ignore_ascii_case("untitled")
         && !title.eq_ignore_ascii_case("untitled video")
+        && !title.eq_ignore_ascii_case("telegram")
+        && !title.eq_ignore_ascii_case("direct")
     {
         let (cleaned, _) = extract_title_tags_and_clean_title(title);
         if let Some(pos) = cleaned.rfind('.') {
@@ -1091,12 +1093,22 @@ pub(crate) fn display_title(item: &TvItem) -> String {
     }
 
     // 3. Kanał lub źródło wraz z datą albo innym dostępnym kontekstem
-    if item.is_telegram() || item.id.starts_with("telegram:") {
-        let parts: Vec<&str> = item.id.split(':').collect();
-        if parts.len() >= 3 {
-            let channel_raw = parts[1].replace(['_', '-'], " ");
+    let tg_source = if item.id.starts_with("telegram:") {
+        Some(item.id.as_str())
+    } else if let Some(ref pid) = item.provider_video_id {
+        Some(pid.as_str())
+    } else if item.is_telegram() {
+        Some(item.id.as_str())
+    } else {
+        None
+    };
+    if let Some(source) = tg_source {
+        let clean_source = source.strip_prefix("telegram:").unwrap_or(source);
+        let parts: Vec<&str> = clean_source.split(':').collect();
+        if parts.len() >= 2 {
+            let channel_raw = parts[0].replace(['_', '-'], " ");
             let channel = titlecase(&channel_raw);
-            let msg_id = parts[2];
+            let msg_id = parts[1];
             if !channel.is_empty() {
                 if let Some(year) = item.year {
                     return format!("{channel} ({year}) #{msg_id}");
@@ -2024,6 +2036,22 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(display_title(&fallback), "Video #2f0a29");
+
+        // 5. Telegram title rejection and provider_video_id fallback
+        let tg_raw = TvItem {
+            id: "007644c9fd474ad0f074454f3b9e8645".into(),
+            title: "telegram".into(),
+            provider_video_id: Some("lpsgpremium:9354:4935958067910018798".into()),
+            ..Default::default()
+        };
+        assert_eq!(display_title(&tg_raw), "Lpsgpremium #9354");
+
+        let tg_no_provider = TvItem {
+            id: "007644c9fd474ad0f074454f3b9e8645".into(),
+            title: "telegram".into(),
+            ..Default::default()
+        };
+        assert_eq!(display_title(&tg_no_provider), "Video #007644");
     }
 
     #[test]
