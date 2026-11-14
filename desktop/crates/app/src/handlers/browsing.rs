@@ -4171,7 +4171,9 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 && !ui.get_catalog_category_drilldown()
                 && ui.get_search_query().is_empty();
             if is_reclick_refresh {
-                catalog_views.borrow_mut().retain(|k, _| !k.starts_with(cat.as_str()));
+                catalog_views
+                    .borrow_mut()
+                    .retain(|k, _| !k.starts_with(cat.as_str()));
             } else if save_current_view {
                 save_catalog_view(&ui, &catalog_paging, &cached_catalog, &catalog_views);
             }
