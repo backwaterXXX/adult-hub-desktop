@@ -902,7 +902,9 @@ mod tests {
         assert!(is_host_allowed("release-assets.githubusercontent.com"));
         assert!(is_host_allowed("any-subdomain.githubusercontent.com"));
         assert!(is_host_allowed("github-cloud.s3.amazonaws.com"));
-        assert!(is_host_allowed("github-production-release-asset-2e65be.s3.amazonaws.com"));
+        assert!(is_host_allowed(
+            "github-production-release-asset-2e65be.s3.amazonaws.com"
+        ));
 
         // Disallowed hosts
         assert!(!is_host_allowed("fakegithub.com"));
