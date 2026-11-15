@@ -24,8 +24,12 @@ pub const EMBEDDED_RELEASE_PUBLIC_KEY: [u8; 32] = [
 /// Default allowed release hosts for HTTPS downloads.
 pub const DEFAULT_ALLOWED_HOSTS: &[&str] = &[
     "github.com",
+    "githubusercontent.com",
     "raw.githubusercontent.com",
     "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+    "github-cloud.s3.amazonaws.com",
+    "github-production-release-asset-2e65be.s3.amazonaws.com",
 ];
 
 #[derive(Debug, Error)]
@@ -386,13 +390,17 @@ pub fn download_and_verify_package(
 
     let client = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 10 {
+                return attempt.error("too many redirects");
+            }
             // Ensure redirects remain HTTPS and within allowed hosts
-            let host = attempt.url().host_str().unwrap_or("");
+            let host = attempt.url().host_str().unwrap_or("").to_string();
+            let is_https = attempt.url().scheme() == "https";
             let is_allowed = DEFAULT_ALLOWED_HOSTS
                 .iter()
                 .any(|allowed| host == *allowed || host.ends_with(&format!(".{allowed}")));
-            if !is_allowed || attempt.url().scheme() != "https" {
-                attempt.stop()
+            if !is_allowed || !is_https {
+                attempt.error(format!("disallowed redirect to {host}"))
             } else {
                 attempt.follow()
             }
@@ -877,5 +885,29 @@ mod tests {
                 return;
             }
         }
+    }
+
+    #[test]
+    fn test_allowed_release_hosts_matching() {
+        let is_host_allowed = |host: &str| -> bool {
+            DEFAULT_ALLOWED_HOSTS
+                .iter()
+                .any(|allowed| host == *allowed || host.ends_with(&format!(".{allowed}")))
+        };
+
+        // Allowed hosts & subdomains
+        assert!(is_host_allowed("github.com"));
+        assert!(is_host_allowed("raw.githubusercontent.com"));
+        assert!(is_host_allowed("objects.githubusercontent.com"));
+        assert!(is_host_allowed("release-assets.githubusercontent.com"));
+        assert!(is_host_allowed("any-subdomain.githubusercontent.com"));
+        assert!(is_host_allowed("github-cloud.s3.amazonaws.com"));
+        assert!(is_host_allowed("github-production-release-asset-2e65be.s3.amazonaws.com"));
+
+        // Disallowed hosts
+        assert!(!is_host_allowed("fakegithub.com"));
+        assert!(!is_host_allowed("github.com.attacker.com"));
+        assert!(!is_host_allowed("malicious-server.example.com"));
+        assert!(!is_host_allowed("s3.amazonaws.com"));
     }
 }

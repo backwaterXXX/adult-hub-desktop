@@ -2408,6 +2408,8 @@ export component MainWindow inherits Window {
     in-out property <[VideoCardData]> catalog-items: [];
     in-out property <[VideoCardRowData]> catalog-rows: [];
     in-out property <bool> compact-layout: false;
+    in-out property <bool> manual-nav-compact: false;
+    in-out property <bool> has-manual-nav-compact: false;
     in-out property <int> catalog-column-count: 3;
     in-out property <int> focused-card-index: -1;
     in-out property <bool> is-loading-catalog: false;
@@ -2934,7 +2936,15 @@ export component MainWindow inherits Window {
     callback adjust-volume(float);
 
     changed width => {
-        root.compact-layout = root.width < 1100px;
+        if (root.has-manual-nav-compact) {
+            if (root.width < 700px) {
+                root.compact-layout = true;
+            } else {
+                root.compact-layout = root.manual-nav-compact;
+            }
+        } else {
+            root.compact-layout = root.width < 1100px;
+        }
         if root.active-screen == "browse" && root.catalog-items.length > 0 {
             root.catalog-anchor-pending = true;
         }
@@ -3333,23 +3343,43 @@ export component MainWindow inherits Window {
                     padding-bottom: 12px;
                     spacing: 8px;
 
-                HorizontalLayout {
+                header-container := Rectangle {
                     height: 44px;
-                    spacing: 10px;
-                    alignment: root.compact-layout ? center : start;
-                    Image {
-                        source: @image-url("../../../assets/adult-hub-desktop.png");
-                        width: 30px;
-                        height: 30px;
-                        image-fit: contain;
+                    border-radius: 8px;
+                    background: header-touch.has-hover ? #ffffff0d : transparent;
+                    animate background { duration: 120ms; }
+
+                    header-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.compact-layout = !root.compact-layout;
+                            root.manual-nav-compact = root.compact-layout;
+                            root.has-manual-nav-compact = true;
+                        }
                     }
-                    Text {
-                        text: "Adult Hub";
-                        visible: !root.compact-layout;
-                        color: HubTheme.text-primary;
-                        font-size: 16px;
-                        font-weight: 600;
-                        vertical-alignment: center;
+
+                    HorizontalLayout {
+                        width: 100%;
+                        height: 100%;
+                        spacing: 10px;
+                        padding-left: root.compact-layout ? 0px : 8px;
+                        padding-right: root.compact-layout ? 0px : 8px;
+                        alignment: root.compact-layout ? center : start;
+                        Image {
+                            source: @image-url("../../../assets/adult-hub-desktop.png");
+                            width: 30px;
+                            height: 30px;
+                            image-fit: contain;
+                        }
+                        Text {
+                            text: "Adult Hub";
+                            visible: !root.compact-layout;
+                            color: header-touch.has-hover ? HubTheme.focus-ring : HubTheme.text-primary;
+                            font-size: 16px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            animate color { duration: 120ms; }
+                        }
                     }
                 }
 
@@ -9178,7 +9208,7 @@ export component MainWindow inherits Window {
 
         // Scrollable third-party license notices
         if root.licenses-visible : Rectangle {
-        z: 110;
+        z: 960;
         width: 100%;
         height: 100%;
         background: #000000d9;
@@ -9230,18 +9260,25 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                ScrollView {
+                licenses-scroll := ScrollView {
                     vertical-stretch: 1;
-                    vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
+                    vertical-scrollbar-policy: ScrollBarPolicy.always-on;
                     horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                    mouse-drag-pan-enabled: true;
 
-                    Text {
-                        width: parent.width;
-                        text: root.licenses-text;
-                        color: #e4e1e8;
-                        font-size: 12px;
-                        font-family: "Consolas";
-                        wrap: word-wrap;
+                    VerticalLayout {
+                        width: licenses-scroll.visible-width;
+                        alignment: start;
+                        padding-right: 12px;
+
+                        Text {
+                            width: 100%;
+                            text: root.licenses-text;
+                            color: #e4e1e8;
+                            font-size: 12px;
+                            font-family: "Consolas";
+                            wrap: word-wrap;
+                        }
                     }
                 }
             }
