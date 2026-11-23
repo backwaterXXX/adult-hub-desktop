@@ -220,17 +220,13 @@ fn load_performer_profile_data(ui: &MainWindow, ctx: &AppContext, p_key: String)
             p_key.as_str()
         };
         for item in cached.iter().chain(home.iter()) {
-            if item
-                .people
-                .iter()
-                .any(|p| {
-                    if is_name_ref {
-                        p.name.eq_ignore_ascii_case(unvetted_name)
-                    } else {
-                        p.id == p_key || p.name.eq_ignore_ascii_case(&p_key)
-                    }
-                })
-                && seen.insert(item.id.clone())
+            if item.people.iter().any(|p| {
+                if is_name_ref {
+                    p.name.eq_ignore_ascii_case(unvetted_name)
+                } else {
+                    p.id == p_key || p.name.eq_ignore_ascii_case(&p_key)
+                }
+            }) && seen.insert(item.id.clone())
             {
                 local_items.push(item.clone());
             }
@@ -268,13 +264,14 @@ fn load_performer_profile_data(ui: &MainWindow, ctx: &AppContext, p_key: String)
                                 });
                                 if let Some(photo_url) = detail.photo_url.as_deref() {
                                     if let Ok(resolved) = client.resolve_artwork_url(photo_url) {
-                                        person_image_bytes = crate::thumbnails::load_cached_image_bytes(&resolved)
-                                            .or_else(|| {
-                                                crate::thumbnails::fetch_and_cache_image_bytes(
-                                                    &resolved,
-                                                    Some(&session.access_token),
-                                                )
-                                            });
+                                        person_image_bytes =
+                                            crate::thumbnails::load_cached_image_bytes(&resolved)
+                                                .or_else(|| {
+                                                    crate::thumbnails::fetch_and_cache_image_bytes(
+                                                        &resolved,
+                                                        Some(&session.access_token),
+                                                    )
+                                                });
                                     }
                                 }
                             }

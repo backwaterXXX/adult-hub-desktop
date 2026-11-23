@@ -364,7 +364,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.set_hidden_channels_list(channels_model.into());
         }
         Err(err) => {
-            eprintln!("Failed to load configuration: {err}");
+            log::error!("Failed to load configuration: {err}");
             ui.set_status(format!("Failed to load configuration: {err}").into());
             ui.set_status_color(slint::Color::from_rgb_u8(240, 100, 100));
         }

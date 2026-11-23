@@ -319,8 +319,6 @@ impl PlaybackReporter {
         lock.as_ref().is_some_and(|s| s.item_id == item_id)
     }
 
-
-
     /// Asynchronously reports watch progress to Adult Hub server via background worker when in API mode.
     ///
     /// Ignores unknown duration (0) or position < 5s, captures (server_url, access_token) in each queued command,
@@ -426,7 +424,9 @@ impl PlaybackReporter {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             lock.take()
         };
-        if let Some((server_url, access_token, video_id, position_ms, duration_ms, is_played)) = pending {
+        if let Some((server_url, access_token, video_id, position_ms, duration_ms, is_played)) =
+            pending
+        {
             {
                 let mut last = self
                     .last_api_report_time
@@ -478,7 +478,12 @@ fn worker_loop(
         };
 
         if api_mode.load(Ordering::SeqCst)
-            && !matches!(cmd, ReportCommand::Shutdown | ReportCommand::Stop { .. } | ReportCommand::AdultHubProgress { .. })
+            && !matches!(
+                cmd,
+                ReportCommand::Shutdown
+                    | ReportCommand::Stop { .. }
+                    | ReportCommand::AdultHubProgress { .. }
+            )
         {
             continue;
         }
@@ -602,26 +607,28 @@ fn worker_loop(
                 position_ms,
                 duration_ms,
                 is_played,
-            } => {
-                match adult_hub_client::AdultHubClient::new(&server_url) {
-                    Ok(client) => {
-                        let authed = client.with_token(access_token);
-                        let req = adult_hub_client::WatchProgressUpsertRequest {
-                            position_seconds: position_ms / 1000,
-                            duration_seconds: duration_ms / 1000,
-                            is_played,
-                            played_percentage: None,
-                            last_watched_at: None,
-                        };
-                        if let Err(err) = authed.put_watch_progress(&video_id, &req) {
-                            log::warn!("Failed to report Adult Hub watch progress for {}: {}", video_id, err);
-                        }
-                    }
-                    Err(err) => {
-                        log::warn!("Invalid Adult Hub service URL: {}", err);
+            } => match adult_hub_client::AdultHubClient::new(&server_url) {
+                Ok(client) => {
+                    let authed = client.with_token(access_token);
+                    let req = adult_hub_client::WatchProgressUpsertRequest {
+                        position_seconds: position_ms / 1000,
+                        duration_seconds: duration_ms / 1000,
+                        is_played,
+                        played_percentage: None,
+                        last_watched_at: None,
+                    };
+                    if let Err(err) = authed.put_watch_progress(&video_id, &req) {
+                        log::warn!(
+                            "Failed to report Adult Hub watch progress for {}: {}",
+                            video_id,
+                            err
+                        );
                     }
                 }
-            }
+                Err(err) => {
+                    log::warn!("Invalid Adult Hub service URL: {}", err);
+                }
+            },
         }
     }
 }
@@ -947,7 +954,10 @@ mod tests {
                             let req_str = String::from_utf8_lossy(&buf[..n]);
                             for line in req_str.lines() {
                                 if line.to_ascii_lowercase().starts_with("authorization:") {
-                                    delivered_clone.lock().unwrap().push(line.trim().to_string());
+                                    delivered_clone
+                                        .lock()
+                                        .unwrap()
+                                        .push(line.trim().to_string());
                                 }
                             }
                             let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}";
@@ -1012,7 +1022,9 @@ mod tests {
                             if let Some(body_start) = req_str.find("\r\n\r\n") {
                                 let body = &req_str[body_start + 4..];
                                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(body) {
-                                    if let Some(pos) = val.get("position_seconds").and_then(|p| p.as_u64()) {
+                                    if let Some(pos) =
+                                        val.get("position_seconds").and_then(|p| p.as_u64())
+                                    {
                                         delivered_clone.lock().unwrap().push(pos);
                                     }
                                 }

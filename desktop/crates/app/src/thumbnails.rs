@@ -21,6 +21,7 @@ pub fn set_jellyfin_base_url(base_url: &str) {
     }
 }
 
+#[cfg(test)]
 pub fn current_jellyfin_base_url() -> String {
     jellyfin_base_url()
         .read()
@@ -567,10 +568,7 @@ fn send_image_request(
                 .map(|base| base.clone())
                 .unwrap_or_default();
             let server_origin_matches = if !jellyfin_base.is_empty() {
-                url::Url::parse(&jellyfin_base)
-                    .ok()
-                    .map(|u| u.origin())
-                    == Some(current.origin())
+                url::Url::parse(&jellyfin_base).ok().map(|u| u.origin()) == Some(current.origin())
             } else {
                 false
             };
@@ -1150,7 +1148,9 @@ mod tests {
         );
         assert_eq!(
             resolved_rel_api.as_deref(),
-            Some("https://resolver.example/prefix/api/v1/artwork/performer/stashdb%3Auuid-123/photo")
+            Some(
+                "https://resolver.example/prefix/api/v1/artwork/performer/stashdb%3Auuid-123/photo"
+            )
         );
     }
 
@@ -1180,7 +1180,11 @@ mod tests {
             Some("https://cdn.example/poster.jpg")
         );
         assert_eq!(
-            resolve_resolver_thumbnail_url_at("https://cdn.example/poster.jpg", "invalid-scheme://").as_deref(),
+            resolve_resolver_thumbnail_url_at(
+                "https://cdn.example/poster.jpg",
+                "invalid-scheme://"
+            )
+            .as_deref(),
             Some("https://cdn.example/poster.jpg")
         );
 
@@ -1227,7 +1231,10 @@ mod tests {
             None
         );
         assert_eq!(
-            resolve_resolver_thumbnail_url_at("ftp://cdn.example/poster.jpg", "https://resolver.example"),
+            resolve_resolver_thumbnail_url_at(
+                "ftp://cdn.example/poster.jpg",
+                "https://resolver.example"
+            ),
             None
         );
         assert_eq!(
@@ -1246,10 +1253,7 @@ mod tests {
             None
         );
         assert_eq!(
-            resolve_resolver_thumbnail_url_at(
-                "https://user:secret@cdn.example/poster.jpg",
-                ""
-            ),
+            resolve_resolver_thumbnail_url_at("https://user:secret@cdn.example/poster.jpg", ""),
             None
         );
         assert_eq!(
@@ -1271,7 +1275,10 @@ mod tests {
     #[test]
     fn jellyfin_base_url_getter_and_clearing() {
         super::set_jellyfin_base_url("https://jellyfin.example:8096/");
-        assert_eq!(super::current_jellyfin_base_url(), "https://jellyfin.example:8096");
+        assert_eq!(
+            super::current_jellyfin_base_url(),
+            "https://jellyfin.example:8096"
+        );
         super::set_jellyfin_base_url("");
         assert_eq!(super::current_jellyfin_base_url(), "");
     }
@@ -1374,7 +1381,9 @@ mod tests {
         });
 
         let result = super::send_image_request(
-            &format!("http://{addr_unconfigured}/Items/12345678-1234-4234-8234-123456789012/Images/Primary"),
+            &format!(
+                "http://{addr_unconfigured}/Items/12345678-1234-4234-8234-123456789012/Images/Primary"
+            ),
             Some("secret-jellyfin-token"),
         );
         assert!(result.is_ok());

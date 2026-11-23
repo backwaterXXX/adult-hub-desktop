@@ -802,7 +802,10 @@ fn handle_event(
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .take();
                 if let Some(ref item) = finished_item {
-                    let is_completed = crate::session::PlaybackSessionController::is_playback_completed(pos_ms, dur_ms, true);
+                    let is_completed =
+                        crate::session::PlaybackSessionController::is_playback_completed(
+                            pos_ms, dur_ms, true,
+                        );
                     session_ctrl.checkpoint_progress(item, pos_ms, dur_ms, is_completed);
                     reporter.report_api_progress(&item.id, pos_ms, dur_ms, is_completed);
                 }

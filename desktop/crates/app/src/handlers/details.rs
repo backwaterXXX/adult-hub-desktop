@@ -1101,7 +1101,9 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
 
             if is_api_mode {
                 let Some(slot) = detail_fav_in_flight.acquire(&id) else {
-                    log::debug!("Favorite toggle for {id} is already in-flight; ignoring duplicate click");
+                    log::debug!(
+                        "Favorite toggle for {id} is already in-flight; ignoring duplicate click"
+                    );
                     return;
                 };
 
@@ -1148,11 +1150,14 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                                         .lock()
                                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                                     for item in list.iter_mut() {
-                                        if item.id == item_id || canonical_vid.as_deref() == Some(&item.id) {
+                                        if item.id == item_id
+                                            || canonical_vid.as_deref() == Some(&item.id)
+                                        {
                                             item.is_favorite = actual_fav;
                                         }
                                     }
-                                    let cards = list.iter().map(tv_item_to_card).collect::<Vec<_>>();
+                                    let cards =
+                                        list.iter().map(tv_item_to_card).collect::<Vec<_>>();
                                     drop(list);
                                     set_catalog(&ui, cards);
                                     ui.set_status(
@@ -1171,7 +1176,9 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                         Err(err) => {
                             let _ = slint::invoke_from_event_loop(move || {
                                 if let Some(ui) = weak.upgrade() {
-                                    ui.set_status(format!("Could not update favorite: {err}").into());
+                                    ui.set_status(
+                                        format!("Could not update favorite: {err}").into(),
+                                    );
                                     ui.set_status_color(slint::Color::from_rgb_u8(244, 67, 54));
                                 }
                                 drop(slot);
@@ -1268,7 +1275,10 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
             let is_api_mode = local_store.is_adult_hub_api_enabled().unwrap_or(false);
             if is_api_mode {
                 let Some(slot) = player_fav_in_flight.acquire(&item.id) else {
-                    log::debug!("Player favorite toggle for {} is already in-flight", item.id);
+                    log::debug!(
+                        "Player favorite toggle for {} is already in-flight",
+                        item.id
+                    );
                     return;
                 };
 
@@ -1318,14 +1328,18 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                                         .as_mut()
                                     {
-                                        if ci.id == item_id || canonical_vid.as_deref() == Some(&ci.id) {
+                                        if ci.id == item_id
+                                            || canonical_vid.as_deref() == Some(&ci.id)
+                                        {
                                             ci.is_favorite = actual_fav;
                                         }
                                     }
                                     for catalog in [&cached_catalog, &home_catalog] {
                                         if let Ok(mut items) = catalog.lock() {
                                             for it in items.iter_mut() {
-                                                if it.id == item_id || canonical_vid.as_deref() == Some(&it.id) {
+                                                if it.id == item_id
+                                                    || canonical_vid.as_deref() == Some(&it.id)
+                                                {
                                                     it.is_favorite = actual_fav;
                                                 }
                                             }
@@ -1351,7 +1365,9 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                         Err(err) => {
                             let _ = slint::invoke_from_event_loop(move || {
                                 if let Some(ui) = weak.upgrade() {
-                                    ui.set_status(format!("Could not update favorite: {err}").into());
+                                    ui.set_status(
+                                        format!("Could not update favorite: {err}").into(),
+                                    );
                                     ui.set_status_color(slint::Color::from_rgb_u8(244, 67, 54));
                                     ui.invoke_refresh_home();
                                 }
@@ -1965,7 +1981,7 @@ mod tests {
 
         let store = LocalStore::open_in_memory().unwrap();
         // Default mode is false (Jellyfin mode)
-        assert_eq!(store.is_adult_hub_api_enabled().unwrap(), false);
+        assert!(!store.is_adult_hub_api_enabled().unwrap());
 
         let tg_item = TvItem::new("telegram:-100123:456:789", "Telegram Scene");
         let jf_guid_item = TvItem::new("a1b2c3d4-e5f6-7890-abcd-ef1234567890", "Jellyfin Scene");
@@ -1978,7 +1994,7 @@ mod tests {
 
         // Enable Adult Hub API mode
         store.set_adult_hub_api_enabled(true).unwrap();
-        assert_eq!(store.is_adult_hub_api_enabled().unwrap(), true);
+        assert!(store.is_adult_hub_api_enabled().unwrap());
 
         // In Adult Hub API mode, Telegram items ARE eligible for favorites
         assert!(!tg_item.id.is_empty());

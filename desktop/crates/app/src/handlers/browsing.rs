@@ -1215,8 +1215,8 @@ fn get_adult_hub_catalog_page(
 
     if category == "Performers" {
         let q_term = (!query.trim().is_empty()).then(|| query.trim());
-        let letter_term = (!filters.performer_letter.trim().is_empty())
-            .then(|| filters.performer_letter.trim());
+        let letter_term =
+            (!filters.performer_letter.trim().is_empty()).then(|| filters.performer_letter.trim());
         let perf_resp = client
             .get_performers(&adult_hub_client::CatalogPerformersQuery {
                 offset: Some(start_index as u64),
@@ -1237,11 +1237,7 @@ fn get_adult_hub_catalog_page(
 
         let total_count = perf_resp.total_count as usize;
         let has_more = perf_resp.has_more();
-        let items: Vec<TvItem> = perf_resp
-            .items
-            .into_iter()
-            .map(TvItem::from)
-            .collect();
+        let items: Vec<TvItem> = perf_resp.items.into_iter().map(TvItem::from).collect();
         let next_start = start_index + items.len();
 
         return Ok(CatalogPage {
@@ -1261,9 +1257,9 @@ fn get_adult_hub_catalog_page(
     let direction_str = if filters.descending { "desc" } else { "asc" };
 
     let q_term = (!query.trim().is_empty()).then(|| query.trim());
-    let category_filter = (!filters.genre.is_empty()).then(|| filters.genre.as_str());
-    let studio_filter = (!filters.studio.is_empty()).then(|| filters.studio.as_str());
-    let performer_filter = (!filters.performer.is_empty()).then(|| filters.performer.as_str());
+    let category_filter = (!filters.genre.is_empty()).then_some(filters.genre.as_str());
+    let studio_filter = (!filters.studio.is_empty()).then_some(filters.studio.as_str());
+    let performer_filter = (!filters.performer.is_empty()).then_some(filters.performer.as_str());
 
     let is_favorites_category = category == "Favorites";
     let is_fav_filter = is_favorites_category || filters.favorites_only;
@@ -1364,7 +1360,11 @@ fn get_catalog_page(
                 filters,
             );
         }
-        Err(e) => return Err(JellyfinError::Api(format!("Failed to read server API mode setting: {e}"))),
+        Err(e) => {
+            return Err(JellyfinError::Api(format!(
+                "Failed to read server API mode setting: {e}"
+            )));
+        }
         Ok(false) => {}
     }
     if category == "Watch History" {
@@ -2133,10 +2133,8 @@ pub fn current_nav_destination(
                     String::new()
                 }
             };
-            NavDestination::PerformerDetails {
-                name: key,
-            }
-        },
+            NavDestination::PerformerDetails { name: key }
+        }
         "studio-details" => NavDestination::StudioDetails {
             name: ui.get_studio_name().to_string(),
         },

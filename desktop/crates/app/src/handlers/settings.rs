@@ -1519,7 +1519,7 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
                     Err(err) => show_error(&ui, format!("Odrzucono import konfiguracji: {err}")),
                 }
             });
-        }
+    }
 
     // 15. Export Redacted Diagnostics
     {

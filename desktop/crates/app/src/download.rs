@@ -197,15 +197,6 @@ impl DownloadManager {
         }
     }
 
-    pub fn enqueue_task(
-        &self,
-        ctx: &crate::context::AppContext,
-        item: &TvItem,
-        target_path: PathBuf,
-    ) {
-        self.enqueue_task_with_rendition(ctx, item, target_path, None);
-    }
-
     pub fn enqueue_task_with_rendition(
         &self,
         ctx: &crate::context::AppContext,
@@ -872,7 +863,9 @@ fn refresh_adult_hub_session_if_current(
 
     // If another task already rotated the access token, adopt the new session
     if current_sess.access_token != failed_access_token {
-        crate::log_debug("download: session token was already rotated by another task; reusing new token");
+        crate::log_debug(
+            "download: session token was already rotated by another task; reusing new token",
+        );
         return Ok(current_sess);
     }
 
@@ -883,7 +876,10 @@ fn refresh_adult_hub_session_if_current(
     let hub_client = match adult_hub_client::AdultHubClient::new(&current_sess.server_url) {
         Ok(c) => c,
         Err(e) => {
-            crate::diagnostics::GLOBAL_LOG.w("Auth", &format!("Cannot create client for token refresh: {e}"));
+            crate::diagnostics::GLOBAL_LOG.w(
+                "Auth",
+                &format!("Cannot create client for token refresh: {e}"),
+            );
             return Err(RefreshSessionError::ClientError(e.to_string()));
         }
     };
@@ -893,7 +889,10 @@ fn refresh_adult_hub_session_if_current(
             current_sess.access_token = refreshed.access_token.clone();
             current_sess.refresh_token = Some(refreshed.refresh_token.clone());
             if let Err(e) = ctx.credential_store.save(current_sess.clone()) {
-                crate::diagnostics::GLOBAL_LOG.e("Auth", &format!("Failed to persist rotated credentials: {e}"));
+                crate::diagnostics::GLOBAL_LOG.e(
+                    "Auth",
+                    &format!("Failed to persist rotated credentials: {e}"),
+                );
                 return Err(RefreshSessionError::PersistenceFailed(format!(
                     "Failed to save refreshed credentials: {e}"
                 )));
@@ -903,19 +902,22 @@ fn refresh_adult_hub_session_if_current(
                 Some(current_sess.access_token.clone()),
             );
             crate::thumbnails::set_resolver_auth_token(Some(&current_sess.access_token));
-            ctx.phash_coord.update_auth(
-                &current_sess.server_url,
-                Some(&current_sess.access_token),
-            );
+            ctx.phash_coord
+                .update_auth(&current_sess.server_url, Some(&current_sess.access_token));
             Ok(current_sess)
         }
         Err(e) => {
             // Log refresh error category safely: no tokens
             crate::diagnostics::GLOBAL_LOG.w(
                 "Auth",
-                &format!("Adult Hub token refresh failed: category={}", safe_error_category(&e)),
+                &format!(
+                    "Adult Hub token refresh failed: category={}",
+                    safe_error_category(&e)
+                ),
             );
-            Err(RefreshSessionError::RefreshFailed(safe_error_category(&e).to_string()))
+            Err(RefreshSessionError::RefreshFailed(
+                safe_error_category(&e).to_string(),
+            ))
         }
     }
 }
@@ -1096,8 +1098,9 @@ fn run_download_task(
             *task
                 .status
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                DownloadStatus::Error("No stream path available in Adult Hub playback descriptor".into());
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = DownloadStatus::Error(
+                "No stream path available in Adult Hub playback descriptor".into(),
+            );
             manager.advance_queue_if_idle(ctx);
             return;
         };
@@ -1118,7 +1121,9 @@ fn run_download_task(
         // client.resolve_stream_url(stream_path) has already validated canonical origin
         // (including port canonicalization) and rejected embedded credentials.
         download_url = resolved;
-        let token_val = client.token().unwrap_or_else(|| active_session.access_token.clone());
+        let token_val = client
+            .token()
+            .unwrap_or_else(|| active_session.access_token.clone());
         download_headers.push(("Authorization".to_string(), format!("Bearer {token_val}")));
         source_identity = format!(
             "adulthub:{}|{}|{}|{}",
@@ -1198,14 +1203,22 @@ fn run_download_task(
     let mut existing_bytes = 0;
     if !is_local_file && task.temp_path.is_file() {
         if let Some(meta) = adult_hub_client::PartFileMetadata::read_from_sidecar(&task.temp_path) {
-            if meta.matches(&task.item_id, task.rendition_id.as_deref(), &source_identity) {
+            if meta.matches(
+                &task.item_id,
+                task.rendition_id.as_deref(),
+                &source_identity,
+            ) {
                 existing_bytes = task.temp_path.metadata().map(|m| m.len()).unwrap_or(0);
             } else {
-                crate::log_debug("download: partial file source identity or rendition mismatch; resetting to byte 0");
+                crate::log_debug(
+                    "download: partial file source identity or rendition mismatch; resetting to byte 0",
+                );
                 existing_bytes = 0;
             }
         } else {
-            crate::log_debug("download: partial file exists but Range metadata cannot be proven; resetting to byte 0");
+            crate::log_debug(
+                "download: partial file exists but Range metadata cannot be proven; resetting to byte 0",
+            );
             existing_bytes = 0;
         }
     }
@@ -1311,7 +1324,9 @@ fn run_download_task(
         }
     };
 
-    let send_stream_request = |range_offset: u64, hdrs: &[(String, String)]| -> reqwest::Result<reqwest::blocking::Response> {
+    let send_stream_request = |range_offset: u64,
+                               hdrs: &[(String, String)]|
+     -> reqwest::Result<reqwest::blocking::Response> {
         let mut req = client.get(&download_url);
         for (k, v) in hdrs {
             req = req.header(k, v);
@@ -1361,10 +1376,9 @@ fn run_download_task(
                 *task
                     .status
                     .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                    DownloadStatus::Error(format!(
-                        "Failed to persist refreshed session ({msg}). Please sign in again."
-                    ));
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = DownloadStatus::Error(
+                    format!("Failed to persist refreshed session ({msg}). Please sign in again."),
+                );
                 manager.advance_queue_if_idle(ctx);
                 return;
             }
@@ -1430,7 +1444,9 @@ fn run_download_task(
     // and the response was NOT already an HTTP 200 full stream, request the full stream from byte 0:
     if let adult_hub_client::RangeResumeOutcome::Restart { ref reason, .. } = outcome {
         if response.status() != reqwest::StatusCode::OK {
-            crate::log_debug(&format!("download: range resume incompatible ({reason}); requesting full stream from byte 0"));
+            crate::log_debug(&format!(
+                "download: range resume incompatible ({reason}); requesting full stream from byte 0"
+            ));
             match send_stream_request(0, &download_headers) {
                 Ok(retried) => {
                     response = retried;
@@ -1469,7 +1485,10 @@ fn run_download_task(
             manager.advance_queue_if_idle(ctx);
             return;
         }
-        adult_hub_client::RangeResumeOutcome::Resume { start_byte, total_bytes } => {
+        adult_hub_client::RangeResumeOutcome::Resume {
+            start_byte,
+            total_bytes,
+        } => {
             if response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
                 task.supports_range.store(true, Ordering::SeqCst);
             }
@@ -1482,7 +1501,10 @@ fn run_download_task(
             existing_bytes = start_byte;
             total_bytes
         }
-        adult_hub_client::RangeResumeOutcome::Restart { reason, total_bytes } => {
+        adult_hub_client::RangeResumeOutcome::Restart {
+            reason,
+            total_bytes,
+        } => {
             crate::log_debug(&format!(
                 "download: range resume incompatible ({reason}); restarting from byte 0"
             ));
@@ -1610,63 +1632,67 @@ fn run_download_task(
     }
 
     // Step 6: Direct stream download with Range append or fresh create
-    let mut out_file = if existing_bytes > 0 && response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
-        task.bytes_downloaded
-            .store(existing_bytes, Ordering::SeqCst);
-        let f = match std::fs::OpenOptions::new()
-            .append(true)
-            .open(&task.temp_path)
+    let mut out_file =
+        if existing_bytes > 0 && response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+            task.bytes_downloaded
+                .store(existing_bytes, Ordering::SeqCst);
+            let f = match std::fs::OpenOptions::new()
+                .append(true)
+                .open(&task.temp_path)
+            {
+                Ok(f) => f,
+                Err(e) => {
+                    *task
+                        .status
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        DownloadStatus::Error(format!("Cannot resume file: {e}"));
+                    manager.advance_queue_if_idle(ctx);
+                    return;
+                }
+            };
+            let meta = adult_hub_client::PartFileMetadata::new(
+                &task.item_id,
+                task.rendition_id.clone(),
+                &source_identity,
+                current_source_total,
+            );
+            let _ = meta.save_to_sidecar(&task.temp_path);
+            f
+        } else if response.status() == reqwest::StatusCode::OK
+            || response.status() == reqwest::StatusCode::PARTIAL_CONTENT
         {
-            Ok(f) => f,
-            Err(e) => {
-                *task
-                    .status
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                    DownloadStatus::Error(format!("Cannot resume file: {e}"));
-                manager.advance_queue_if_idle(ctx);
-                return;
-            }
+            task.bytes_downloaded.store(0, Ordering::SeqCst);
+            let f = match File::create(&task.temp_path) {
+                Ok(f) => f,
+                Err(e) => {
+                    *task
+                        .status
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        DownloadStatus::Error(format!("Cannot write file: {e}"));
+                    manager.advance_queue_if_idle(ctx);
+                    return;
+                }
+            };
+            let meta = adult_hub_client::PartFileMetadata::new(
+                &task.item_id,
+                task.rendition_id.clone(),
+                &source_identity,
+                current_source_total,
+            );
+            let _ = meta.save_to_sidecar(&task.temp_path);
+            f
+        } else {
+            *task
+                .status
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = DownloadStatus::Error(
+                format!("Server returned unexpected status {}", response.status()),
+            );
+            manager.advance_queue_if_idle(ctx);
+            return;
         };
-        let meta = adult_hub_client::PartFileMetadata::new(
-            &task.item_id,
-            task.rendition_id.clone(),
-            &source_identity,
-            current_source_total,
-        );
-        let _ = meta.save_to_sidecar(&task.temp_path);
-        f
-    } else if response.status() == reqwest::StatusCode::OK || response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
-        task.bytes_downloaded.store(0, Ordering::SeqCst);
-        let f = match File::create(&task.temp_path) {
-            Ok(f) => f,
-            Err(e) => {
-                *task
-                    .status
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                    DownloadStatus::Error(format!("Cannot write file: {e}"));
-                manager.advance_queue_if_idle(ctx);
-                return;
-            }
-        };
-        let meta = adult_hub_client::PartFileMetadata::new(
-            &task.item_id,
-            task.rendition_id.clone(),
-            &source_identity,
-            current_source_total,
-        );
-        let _ = meta.save_to_sidecar(&task.temp_path);
-        f
-    } else {
-        *task
-            .status
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            DownloadStatus::Error(format!("Server returned unexpected status {}", response.status()));
-        manager.advance_queue_if_idle(ctx);
-        return;
-    };
 
     let mut buffer = [0u8; 64 * 1024]; // 64 KB streaming buffer
     let mut downloaded_accum = task.bytes_downloaded.load(Ordering::SeqCst);

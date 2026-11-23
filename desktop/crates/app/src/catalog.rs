@@ -1287,8 +1287,7 @@ pub fn tv_item_to_card_for_server(item: &TvItem, server_url: &str) -> VideoCardD
                 && (trimmed.starts_with('/')
                     || trimmed.starts_with("http://")
                     || trimmed.starts_with("https://"))
-        })
-    {
+        }) {
         (
             item.primary_image_tag
                 .as_deref()

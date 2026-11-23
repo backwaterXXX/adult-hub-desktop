@@ -275,11 +275,7 @@ impl From<CatalogVideoItem> for TvItem {
         } else {
             Some("adult_hub".to_string())
         };
-        let provider_video_id = if is_tg {
-            Some(item.id.clone())
-        } else {
-            None
-        };
+        let provider_video_id = if is_tg { Some(item.id.clone()) } else { None };
 
         let people = item
             .performers
@@ -532,9 +528,8 @@ pub struct PaginatedPerformersResponse {
 
 impl PaginatedPerformersResponse {
     pub fn has_more(&self) -> bool {
-        self.has_more.unwrap_or_else(|| {
-            self.offset + (self.items.len() as u64) < self.total_count
-        })
+        self.has_more
+            .unwrap_or_else(|| self.offset + (self.items.len() as u64) < self.total_count)
     }
 }
 
@@ -568,7 +563,6 @@ pub struct PerformerDetailDto {
     #[serde(default)]
     pub aliases: Vec<String>,
 }
-
 
 // ---------------------------------------------------------------------------
 // Playback & Direct Play DTOs
@@ -634,11 +628,19 @@ impl PlaybackDescriptorDto {
         self.renditions
             .iter()
             .find(|r| r.is_default)
-            .and_then(|r| r.stream_path.as_deref().map(str::trim).filter(|p| !p.is_empty()))
+            .and_then(|r| {
+                r.stream_path
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty())
+            })
             .or_else(|| {
-                self.renditions
-                    .iter()
-                    .find_map(|r| r.stream_path.as_deref().map(str::trim).filter(|p| !p.is_empty()))
+                self.renditions.iter().find_map(|r| {
+                    r.stream_path
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|p| !p.is_empty())
+                })
             })
     }
 
@@ -694,7 +696,12 @@ impl PartFileMetadata {
     }
 
     /// Verifies if existing partial metadata matches the requested download parameters.
-    pub fn matches(&self, item_id: &str, rendition_id: Option<&str>, source_identity: &str) -> bool {
+    pub fn matches(
+        &self,
+        item_id: &str,
+        rendition_id: Option<&str>,
+        source_identity: &str,
+    ) -> bool {
         self.item_id == item_id
             && self.rendition_id.as_deref() == rendition_id
             && self.source_identity == source_identity
@@ -739,10 +746,7 @@ pub enum RangeResumeOutcome {
         total_bytes: Option<u64>,
     },
     /// Fatal or non-resumable status error
-    Error {
-        status: u16,
-        message: String,
-    },
+    Error { status: u16, message: String },
 }
 
 /// Evaluates server response against partial download state according to RFC 7233.
@@ -757,7 +761,10 @@ pub fn evaluate_range_resume(
     previous_total: Option<u64>,
 ) -> RangeResumeOutcome {
     if status_code == 206 {
-        let Some(cr) = content_range_header.map(str::trim).filter(|s| !s.is_empty()) else {
+        let Some(cr) = content_range_header
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
             return RangeResumeOutcome::Restart {
                 reason: "HTTP 206 missing Content-Range header".to_string(),
                 total_bytes: content_length.map(|l| existing_bytes + l),
@@ -823,7 +830,8 @@ pub fn evaluate_range_resume(
     } else if status_code == 200 {
         if existing_bytes > 0 {
             RangeResumeOutcome::Restart {
-                reason: "Server returned full file (HTTP 200 OK) ignoring Range request".to_string(),
+                reason: "Server returned full file (HTTP 200 OK) ignoring Range request"
+                    .to_string(),
                 total_bytes: content_length,
             }
         } else {
@@ -835,7 +843,8 @@ pub fn evaluate_range_resume(
     } else if status_code == 416 {
         if existing_bytes > 0 {
             RangeResumeOutcome::Restart {
-                reason: "Range not satisfiable (HTTP 416); local partial bytes out of bounds".to_string(),
+                reason: "Range not satisfiable (HTTP 416); local partial bytes out of bounds"
+                    .to_string(),
                 total_bytes: None,
             }
         } else {
@@ -984,7 +993,11 @@ impl AdultHubClient {
     }
 
     /// Configures default device credentials for authentication flows.
-    pub fn with_device_info(mut self, device_name: Option<String>, device_id: Option<String>) -> Self {
+    pub fn with_device_info(
+        mut self,
+        device_name: Option<String>,
+        device_id: Option<String>,
+    ) -> Self {
         self.device_name = device_name;
         self.device_id = device_id;
         self
@@ -1037,7 +1050,9 @@ impl AdultHubClient {
         let clean_base = self.service_url.normalized.trim_end_matches('/');
         let clean_endpoint = endpoint.trim_start_matches('/');
         if clean_endpoint.split('/').any(|s| s == "." || s == "..") {
-            return Err(AdultHubError::InvalidUrl("dot segments are forbidden in endpoints".into()));
+            return Err(AdultHubError::InvalidUrl(
+                "dot segments are forbidden in endpoints".into(),
+            ));
         }
         let raw = if clean_endpoint.is_empty() {
             clean_base.to_string()
@@ -1045,8 +1060,7 @@ impl AdultHubClient {
             format!("{clean_base}/{clean_endpoint}")
         };
 
-        let parsed = Url::parse(&raw)
-            .map_err(|e| AdultHubError::InvalidUrl(e.to_string()))?;
+        let parsed = Url::parse(&raw).map_err(|e| AdultHubError::InvalidUrl(e.to_string()))?;
 
         // Strict single-origin check: scheme, host, and port must match base URL
         if parsed.scheme() != self.parsed_base_url.scheme()
@@ -1060,7 +1074,9 @@ impl AdultHubClient {
         }
 
         if !parsed.username().is_empty() || parsed.password().is_some() {
-            return Err(AdultHubError::InvalidUrl("embedded credentials / userinfo are not permitted".into()));
+            return Err(AdultHubError::InvalidUrl(
+                "embedded credentials / userinfo are not permitted".into(),
+            ));
         }
 
         Ok(parsed)
@@ -1071,8 +1087,8 @@ impl AdultHubClient {
         let trimmed = path_or_url.trim();
         let lower = trimmed.to_ascii_lowercase();
         if lower.starts_with("http://") || lower.starts_with("https://") {
-            let parsed = Url::parse(trimmed)
-                .map_err(|e| AdultHubError::InvalidUrl(e.to_string()))?;
+            let parsed =
+                Url::parse(trimmed).map_err(|e| AdultHubError::InvalidUrl(e.to_string()))?;
             if parsed.scheme() != self.parsed_base_url.scheme()
                 || parsed.host_str() != self.parsed_base_url.host_str()
                 || parsed.port_or_known_default() != self.parsed_base_url.port_or_known_default()
@@ -1083,7 +1099,9 @@ impl AdultHubClient {
                 });
             }
             if !parsed.username().is_empty() || parsed.password().is_some() {
-                return Err(AdultHubError::InvalidUrl("embedded credentials / userinfo are not permitted".into()));
+                return Err(AdultHubError::InvalidUrl(
+                    "embedded credentials / userinfo are not permitted".into(),
+                ));
             }
             return Ok(parsed.to_string());
         }
@@ -1096,7 +1114,9 @@ impl AdultHubClient {
     pub fn get_video_artwork_url(&self, video_id: &str, kind: &str) -> Result<String> {
         let clean_kind = kind.trim();
         if !matches!(clean_kind, "poster" | "backdrop" | "thumb" | "primary") {
-            return Err(AdultHubError::InvalidUrl(format!("unsupported artwork kind: {kind}")));
+            return Err(AdultHubError::InvalidUrl(format!(
+                "unsupported artwork kind: {kind}"
+            )));
         }
         let enc_id = urlencoding(video_id);
         let path = format!("/api/v1/artwork/video/{enc_id}/{clean_kind}");
@@ -1129,7 +1149,9 @@ impl AdultHubClient {
             const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
             if let Some(cl) = res.content_length() {
                 if cl > MAX_IMAGE_BYTES as u64 {
-                    return Err(AdultHubError::PayloadTooLarge { limit: MAX_IMAGE_BYTES });
+                    return Err(AdultHubError::PayloadTooLarge {
+                        limit: MAX_IMAGE_BYTES,
+                    });
                 }
             }
             use std::io::Read;
@@ -1139,7 +1161,9 @@ impl AdultHubClient {
                 .read_to_end(&mut buffer)
                 .map_err(AdultHubError::Io)?;
             if buffer.len() > MAX_IMAGE_BYTES {
-                return Err(AdultHubError::PayloadTooLarge { limit: MAX_IMAGE_BYTES });
+                return Err(AdultHubError::PayloadTooLarge {
+                    limit: MAX_IMAGE_BYTES,
+                });
             }
             return Ok(buffer);
         }
@@ -1323,7 +1347,10 @@ impl AdultHubClient {
     // -----------------------------------------------------------------------
 
     /// Queries `GET /api/v1/catalog/videos` with pagination, sort, and search filters.
-    pub fn get_catalog_videos(&self, query: &CatalogVideosQuery) -> Result<PaginatedVideosResponse> {
+    pub fn get_catalog_videos(
+        &self,
+        query: &CatalogVideosQuery,
+    ) -> Result<PaginatedVideosResponse> {
         let mut url = self.build_url("/api/v1/catalog/videos")?;
         {
             let mut pairs = url.query_pairs_mut();
@@ -1441,7 +1468,10 @@ impl AdultHubClient {
     }
 
     /// Queries `GET /api/v1/catalog/performers` with pagination, filters, and sort.
-    pub fn get_performers(&self, query: &CatalogPerformersQuery) -> Result<PaginatedPerformersResponse> {
+    pub fn get_performers(
+        &self,
+        query: &CatalogPerformersQuery,
+    ) -> Result<PaginatedPerformersResponse> {
         let mut url = self.build_url("/api/v1/catalog/performers")?;
         {
             let mut pairs = url.query_pairs_mut();
@@ -1477,7 +1507,9 @@ impl AdultHubClient {
     pub fn get_performer_detail(&self, performer_id: &str) -> Result<PerformerDetailDto> {
         let clean_id = performer_id.trim();
         if clean_id.is_empty() {
-            return Err(AdultHubError::InvalidUrl("performer_id cannot be empty".into()));
+            return Err(AdultHubError::InvalidUrl(
+                "performer_id cannot be empty".into(),
+            ));
         }
 
         let encoded_id = urlencoding(clean_id);
@@ -1515,13 +1547,15 @@ impl AdultHubClient {
         self.handle_response(res)
     }
 
-
     // -----------------------------------------------------------------------
     // Catalog Channels
     // -----------------------------------------------------------------------
 
     /// Queries `GET /api/v1/catalog/channels` for registered Telegram source channels.
-    pub fn get_catalog_channels(&self, query: &CatalogChannelsQuery) -> Result<PaginatedChannelsResponse> {
+    pub fn get_catalog_channels(
+        &self,
+        query: &CatalogChannelsQuery,
+    ) -> Result<PaginatedChannelsResponse> {
         let mut url = self.build_url("/api/v1/catalog/channels")?;
         {
             let mut pairs = url.query_pairs_mut();
@@ -1541,12 +1575,13 @@ impl AdultHubClient {
         self.handle_response(res)
     }
 
-
     /// Queries `GET /api/v1/catalog/channels/{channel_id}` for channel detail and video counts.
     pub fn get_catalog_channel_detail(&self, channel_id: &str) -> Result<CatalogChannelItem> {
         let clean_id = channel_id.trim();
         if clean_id.is_empty() {
-            return Err(AdultHubError::InvalidUrl("channel_id cannot be empty".into()));
+            return Err(AdultHubError::InvalidUrl(
+                "channel_id cannot be empty".into(),
+            ));
         }
 
         let encoded_id = urlencoding(clean_id);
@@ -1557,7 +1592,6 @@ impl AdultHubClient {
         let res = req.send()?;
         self.handle_response(res)
     }
-
 
     /// Returns the current bearer authorization header value (e.g. `Bearer <token>`) if set.
     pub fn auth_header_value(&self) -> Option<String> {
@@ -1579,7 +1613,6 @@ impl AdultHubClient {
         self.handle_response(res)
     }
 
-
     /// Queries `GET /api/v1/playback/renditions/{video_id}` for playback descriptor and safe rendition choices.
     pub fn get_playback_descriptor(&self, video_id: &str) -> Result<PlaybackDescriptorDto> {
         let clean_id = video_id.trim();
@@ -1594,7 +1627,6 @@ impl AdultHubClient {
         self.handle_response(res)
     }
 
-
     /// Resolves and validates a stream path or absolute stream URL strictly enforcing single-origin policy.
     ///
     /// Rejects empty or whitespace paths with `AdultHubError::InvalidUrl`.
@@ -1604,12 +1636,14 @@ impl AdultHubClient {
     pub fn resolve_stream_url(&self, stream_path_or_url: &str) -> Result<String> {
         let trimmed = stream_path_or_url.trim();
         if trimmed.is_empty() {
-            return Err(AdultHubError::InvalidUrl("stream path cannot be empty".into()));
+            return Err(AdultHubError::InvalidUrl(
+                "stream path cannot be empty".into(),
+            ));
         }
         let lower = trimmed.to_ascii_lowercase();
         if lower.starts_with("http://") || lower.starts_with("https://") {
-            let parsed = Url::parse(trimmed)
-                .map_err(|e| AdultHubError::InvalidUrl(e.to_string()))?;
+            let parsed =
+                Url::parse(trimmed).map_err(|e| AdultHubError::InvalidUrl(e.to_string()))?;
             if parsed.scheme() != self.parsed_base_url.scheme()
                 || parsed.host_str() != self.parsed_base_url.host_str()
                 || parsed.port_or_known_default() != self.parsed_base_url.port_or_known_default()
@@ -1620,7 +1654,9 @@ impl AdultHubClient {
                 });
             }
             if !parsed.username().is_empty() || parsed.password().is_some() {
-                return Err(AdultHubError::InvalidUrl("embedded credentials / userinfo are not permitted".into()));
+                return Err(AdultHubError::InvalidUrl(
+                    "embedded credentials / userinfo are not permitted".into(),
+                ));
             }
             return Ok(parsed.to_string());
         }
@@ -1764,7 +1800,6 @@ impl AdultHubClient {
         self.handle_response(res)
     }
 
-
     /// Adds a video to authenticated user favorites (`PUT /api/v1/user/favorites/{video_id}`).
     pub fn add_favorite(&self, video_id: &str) -> Result<FavoriteStatusResponse> {
         let clean_id = video_id.trim();
@@ -1826,7 +1861,6 @@ impl AdultHubClient {
         let res = req.send()?;
         self.handle_response(res)
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -1866,7 +1900,10 @@ impl InFlightGuard {
     /// Returns `Some(InFlightSlot)` if no request is currently in flight for `key`,
     /// or `None` if an operation for `key` is already in flight.
     pub fn acquire(&self, key: &str) -> Option<InFlightSlot> {
-        let mut set = self.in_flight.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut set = self
+            .in_flight
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if set.insert(key.to_string()) {
             Some(InFlightSlot {
                 in_flight: self.in_flight.clone(),
@@ -1879,7 +1916,10 @@ impl InFlightGuard {
 
     /// Checks whether an operation is currently in flight for `key`.
     pub fn is_in_flight(&self, key: &str) -> bool {
-        let set = self.in_flight.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let set = self
+            .in_flight
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         set.contains(key)
     }
 }
@@ -1897,7 +1937,9 @@ mod tests {
 
     fn spawn_mock_server<F>(handler: F) -> (String, thread::JoinHandle<()>)
     where
-        F: FnOnce(&str, &str, &str) -> (u16, Vec<(&'static str, &'static str)>, String) + Send + 'static,
+        F: FnOnce(&str, &str, &str) -> (u16, Vec<(&'static str, &'static str)>, String)
+            + Send
+            + 'static,
     {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
         let addr = listener.local_addr().unwrap();
@@ -1947,7 +1989,10 @@ mod tests {
                 let b = String::from_utf8_lossy(&raw_data[start..]).to_string();
                 (h, b)
             } else {
-                (String::from_utf8_lossy(&raw_data).to_string(), String::new())
+                (
+                    String::from_utf8_lossy(&raw_data).to_string(),
+                    String::new(),
+                )
             };
             let first_line = headers_part.lines().next().unwrap_or("").to_string();
 
@@ -1971,7 +2016,9 @@ mod tests {
                 other => panic!("unmapped mock status code: {other}"),
             };
 
-            let has_content_length = headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-length"));
+            let has_content_length = headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("content-length"));
             let mut resp = format!("HTTP/1.1 {status_text}\r\nConnection: close\r\n");
             if !has_content_length {
                 resp.push_str(&format!("Content-Length: {}\r\n", response_body.len()));
@@ -2033,7 +2080,9 @@ mod tests {
 
         // Same-origin URL with embedded credentials / userinfo must be rejected
         assert!(matches!(
-            client.resolve_artwork_url("http://user:pass@localhost:8090/api/v1/artwork/video/123/poster"),
+            client.resolve_artwork_url(
+                "http://user:pass@localhost:8090/api/v1/artwork/video/123/poster"
+            ),
             Err(AdultHubError::InvalidUrl(_))
         ));
         assert!(matches!(
@@ -2044,7 +2093,8 @@ mod tests {
 
     #[test]
     fn test_artwork_url_construction_and_prefix_preservation() {
-        let client = AdultHubClient::new("http://localhost:8090/custom_prefix").expect("client init");
+        let client =
+            AdultHubClient::new("http://localhost:8090/custom_prefix").expect("client init");
 
         // Video artwork helper encodes video_id and preserves configured prefix
         let vid_url = client
@@ -2099,8 +2149,16 @@ mod tests {
         let fake_bytes = b"test-fake-artwork-binary-bytes-data".to_vec();
         let (server_url, handle) = spawn_mock_server(move |line, headers, _body| {
             assert!(line.starts_with("GET /api/v1/artwork/video/v1/poster HTTP/1.1"));
-            assert!(headers.to_ascii_lowercase().contains("authorization: bearer ah_test_token_art"));
-            (200, vec![("Content-Type", "image/jpeg")], "test-fake-artwork-binary-bytes-data".to_string())
+            assert!(
+                headers
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer ah_test_token_art")
+            );
+            (
+                200,
+                vec![("Content-Type", "image/jpeg")],
+                "test-fake-artwork-binary-bytes-data".to_string(),
+            )
         });
 
         let client = AdultHubClient::new(&server_url)
@@ -2118,7 +2176,11 @@ mod tests {
     fn test_artwork_wire_error_mappings() {
         // 404 Not Found mapping
         let (server_url_404, handle_404) = spawn_mock_server(|_line, _headers, _body| {
-            (404, vec![("Content-Type", "application/json")], r#"{"error": "Artwork not found", "code": "ARTWORK_NOT_FOUND"}"#.to_string())
+            (
+                404,
+                vec![("Content-Type", "application/json")],
+                r#"{"error": "Artwork not found", "code": "ARTWORK_NOT_FOUND"}"#.to_string(),
+            )
         });
         let client_404 = AdultHubClient::new(&server_url_404).expect("init client");
         let res_404 = client_404.get_artwork_bytes("/api/v1/artwork/video/absent/poster");
@@ -2127,21 +2189,38 @@ mod tests {
 
         // 401 Unauthorized mapping
         let (server_url_401, handle_401) = spawn_mock_server(|_line, _headers, _body| {
-            (401, vec![("Content-Type", "application/json")], r#"{"error": "Bearer token required"}"#.to_string())
+            (
+                401,
+                vec![("Content-Type", "application/json")],
+                r#"{"error": "Bearer token required"}"#.to_string(),
+            )
         });
         let client_401 = AdultHubClient::new(&server_url_401).expect("init client");
         let res_401 = client_401.get_artwork_bytes("/api/v1/artwork/video/v1/poster");
         handle_401.join().unwrap();
-        assert!(matches!(res_401, Err(AdultHubError::Unauthorized { status: 401, .. })));
+        assert!(matches!(
+            res_401,
+            Err(AdultHubError::Unauthorized { status: 401, .. })
+        ));
 
         // PayloadTooLarge mapping when Content-Length exceeds MAX_IMAGE_BYTES (10 MB)
         let (server_url_large, handle_large) = spawn_mock_server(|_line, _headers, _body| {
-            (200, vec![("Content-Type", "image/jpeg"), ("Content-Length", "10485761")], "fake".to_string())
+            (
+                200,
+                vec![
+                    ("Content-Type", "image/jpeg"),
+                    ("Content-Length", "10485761"),
+                ],
+                "fake".to_string(),
+            )
         });
         let client_large = AdultHubClient::new(&server_url_large).expect("init client");
         let res_large = client_large.get_artwork_bytes("/api/v1/artwork/video/v1/poster");
         handle_large.join().unwrap();
-        assert!(matches!(res_large, Err(AdultHubError::PayloadTooLarge { limit: 10485760 })));
+        assert!(matches!(
+            res_large,
+            Err(AdultHubError::PayloadTooLarge { limit: 10485760 })
+        ));
 
         // Oversized error body (e.g. 100 KiB) is safely bounded before diagnostic extraction
         let large_error_text = "E".repeat(100 * 1024);
@@ -2152,7 +2231,9 @@ mod tests {
         let res_err = client_err.get_artwork_bytes("/api/v1/artwork/video/v1/poster");
         handle_err.join().unwrap();
         match res_err {
-            Err(AdultHubError::Api { status, message, .. }) => {
+            Err(AdultHubError::Api {
+                status, message, ..
+            }) => {
                 assert_eq!(status, 500);
                 assert_eq!(message.len(), 250);
                 assert!(message.starts_with("EEE"));
@@ -2167,12 +2248,14 @@ mod tests {
             let (mut stream, _) = listener_ok.accept().expect("accept tcp");
             let mut buf = [0u8; 1024];
             let _ = std::io::Read::read(&mut stream, &mut buf);
-            let partial = "HTTP/1.1 200 OK\r\nContent-Length: 5000\r\nConnection: close\r\n\r\npart";
+            let partial =
+                "HTTP/1.1 200 OK\r\nContent-Length: 5000\r\nConnection: close\r\n\r\npart";
             let _ = std::io::Write::write_all(&mut stream, partial.as_bytes());
             let _ = std::io::Write::flush(&mut stream);
             drop(stream);
         });
-        let client_abort_ok = AdultHubClient::new(&format!("http://127.0.0.1:{port_ok}")).expect("init client");
+        let client_abort_ok =
+            AdultHubClient::new(&format!("http://127.0.0.1:{port_ok}")).expect("init client");
         let res_abort_ok = client_abort_ok.get_artwork_bytes("/api/v1/artwork/video/v1/poster");
         handle_abort_ok.join().unwrap();
         match res_abort_ok {
@@ -2192,7 +2275,8 @@ mod tests {
             let _ = std::io::Write::flush(&mut stream);
             drop(stream);
         });
-        let client_abort_err = AdultHubClient::new(&format!("http://127.0.0.1:{port_err}")).expect("init client");
+        let client_abort_err =
+            AdultHubClient::new(&format!("http://127.0.0.1:{port_err}")).expect("init client");
         let res_abort_err = client_abort_err.get_artwork_bytes("/api/v1/artwork/video/v1/poster");
         handle_abort_err.join().unwrap();
         match res_abort_err {
@@ -2282,7 +2366,10 @@ mod tests {
         assert!(!dto.supports_version("2.0.0"));
         assert!(dto.has_capability("desktop_api"));
         assert!(!dto.has_capability("direct_play"));
-        assert_eq!(dto.endpoints.get("auth").map(|s| s.as_str()), Some("/api/v1/auth"));
+        assert_eq!(
+            dto.endpoints.get("auth").map(|s| s.as_str()),
+            Some("/api/v1/auth")
+        );
     }
 
     #[test]
@@ -2371,8 +2458,14 @@ mod tests {
         assert_eq!(item.duration_seconds, 1845);
         assert_eq!(item.performers.len(), 1);
         assert_eq!(item.performers[0].name, "Alex Frost");
-        assert_eq!(item.user_state.as_ref().and_then(|s| s.is_favorite), Some(true));
-        assert_eq!(item.user_state.as_ref().and_then(|s| s.position_seconds), Some(450));
+        assert_eq!(
+            item.user_state.as_ref().and_then(|s| s.is_favorite),
+            Some(true)
+        );
+        assert_eq!(
+            item.user_state.as_ref().and_then(|s| s.position_seconds),
+            Some(450)
+        );
     }
 
     #[test]
@@ -2394,7 +2487,8 @@ mod tests {
             "has_more": false
         }"#;
 
-        let channels: PaginatedChannelsResponse = serde_json::from_str(raw).expect("parse channels");
+        let channels: PaginatedChannelsResponse =
+            serde_json::from_str(raw).expect("parse channels");
         assert_eq!(channels.total_count, 1);
         assert_eq!(channels.items.len(), 1);
         assert_eq!(channels.items[0].id, "-100123456789");
@@ -2414,7 +2508,10 @@ mod tests {
 
         let prob: ProblemDetails = serde_json::from_str(raw).expect("parse problem details");
         assert_eq!(prob.title.as_deref(), Some("Video Source Unavailable"));
-        assert_eq!(prob.detail.as_deref(), Some("None of the registered sources could be reached."));
+        assert_eq!(
+            prob.detail.as_deref(),
+            Some("None of the registered sources could be reached.")
+        );
         assert_eq!(prob.code.as_deref(), Some("SOURCE_UNAVAILABLE"));
     }
 
@@ -2434,7 +2531,11 @@ mod tests {
                 "capabilities": {"desktop_api": true},
                 "endpoints": {"auth": "/api/v1/auth", "catalog": "/api/v1/catalog"}
             }"#;
-            (200, vec![("Content-Type", "application/json")], body.to_string())
+            (
+                200,
+                vec![("Content-Type", "application/json")],
+                body.to_string(),
+            )
         });
 
         let client = AdultHubClient::new(&server_url).expect("init client");
@@ -2465,7 +2566,11 @@ mod tests {
                     "username": "bob"
                 }
             }"#;
-            (200, vec![("Content-Type", "application/json")], resp_body.to_string())
+            (
+                200,
+                vec![("Content-Type", "application/json")],
+                resp_body.to_string(),
+            )
         });
 
         let client = AdultHubClient::new(&server_url).expect("init client");
@@ -2492,7 +2597,11 @@ mod tests {
                 "expires_in": 900,
                 "refresh_token": "ah_ref_new"
             }"#;
-            (200, vec![("Content-Type", "application/json")], resp_body.to_string())
+            (
+                200,
+                vec![("Content-Type", "application/json")],
+                resp_body.to_string(),
+            )
         });
 
         let client = AdultHubClient::new(&server_url).expect("init client");
@@ -2508,7 +2617,11 @@ mod tests {
         let (server_url2, handle2) = spawn_mock_server(|line, _headers, body| {
             assert!(line.starts_with("POST /api/v1/auth/revoke HTTP/1.1"));
             assert!(body.contains("\"refresh_token\":\"ah_ref_new\""));
-            (200, vec![("Content-Type", "application/json")], r#"{"revoked": true}"#.to_string())
+            (
+                200,
+                vec![("Content-Type", "application/json")],
+                r#"{"revoked": true}"#.to_string(),
+            )
         });
 
         let client2 = AdultHubClient::new(&server_url2)
@@ -2536,7 +2649,11 @@ mod tests {
                 "expires_in": 900,
                 "refresh_token": "ah_ref_new_rotated"
             }"#;
-            (200, vec![("Content-Type", "application/json")], exact_real_backend_json.to_string())
+            (
+                200,
+                vec![("Content-Type", "application/json")],
+                exact_real_backend_json.to_string(),
+            )
         });
 
         let client = AdultHubClient::new(&server_url)
@@ -2555,7 +2672,10 @@ mod tests {
 
         // Stored bearer token must be updated to the newly rotated access token
         assert_eq!(client.token().as_deref(), Some("ah_tok_new_rotated"));
-        assert_eq!(client.auth_header_value().as_deref(), Some("Bearer ah_tok_new_rotated"));
+        assert_eq!(
+            client.auth_header_value().as_deref(),
+            Some("Bearer ah_tok_new_rotated")
+        );
     }
 
     #[test]
@@ -2581,7 +2701,11 @@ mod tests {
                 "limit": 25,
                 "has_more": true
             }"#;
-            (200, vec![("Content-Type", "application/json")], resp_body.to_string())
+            (
+                200,
+                vec![("Content-Type", "application/json")],
+                resp_body.to_string(),
+            )
         });
 
         let client = AdultHubClient::new(&server_url)
@@ -2614,13 +2738,19 @@ mod tests {
                 "duration_seconds": 1800,
                 "performers": []
             }"#;
-            (200, vec![("Content-Type", "application/json")], resp_body.to_string())
+            (
+                200,
+                vec![("Content-Type", "application/json")],
+                resp_body.to_string(),
+            )
         });
 
         let client2 = AdultHubClient::new(&server_url2)
             .expect("init")
             .with_token("my_active_token");
-        let detail = client2.get_catalog_video_detail("telegram:-100:456").expect("video detail");
+        let detail = client2
+            .get_catalog_video_detail("telegram:-100:456")
+            .expect("video detail");
         handle2.join().unwrap();
 
         assert_eq!(detail.id, "telegram:-100:456");
@@ -2630,7 +2760,9 @@ mod tests {
     #[test]
     fn test_wire_catalog_channels_and_detail() {
         let (server_url, handle) = spawn_mock_server(|line, headers, _body| {
-            assert!(line.starts_with("GET /api/v1/catalog/channels?limit=10&sort=video_count HTTP/1.1"));
+            assert!(
+                line.starts_with("GET /api/v1/catalog/channels?limit=10&sort=video_count HTTP/1.1")
+            );
             assert!(headers.contains("authorization: Bearer tok_channels"));
 
             let resp_body = r#"{
@@ -2647,7 +2779,11 @@ mod tests {
                 "limit": 10,
                 "has_more": false
             }"#;
-            (200, vec![("Content-Type", "application/json")], resp_body.to_string())
+            (
+                200,
+                vec![("Content-Type", "application/json")],
+                resp_body.to_string(),
+            )
         });
 
         let client = AdultHubClient::new(&server_url)
@@ -2677,13 +2813,19 @@ mod tests {
                 "video_count": 55,
                 "is_enabled": true
             }"#;
-            (200, vec![("Content-Type", "application/json")], resp_body.to_string())
+            (
+                200,
+                vec![("Content-Type", "application/json")],
+                resp_body.to_string(),
+            )
         });
 
         let client2 = AdultHubClient::new(&server_url2)
             .expect("init")
             .with_token("tok_channels");
-        let ch = client2.get_catalog_channel_detail("-100123").expect("channel detail");
+        let ch = client2
+            .get_catalog_channel_detail("-100123")
+            .expect("channel detail");
         handle2.join().unwrap();
 
         assert_eq!(ch.id, "-100123");
@@ -2835,7 +2977,10 @@ mod tests {
 
         let desc: PlaybackDescriptorDto = serde_json::from_str(raw).expect("parse descriptor");
         assert_eq!(desc.video_id, "telegram:canonical_vid_1");
-        assert_eq!(desc.default_stream_path(), Some("/api/v1/playback/stream/telegram:canonical_vid_1"));
+        assert_eq!(
+            desc.default_stream_path(),
+            Some("/api/v1/playback/stream/telegram:canonical_vid_1")
+        );
         assert_eq!(desc.renditions.len(), 2);
 
         let alt = desc.rendition_by_id("alt_720").expect("find alt");
@@ -2860,13 +3005,23 @@ mod tests {
 
         // Same origin relative stream path resolves safely
         let rel_path = "/api/v1/playback/stream/telegram:vid_1";
-        let resolved = client.resolve_stream_url(rel_path).expect("resolve stream path");
-        assert_eq!(resolved, "http://localhost:8090/api/v1/playback/stream/telegram:vid_1");
+        let resolved = client
+            .resolve_stream_url(rel_path)
+            .expect("resolve stream path");
+        assert_eq!(
+            resolved,
+            "http://localhost:8090/api/v1/playback/stream/telegram:vid_1"
+        );
 
         // Same origin absolute stream path resolves safely
         let same_origin = "http://localhost:8090/api/v1/playback/stream/telegram:vid_1";
-        let resolved2 = client.resolve_stream_url(same_origin).expect("resolve stream URL");
-        assert_eq!(resolved2, "http://localhost:8090/api/v1/playback/stream/telegram:vid_1");
+        let resolved2 = client
+            .resolve_stream_url(same_origin)
+            .expect("resolve stream URL");
+        assert_eq!(
+            resolved2,
+            "http://localhost:8090/api/v1/playback/stream/telegram:vid_1"
+        );
     }
 
     #[test]
@@ -2881,14 +3036,20 @@ mod tests {
                 "pinned_representation_required": true,
                 "supports_head_requests": true
             }"#;
-            (200, vec![("Content-Type", "application/json")], body.to_string())
+            (
+                200,
+                vec![("Content-Type", "application/json")],
+                body.to_string(),
+            )
         });
 
         let client = AdultHubClient::new(&server_url)
             .expect("init client")
             .with_token("ah_tok_stream_secret");
 
-        let caps = client.get_playback_capabilities().expect("get capabilities");
+        let caps = client
+            .get_playback_capabilities()
+            .expect("get capabilities");
         handle.join().unwrap();
 
         assert_eq!(caps.streaming_protocols, vec!["http_range_rfc7233"]);
@@ -2922,23 +3083,37 @@ mod tests {
                     }
                 ]
             }"#;
-            (200, vec![("Content-Type", "application/json")], body.to_string())
+            (
+                200,
+                vec![("Content-Type", "application/json")],
+                body.to_string(),
+            )
         });
 
         let client = AdultHubClient::new(&server_url)
             .expect("init client")
             .with_token("ah_tok_stream_secret");
 
-        let desc = client.get_playback_descriptor("telegram:vid_42").expect("get descriptor");
+        let desc = client
+            .get_playback_descriptor("telegram:vid_42")
+            .expect("get descriptor");
         handle.join().unwrap();
 
         assert_eq!(desc.video_id, "telegram:vid_42");
-        assert_eq!(desc.default_stream_path(), Some("/api/v1/playback/stream/telegram:vid_42"));
+        assert_eq!(
+            desc.default_stream_path(),
+            Some("/api/v1/playback/stream/telegram:vid_42")
+        );
         assert_eq!(desc.renditions.len(), 1);
         assert!(desc.renditions[0].is_default);
 
-        let full_stream_url = client.resolve_stream_url(desc.default_stream_path().unwrap()).expect("resolve stream");
-        assert_eq!(full_stream_url, format!("{server_url}/api/v1/playback/stream/telegram:vid_42"));
+        let full_stream_url = client
+            .resolve_stream_url(desc.default_stream_path().unwrap())
+            .expect("resolve stream");
+        assert_eq!(
+            full_stream_url,
+            format!("{server_url}/api/v1/playback/stream/telegram:vid_42")
+        );
     }
 
     #[test]
@@ -2947,17 +3122,28 @@ mod tests {
             .expect("client init")
             .with_token("ah_tok_test_auth");
 
-        assert_eq!(client.auth_header_value().as_deref(), Some("Bearer ah_tok_test_auth"));
+        assert_eq!(
+            client.auth_header_value().as_deref(),
+            Some("Bearer ah_tok_test_auth")
+        );
 
         // GET request with range
         let req_builder = client
-            .build_stream_request("/api/v1/playback/stream/telegram:vid_1", Some("bytes=0-1048575"))
+            .build_stream_request(
+                "/api/v1/playback/stream/telegram:vid_1",
+                Some("bytes=0-1048575"),
+            )
             .expect("build GET stream request");
         let req = req_builder.build().expect("build request");
         assert_eq!(req.method(), reqwest::Method::GET);
-        assert_eq!(req.url().as_str(), "http://localhost:8090/api/v1/playback/stream/telegram:vid_1");
         assert_eq!(
-            req.headers().get("authorization").and_then(|h| h.to_str().ok()),
+            req.url().as_str(),
+            "http://localhost:8090/api/v1/playback/stream/telegram:vid_1"
+        );
+        assert_eq!(
+            req.headers()
+                .get("authorization")
+                .and_then(|h| h.to_str().ok()),
             Some("Bearer ah_tok_test_auth")
         );
         assert_eq!(
@@ -2973,7 +3159,10 @@ mod tests {
         assert_eq!(head_req.method(), reqwest::Method::HEAD);
         assert_eq!(head_req.headers().get("range"), None);
         assert_eq!(
-            head_req.headers().get("authorization").and_then(|h| h.to_str().ok()),
+            head_req
+                .headers()
+                .get("authorization")
+                .and_then(|h| h.to_str().ok()),
             Some("Bearer ah_tok_test_auth")
         );
 
@@ -2989,9 +3178,18 @@ mod tests {
             .with_token("bearer_secret_123");
 
         // resolve_stream_url rejects empty and whitespace paths
-        assert!(matches!(client.resolve_stream_url(""), Err(AdultHubError::InvalidUrl(_))));
-        assert!(matches!(client.resolve_stream_url("   "), Err(AdultHubError::InvalidUrl(_))));
-        assert!(matches!(client.resolve_stream_url("\t\n"), Err(AdultHubError::InvalidUrl(_))));
+        assert!(matches!(
+            client.resolve_stream_url(""),
+            Err(AdultHubError::InvalidUrl(_))
+        ));
+        assert!(matches!(
+            client.resolve_stream_url("   "),
+            Err(AdultHubError::InvalidUrl(_))
+        ));
+        assert!(matches!(
+            client.resolve_stream_url("\t\n"),
+            Err(AdultHubError::InvalidUrl(_))
+        ));
 
         // build_stream_request refuses to build request for empty or whitespace paths
         let stream_empty = client.build_stream_request("", None);
@@ -3045,7 +3243,9 @@ mod tests {
                     width: Some(1280),
                     height: Some(720),
                     is_default: false,
-                    stream_path: Some("/api/v1/playback/stream/vid_test?rendition_id=valid_alt".into()),
+                    stream_path: Some(
+                        "/api/v1/playback/stream/vid_test?rendition_id=valid_alt".into(),
+                    ),
                 },
             ],
         };
@@ -3065,18 +3265,16 @@ mod tests {
             file_size_bytes: None,
             width: None,
             height: None,
-            renditions: vec![
-                PlaybackRenditionDto {
-                    id: "r1".into(),
-                    label: "R1".into(),
-                    mime_type: None,
-                    file_size_bytes: None,
-                    width: None,
-                    height: None,
-                    is_default: true,
-                    stream_path: Some("".into()),
-                },
-            ],
+            renditions: vec![PlaybackRenditionDto {
+                id: "r1".into(),
+                label: "R1".into(),
+                mime_type: None,
+                file_size_bytes: None,
+                width: None,
+                height: None,
+                is_default: true,
+                stream_path: Some("".into()),
+            }],
         };
         assert_eq!(all_empty.default_stream_path(), None);
     }
@@ -3092,7 +3290,10 @@ mod tests {
 
         // Ordinary stream requests built with build_stream_request have no per-request timeout capping playback
         let get_req = client
-            .build_stream_request("/api/v1/playback/stream/telegram:vid_long", Some("bytes=0-"))
+            .build_stream_request(
+                "/api/v1/playback/stream/telegram:vid_long",
+                Some("bytes=0-"),
+            )
             .expect("build stream get")
             .build()
             .expect("build get req");
@@ -3112,29 +3313,46 @@ mod tests {
 
         // Case-insensitive same-origin scheme and host in resolve_stream_url
         let upper_same_origin = "HTTP://localhost:8090/api/v1/playback/stream/vid_1";
-        let res = client.resolve_stream_url(upper_same_origin).expect("resolve same origin upper");
+        let res = client
+            .resolve_stream_url(upper_same_origin)
+            .expect("resolve same origin upper");
         assert_eq!(res, "http://localhost:8090/api/v1/playback/stream/vid_1");
 
         // Case-insensitive same-origin scheme in resolve_artwork_url
         let upper_art = "HTTP://localhost:8090/api/v1/artwork/video/1/poster";
-        let art_res = client.resolve_artwork_url(upper_art).expect("resolve art upper");
-        assert_eq!(art_res, "http://localhost:8090/api/v1/artwork/video/1/poster");
+        let art_res = client
+            .resolve_artwork_url(upper_art)
+            .expect("resolve art upper");
+        assert_eq!(
+            art_res,
+            "http://localhost:8090/api/v1/artwork/video/1/poster"
+        );
 
         // Case-insensitive cross-origin URL is rejected as OriginMismatch (not prepended to base)
         let hostile_upper = "HTTP://EVIL.COM/malicious_stream";
         let hostile_res = client.resolve_stream_url(hostile_upper);
-        assert!(matches!(hostile_res, Err(AdultHubError::OriginMismatch { .. })));
+        assert!(matches!(
+            hostile_res,
+            Err(AdultHubError::OriginMismatch { .. })
+        ));
 
         let hostile_art = "HTTPS://EVIL.COM/malicious_art";
         let hostile_art_res = client.resolve_artwork_url(hostile_art);
-        assert!(matches!(hostile_art_res, Err(AdultHubError::OriginMismatch { .. })));
+        assert!(matches!(
+            hostile_art_res,
+            Err(AdultHubError::OriginMismatch { .. })
+        ));
     }
 
     #[test]
     fn test_serialization_error_mapping_on_malformed_json() {
         let (server_url, handle) = spawn_mock_server(|_line, _headers, _body| {
             // Returns 200 OK with malformed JSON body
-            (200, vec![("Content-Type", "application/json")], "{malformed-json-here".to_string())
+            (
+                200,
+                vec![("Content-Type", "application/json")],
+                "{malformed-json-here".to_string(),
+            )
         });
 
         let client = AdultHubClient::new(&server_url).expect("init client");
@@ -3152,17 +3370,25 @@ mod tests {
     #[test]
     fn test_playback_descriptor_urlencoding_special_characters() {
         let (server_url, handle) = spawn_mock_server(|line, _headers, _body| {
-            assert!(line.starts_with("GET /api/v1/playback/renditions/telegram%3Ach%231%3Avid%2042 HTTP/1.1"));
+            assert!(line.starts_with(
+                "GET /api/v1/playback/renditions/telegram%3Ach%231%3Avid%2042 HTTP/1.1"
+            ));
             let body = r#"{
                 "video_id": "telegram:ch#1:vid 42",
                 "stream_path": "/api/v1/playback/stream/telegram:ch#1:vid 42",
                 "renditions": []
             }"#;
-            (200, vec![("Content-Type", "application/json")], body.to_string())
+            (
+                200,
+                vec![("Content-Type", "application/json")],
+                body.to_string(),
+            )
         });
 
         let client = AdultHubClient::new(&server_url).expect("init client");
-        let desc = client.get_playback_descriptor("telegram:ch#1:vid 42").expect("descriptor");
+        let desc = client
+            .get_playback_descriptor("telegram:ch#1:vid 42")
+            .expect("descriptor");
         handle.join().unwrap();
 
         assert_eq!(desc.video_id, "telegram:ch#1:vid 42");
@@ -3191,7 +3417,10 @@ mod tests {
             .with_token("stream_secret_tok");
 
         let res = client
-            .build_stream_request("/api/v1/playback/stream/telegram:vid_206", Some("bytes=0-15"))
+            .build_stream_request(
+                "/api/v1/playback/stream/telegram:vid_206",
+                Some("bytes=0-15"),
+            )
             .expect("build stream request")
             .send()
             .expect("send request");
@@ -3199,11 +3428,15 @@ mod tests {
 
         assert_eq!(res.status().as_u16(), 206);
         assert_eq!(
-            res.headers().get("content-range").and_then(|v| v.to_str().ok()),
+            res.headers()
+                .get("content-range")
+                .and_then(|v| v.to_str().ok()),
             Some("bytes 0-15/1048576")
         );
         assert_eq!(
-            res.headers().get("content-type").and_then(|v| v.to_str().ok()),
+            res.headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
             Some("video/mp4")
         );
         let body = res.text().expect("response text");
@@ -3241,11 +3474,15 @@ mod tests {
 
         assert_eq!(res.status().as_u16(), 200);
         assert_eq!(
-            res.headers().get("accept-ranges").and_then(|v| v.to_str().ok()),
+            res.headers()
+                .get("accept-ranges")
+                .and_then(|v| v.to_str().ok()),
             Some("bytes")
         );
         assert_eq!(
-            res.headers().get("content-length").and_then(|v| v.to_str().ok()),
+            res.headers()
+                .get("content-length")
+                .and_then(|v| v.to_str().ok()),
             Some("104857600")
         );
         assert!(res.bytes().expect("read bytes").is_empty());
@@ -3273,7 +3510,10 @@ mod tests {
             .with_token("stream_secret_tok");
 
         let res = client
-            .build_stream_request("/api/v1/playback/stream/telegram:vid_416", Some("bytes=9999999-"))
+            .build_stream_request(
+                "/api/v1/playback/stream/telegram:vid_416",
+                Some("bytes=9999999-"),
+            )
             .expect("build stream request")
             .send()
             .expect("send request");
@@ -3281,7 +3521,9 @@ mod tests {
 
         assert_eq!(res.status().as_u16(), 416);
         assert_eq!(
-            res.headers().get("content-range").and_then(|v| v.to_str().ok()),
+            res.headers()
+                .get("content-range")
+                .and_then(|v| v.to_str().ok()),
             Some("bytes */1024")
         );
     }
@@ -3313,7 +3555,10 @@ mod tests {
 
             assert_eq!(stream_res.status().as_u16(), redirect_code);
             assert_eq!(
-                stream_res.headers().get("location").and_then(|v| v.to_str().ok()),
+                stream_res
+                    .headers()
+                    .get("location")
+                    .and_then(|v| v.to_str().ok()),
                 Some("https://evil-cross-origin.com/steal_token")
             );
         }
@@ -3373,7 +3618,11 @@ mod tests {
         let err3 = client3.get_playback_capabilities().unwrap_err();
         handle3.join().unwrap();
         match err3 {
-            AdultHubError::Api { status, message, code } => {
+            AdultHubError::Api {
+                status,
+                message,
+                code,
+            } => {
                 assert_eq!(status, 502);
                 assert!(message.contains("All upstream candidates failed"));
                 assert_eq!(code.as_deref(), Some("SOURCE_UNAVAILABLE"));
@@ -3418,8 +3667,14 @@ mod tests {
         assert_eq!(tv_item.id, "telegram:chan_1:msg_42:uid_abc");
         assert_eq!(tv_item.title, "Canonical Video Title");
         assert_eq!(tv_item.source_provider.as_deref(), Some("telegram"));
-        assert_eq!(tv_item.provider_video_id.as_deref(), Some("telegram:chan_1:msg_42:uid_abc"));
-        assert_eq!(tv_item.overview.as_deref(), Some("A canonical test plot summary."));
+        assert_eq!(
+            tv_item.provider_video_id.as_deref(),
+            Some("telegram:chan_1:msg_42:uid_abc")
+        );
+        assert_eq!(
+            tv_item.overview.as_deref(),
+            Some("A canonical test plot summary.")
+        );
         assert_eq!(tv_item.year, Some(2026));
         assert_eq!(tv_item.runtime_ticks, Some(120 * 10_000_000));
         assert_eq!(tv_item.genres, vec!["HD", "Action"]);
@@ -3427,11 +3682,20 @@ mod tests {
         assert_eq!(tv_item.studios, vec!["Studio Prime"]);
         assert_eq!(tv_item.people.len(), 1);
         assert_eq!(tv_item.people[0].name, "Actor One");
-        assert_eq!(tv_item.people[0].primary_image_tag.as_deref(), Some("/api/v1/artwork/actor1.jpg"));
-        assert_eq!(tv_item.primary_image_tag.as_deref(), Some("/api/v1/artwork/poster.jpg"));
-        assert_eq!(tv_item.backdrop_image_tag.as_deref(), Some("/api/v1/artwork/backdrop.jpg"));
-        assert_eq!(tv_item.is_favorite, true);
-        assert_eq!(tv_item.is_played, false);
+        assert_eq!(
+            tv_item.people[0].primary_image_tag.as_deref(),
+            Some("/api/v1/artwork/actor1.jpg")
+        );
+        assert_eq!(
+            tv_item.primary_image_tag.as_deref(),
+            Some("/api/v1/artwork/poster.jpg")
+        );
+        assert_eq!(
+            tv_item.backdrop_image_tag.as_deref(),
+            Some("/api/v1/artwork/backdrop.jpg")
+        );
+        assert!(tv_item.is_favorite);
+        assert!(!tv_item.is_played);
         assert_eq!(tv_item.playback_position_ticks, 60 * 10_000_000);
         assert_eq!(tv_item.played_percentage, Some(50.0));
         assert_eq!(tv_item.file_size_bytes, Some(104857600));
@@ -3479,7 +3743,8 @@ mod tests {
             (
                 200,
                 vec![("Content-Type", "application/json")],
-                r#"{"items": [], "total_count": 0, "offset": 0, "limit": 16, "has_more": false}"#.to_string(),
+                r#"{"items": [], "total_count": 0, "offset": 0, "limit": 16, "has_more": false}"#
+                    .to_string(),
             )
         });
 
@@ -3500,11 +3765,14 @@ mod tests {
     fn test_catalog_videos_direction_query_construction() {
         // Test "asc"
         let (server_url_asc, handle_asc) = spawn_mock_server(|line, _headers, _body| {
-            assert!(line.starts_with("GET /api/v1/catalog/videos?offset=0&limit=16&sort=latest&direction=asc "));
+            assert!(line.starts_with(
+                "GET /api/v1/catalog/videos?offset=0&limit=16&sort=latest&direction=asc "
+            ));
             (
                 200,
                 vec![("Content-Type", "application/json")],
-                r#"{"items": [], "total_count": 0, "offset": 0, "limit": 16, "has_more": false}"#.to_string(),
+                r#"{"items": [], "total_count": 0, "offset": 0, "limit": 16, "has_more": false}"#
+                    .to_string(),
             )
         });
         let client_asc = AdultHubClient::new(&server_url_asc).expect("init client");
@@ -3521,11 +3789,14 @@ mod tests {
 
         // Test "desc"
         let (server_url_desc, handle_desc) = spawn_mock_server(|line, _headers, _body| {
-            assert!(line.starts_with("GET /api/v1/catalog/videos?offset=0&limit=16&sort=title&direction=desc "));
+            assert!(line.starts_with(
+                "GET /api/v1/catalog/videos?offset=0&limit=16&sort=title&direction=desc "
+            ));
             (
                 200,
                 vec![("Content-Type", "application/json")],
-                r#"{"items": [], "total_count": 0, "offset": 0, "limit": 16, "has_more": false}"#.to_string(),
+                r#"{"items": [], "total_count": 0, "offset": 0, "limit": 16, "has_more": false}"#
+                    .to_string(),
             )
         });
         let client_desc = AdultHubClient::new(&server_url_desc).expect("init client");
@@ -3547,7 +3818,8 @@ mod tests {
             (
                 200,
                 vec![("Content-Type", "application/json")],
-                r#"{"items": [], "total_count": 0, "offset": 0, "limit": 16, "has_more": false}"#.to_string(),
+                r#"{"items": [], "total_count": 0, "offset": 0, "limit": 16, "has_more": false}"#
+                    .to_string(),
             )
         });
         let client_none = AdultHubClient::new(&server_url_none).expect("init client");
@@ -3570,7 +3842,8 @@ mod tests {
             (
                 401,
                 vec![("Content-Type", "application/problem+json")],
-                r#"{"title": "Unauthorized", "detail": "Session token expired", "status": 401}"#.to_string(),
+                r#"{"title": "Unauthorized", "detail": "Session token expired", "status": 401}"#
+                    .to_string(),
             )
         });
 
@@ -3605,14 +3878,18 @@ mod tests {
                     "played_percentage": 25.0,
                     "is_played": false,
                     "last_watched_at": "2026-11-22T19:00:00Z"
-                }"#.to_string(),
+                }"#
+                .to_string(),
             )
         });
 
         let client = AdultHubClient::new(&server_url)
             .expect("init client")
             .with_token("test_token");
-        let progress = client.get_watch_progress("telegram:vid-100").expect("get progress").expect("should be some");
+        let progress = client
+            .get_watch_progress("telegram:vid-100")
+            .expect("get progress")
+            .expect("should be some");
         handle.join().unwrap();
 
         assert_eq!(progress.video_id, "telegram:vid-100");
@@ -3634,7 +3911,9 @@ mod tests {
         let client_404 = AdultHubClient::new(&server_url_404)
             .expect("init client")
             .with_token("test_token");
-        let progress_none = client_404.get_watch_progress("telegram:vid-notfound").expect("get progress 404");
+        let progress_none = client_404
+            .get_watch_progress("telegram:vid-notfound")
+            .expect("get progress 404");
         handle_404.join().unwrap();
         assert!(progress_none.is_none());
 
@@ -3661,7 +3940,9 @@ mod tests {
             played_percentage: Some(27.78),
             last_watched_at: None,
         };
-        let put_res = client_put.put_watch_progress("telegram:vid-100", &put_req).expect("put progress");
+        let put_res = client_put
+            .put_watch_progress("telegram:vid-100", &put_req)
+            .expect("put progress");
         handle_put.join().unwrap();
         assert!(put_res.ok);
 
@@ -3679,7 +3960,9 @@ mod tests {
         let client_del = AdultHubClient::new(&server_url_del)
             .expect("init client")
             .with_token("test_token");
-        let del_res = client_del.delete_watch_progress("telegram:vid-100").expect("delete progress");
+        let del_res = client_del
+            .delete_watch_progress("telegram:vid-100")
+            .expect("delete progress");
         handle_del.join().unwrap();
         assert!(del_res);
     }
@@ -3700,7 +3983,9 @@ mod tests {
         let client = AdultHubClient::new(&server_url_status)
             .expect("init client")
             .with_token("token_fav_123");
-        let status_res = client.get_favorite_status("telegram:vid-fav-1").expect("get fav status");
+        let status_res = client
+            .get_favorite_status("telegram:vid-fav-1")
+            .expect("get fav status");
         handle_status.join().unwrap();
         assert_eq!(status_res.video_id.as_deref(), Some("telegram:vid-fav-1"));
         assert!(status_res.is_favorite);
@@ -3737,7 +4022,9 @@ mod tests {
         let client = AdultHubClient::new(&server_url_rem)
             .expect("init client")
             .with_token("token_fav_123");
-        let rem_res = client.remove_favorite("telegram:vid-fav-1").expect("remove fav");
+        let rem_res = client
+            .remove_favorite("telegram:vid-fav-1")
+            .expect("remove fav");
         handle_rem.join().unwrap();
         assert!(!rem_res.is_favorite);
 
@@ -3766,7 +4053,8 @@ mod tests {
                     "offset": 10,
                     "limit": 25,
                     "has_more": false
-                }"#.to_string(),
+                }"#
+                .to_string(),
             )
         });
 
@@ -3825,7 +4113,8 @@ mod tests {
             (
                 200,
                 vec![("Content-Type", "application/json")],
-                r#"{"items": [], "total_count": 0, "offset": 0, "limit": 50, "has_more": false}"#.to_string(),
+                r#"{"items": [], "total_count": 0, "offset": 0, "limit": 50, "has_more": false}"#
+                    .to_string(),
             )
         });
 
@@ -3843,7 +4132,9 @@ mod tests {
     #[test]
     fn test_favorites_wire_query_sort_and_direction() {
         let (server_url, handle) = spawn_mock_server(|line, headers, _body| {
-            assert!(line.starts_with("GET /api/v1/user/favorites?offset=0&limit=50&sort=latest&direction=asc"));
+            assert!(line.starts_with(
+                "GET /api/v1/user/favorites?offset=0&limit=50&sort=latest&direction=asc"
+            ));
             assert!(headers.contains("authorization: Bearer tok_sort_test"));
             (
                 200,
@@ -3854,7 +4145,8 @@ mod tests {
                     "offset": 0,
                     "limit": 50,
                     "has_more": false
-                }"#.to_string(),
+                }"#
+                .to_string(),
             )
         });
 
@@ -3930,7 +4222,10 @@ mod tests {
                     width: Some(1280),
                     height: Some(720),
                     is_default: false,
-                    stream_path: Some("/api/v1/playback/stream/telegram:-100123:456:789?rendition_id=alt_720".into()),
+                    stream_path: Some(
+                        "/api/v1/playback/stream/telegram:-100123:456:789?rendition_id=alt_720"
+                            .into(),
+                    ),
                 },
                 PlaybackRenditionDto {
                     id: "broken".into(),
@@ -3992,13 +4287,7 @@ mod tests {
         );
 
         // Resuming without prior known total succeeds and records server total
-        let outcome2 = evaluate_range_resume(
-            206,
-            Some("bytes 500-999/1000"),
-            Some(500),
-            500,
-            None,
-        );
+        let outcome2 = evaluate_range_resume(206, Some("bytes 500-999/1000"), Some(500), 500, None);
         assert_eq!(
             outcome2,
             RangeResumeOutcome::Resume {
@@ -4011,13 +4300,8 @@ mod tests {
     #[test]
     fn test_evaluate_range_resume_mismatched_start_offset() {
         // Server returned range starting at 0 when client asked from 500
-        let outcome = evaluate_range_resume(
-            206,
-            Some("bytes 0-999/1000"),
-            Some(1000),
-            500,
-            Some(1000),
-        );
+        let outcome =
+            evaluate_range_resume(206, Some("bytes 0-999/1000"), Some(1000), 500, Some(1000));
         assert!(matches!(
             outcome,
             RangeResumeOutcome::Restart { ref reason, total_bytes: Some(1000) }
@@ -4025,13 +4309,8 @@ mod tests {
         ));
 
         // Server returned range starting at 200 when client had 500
-        let outcome2 = evaluate_range_resume(
-            206,
-            Some("bytes 200-999/1000"),
-            Some(800),
-            500,
-            Some(1000),
-        );
+        let outcome2 =
+            evaluate_range_resume(206, Some("bytes 200-999/1000"), Some(800), 500, Some(1000));
         assert!(matches!(
             outcome2,
             RangeResumeOutcome::Restart { ref reason, .. }
@@ -4059,13 +4338,7 @@ mod tests {
     #[test]
     fn test_evaluate_range_resume_http_200_with_existing_bytes() {
         // Server returned full file (HTTP 200) ignoring Range request
-        let outcome = evaluate_range_resume(
-            200,
-            None,
-            Some(5000),
-            1000,
-            Some(5000),
-        );
+        let outcome = evaluate_range_resume(200, None, Some(5000), 1000, Some(5000));
         assert!(matches!(
             outcome,
             RangeResumeOutcome::Restart { ref reason, total_bytes: Some(5000) }
@@ -4073,13 +4346,7 @@ mod tests {
         ));
 
         // Starting from byte 0 with 200 OK is a normal clean download
-        let outcome2 = evaluate_range_resume(
-            200,
-            None,
-            Some(5000),
-            0,
-            Some(5000),
-        );
+        let outcome2 = evaluate_range_resume(200, None, Some(5000), 0, Some(5000));
         assert_eq!(
             outcome2,
             RangeResumeOutcome::Resume {
@@ -4092,13 +4359,7 @@ mod tests {
     #[test]
     fn test_evaluate_range_resume_http_416() {
         // Partial bytes on disk out of bounds -> Restart cleanly
-        let outcome = evaluate_range_resume(
-            416,
-            Some("bytes */1000"),
-            None,
-            1200,
-            Some(1000),
-        );
+        let outcome = evaluate_range_resume(416, Some("bytes */1000"), None, 1200, Some(1000));
         assert!(matches!(
             outcome,
             RangeResumeOutcome::Restart { ref reason, .. }
@@ -4106,13 +4367,7 @@ mod tests {
         ));
 
         // If existing bytes is 0 and 416 occurs -> Fatal error
-        let outcome2 = evaluate_range_resume(
-            416,
-            Some("bytes */0"),
-            None,
-            0,
-            None,
-        );
+        let outcome2 = evaluate_range_resume(416, Some("bytes */0"), None, 0, None);
         assert!(matches!(
             outcome2,
             RangeResumeOutcome::Error { status: 416, .. }
@@ -4153,13 +4408,23 @@ mod tests {
             // Verify requested URL and headers:
             assert!(req_str.starts_with("GET /api/v1/playback/stream/canonical_123 HTTP/1.1"));
             // Bearer token strictly in Authorization header:
-            assert!(req_str.contains("authorization: Bearer ah_tok_download_test\r\n")
-                || req_str.contains("Authorization: Bearer ah_tok_download_test\r\n"));
+            assert!(
+                req_str.contains("authorization: Bearer ah_tok_download_test\r\n")
+                    || req_str.contains("Authorization: Bearer ah_tok_download_test\r\n")
+            );
             // Range header present:
-            assert!(req_str.contains("range: bytes=100-\r\n")
-                || req_str.contains("Range: bytes=100-\r\n"));
+            assert!(
+                req_str.contains("range: bytes=100-\r\n")
+                    || req_str.contains("Range: bytes=100-\r\n")
+            );
             // Bearer token NEVER in URL path or query string:
-            assert!(!req_str.lines().next().unwrap().contains("ah_tok_download_test"));
+            assert!(
+                !req_str
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .contains("ah_tok_download_test")
+            );
 
             let body = b"streamdata12345";
             let resp = format!(
@@ -4183,7 +4448,10 @@ mod tests {
         let stream_url = client
             .resolve_stream_url("/api/v1/playback/stream/canonical_123")
             .expect("resolve stream URL");
-        assert_eq!(stream_url, format!("{server_url}/api/v1/playback/stream/canonical_123"));
+        assert_eq!(
+            stream_url,
+            format!("{server_url}/api/v1/playback/stream/canonical_123")
+        );
 
         let req_builder = client
             .build_stream_request(&stream_url, Some("bytes=100-"))
@@ -4278,18 +4546,24 @@ mod tests {
             .with_token("ah_tok_expired");
 
         // Attempt 1 fails with 401
-        let req1 = client.build_stream_request("/api/v1/playback/stream/item1", Some("bytes=256-")).unwrap();
+        let req1 = client
+            .build_stream_request("/api/v1/playback/stream/item1", Some("bytes=256-"))
+            .unwrap();
         let res1 = req1.send().expect("send initial");
         assert_eq!(res1.status().as_u16(), 401);
 
         // Client detects 401 and calls refresh_token
-        let refreshed = client.refresh_token("ah_ref_valid_rotate").expect("refresh token");
+        let refreshed = client
+            .refresh_token("ah_ref_valid_rotate")
+            .expect("refresh token");
         assert_eq!(refreshed.access_token, "ah_tok_renewed_456");
         assert_eq!(refreshed.refresh_token, "ah_ref_rotated_789");
         assert_eq!(client.token().as_deref(), Some("ah_tok_renewed_456"));
 
         // Attempt 2 succeeds with renewed Bearer token
-        let req2 = client.build_stream_request("/api/v1/playback/stream/item1", Some("bytes=256-")).unwrap();
+        let req2 = client
+            .build_stream_request("/api/v1/playback/stream/item1", Some("bytes=256-"))
+            .unwrap();
         let mut res2 = req2.send().expect("send retried");
         assert_eq!(res2.status().as_u16(), 206);
         let mut data = Vec::new();
