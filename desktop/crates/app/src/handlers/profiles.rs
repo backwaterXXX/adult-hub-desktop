@@ -72,6 +72,49 @@ fn fetch_profile_items(
     Ok(items)
 }
 
+fn fetch_adult_hub_profile_items(
+    client: &adult_hub_client::AdultHubClient,
+    filter_type: &str,
+    name_or_id: &str,
+) -> Result<Vec<TvItem>, String> {
+    let mut items = Vec::new();
+    let mut offset = 0u64;
+    let page_size = 100u64;
+    let is_performer = filter_type == "performer";
+    let is_studio = filter_type == "studio";
+    let (performer_arg, performer_id_arg) = if is_performer {
+        (None, Some(name_or_id))
+    } else {
+        (None, None)
+    };
+    let studio_arg = is_studio.then_some(name_or_id);
+
+    loop {
+        let req = adult_hub_client::CatalogVideosQuery {
+            offset: Some(offset),
+            limit: Some(page_size),
+            sort: Some("title"),
+            direction: Some("asc"),
+            performer: performer_arg,
+            performer_id: performer_id_arg,
+            studio: studio_arg,
+            ..Default::default()
+        };
+        let resp = client.get_videos(&req).map_err(|e| e.to_string())?;
+        let page_len = resp.items.len();
+        let total_count = resp.total_count;
+        let has_more = resp.has_more;
+        for video in resp.items {
+            items.push(TvItem::from(video));
+        }
+        offset += page_len as u64;
+        if !has_more || page_len == 0 || offset >= total_count {
+            break;
+        }
+    }
+    Ok(items)
+}
+
 fn fetch_cards_thumbnails(
     weak: slint::Weak<MainWindow>,
     target_kind: &'static str,
@@ -106,7 +149,12 @@ fn fetch_cards_thumbnails(
             let _ = slint::invoke_from_event_loop(move || {
                 let Some(ui) = weak.upgrade() else { return };
                 let matches_name = if target_kind == "performer" {
-                    ui.get_performer_name() == expected_name.as_str()
+                    let current_id = ui.get_performer_id();
+                    if !current_id.is_empty() {
+                        current_id == expected_name.as_str()
+                    } else {
+                        ui.get_performer_name() == expected_name.as_str()
+                    }
                 } else {
                     ui.get_studio_name() == expected_name.as_str()
                 };
@@ -145,7 +193,7 @@ fn fetch_cards_thumbnails(
     });
 }
 
-fn load_performer_profile_data(ui: &MainWindow, ctx: &AppContext, p_name: String) {
+fn load_performer_profile_data(ui: &MainWindow, ctx: &AppContext, p_key: String) {
     let weak = ui.as_weak();
     let local_store = ctx.local_store.clone();
     let credential_store = ctx.credential_store.clone();
@@ -165,11 +213,23 @@ fn load_performer_profile_data(ui: &MainWindow, ctx: &AppContext, p_name: String
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut seen = std::collections::HashSet::new();
+        let is_name_ref = p_key.starts_with("name:");
+        let unvetted_name = if is_name_ref {
+            p_key.trim_start_matches("name:").trim()
+        } else {
+            p_key.as_str()
+        };
         for item in cached.iter().chain(home.iter()) {
             if item
                 .people
                 .iter()
-                .any(|p| p.name.eq_ignore_ascii_case(&p_name))
+                .any(|p| {
+                    if is_name_ref {
+                        p.name.eq_ignore_ascii_case(unvetted_name)
+                    } else {
+                        p.id == p_key || p.name.eq_ignore_ascii_case(&p_key)
+                    }
+                })
                 && seen.insert(item.id.clone())
             {
                 local_items.push(item.clone());
@@ -180,66 +240,120 @@ fn load_performer_profile_data(ui: &MainWindow, ctx: &AppContext, p_name: String
     let session = credential_store.get().ok().flatten();
     let server_url = session.as_ref().map(|s| s.server_url.clone());
     let token = session.as_ref().map(|s| s.access_token.clone());
+    let is_adult_hub_api = local_store.is_adult_hub_api_enabled().unwrap_or(false);
 
     std::thread::spawn(move || {
         let mut person_image_bytes = None;
         let mut person_child_count = None;
         let mut person_overview = None;
+        let mut bio_info = None;
 
-        // 2. Query dedicated Jellyfin Person endpoint: GET /Persons/{name}?userId={userId}
-        if let Some(session) = session.as_ref() {
-            if let Ok(details) = jellyfin.get_person(
-                &session.server_url,
-                &session.user_id,
-                &session.access_token,
-                &p_name,
-            ) {
-                person_overview = details.overview;
-                person_child_count = details.child_count;
-                if let Some(tag) = details.primary_image_tag.as_deref() {
-                    let image_url = JellyfinClient::image_url(
-                        &session.server_url,
-                        &details.id,
-                        "Primary",
-                        crate::thumbnails::person_thumbnail_max_width(),
-                        Some(tag),
-                    );
-                    person_image_bytes = crate::thumbnails::load_cached_image_bytes(&image_url)
-                        .or_else(|| {
-                            crate::thumbnails::fetch_and_cache_image_bytes(
-                                &image_url,
-                                Some(&session.access_token),
-                            )
-                        });
+        let remote_result = if is_adult_hub_api {
+            if let Some(session) = session.as_ref() {
+                match adult_hub_client::AdultHubClient::new(&session.server_url) {
+                    Ok(client) => {
+                        let client = client.with_token(&session.access_token);
+                        match client.get_performer_detail(&p_key) {
+                            Ok(detail) => {
+                                person_overview = detail.bio.clone();
+                                person_child_count = detail.video_count.map(|c| c as u32);
+                                bio_info = Some(adult_hub_client::PerformerBioDto {
+                                    name: detail.name,
+                                    bio: detail.bio,
+                                    birth: detail.birth,
+                                    nationality: detail.nationality,
+                                    aliases: detail.aliases,
+                                    photo_url: detail.photo_url.clone(),
+                                    updated_at: None,
+                                });
+                                if let Some(photo_url) = detail.photo_url.as_deref() {
+                                    if let Ok(resolved) = client.resolve_artwork_url(photo_url) {
+                                        person_image_bytes = crate::thumbnails::load_cached_image_bytes(&resolved)
+                                            .or_else(|| {
+                                                crate::thumbnails::fetch_and_cache_image_bytes(
+                                                    &resolved,
+                                                    Some(&session.access_token),
+                                                )
+                                            });
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                crate::diagnostics::GLOBAL_LOG.w(
+                                    "PerformerProfile",
+                                    &format!("Failed to load performer detail for {p_key}: {e}"),
+                                );
+                            }
+                        }
+                        fetch_adult_hub_profile_items(&client, "performer", &p_key)
+                    }
+                    Err(e) => Err(e.to_string()),
+                }
+            } else {
+                Ok(Vec::new())
+            }
+        } else {
+            let p_name = if p_key.starts_with("name:") {
+                p_key.trim_start_matches("name:").trim().to_string()
+            } else {
+                p_key.clone()
+            };
+
+            // 2. Query dedicated Jellyfin Person endpoint: GET /Persons/{name}?userId={userId}
+            if let Some(session) = session.as_ref() {
+                if let Ok(details) = jellyfin.get_person(
+                    &session.server_url,
+                    &session.user_id,
+                    &session.access_token,
+                    &p_name,
+                ) {
+                    person_overview = details.overview;
+                    person_child_count = details.child_count;
+                    if let Some(tag) = details.primary_image_tag.as_deref() {
+                        let image_url = JellyfinClient::image_url(
+                            &session.server_url,
+                            &details.id,
+                            "Primary",
+                            crate::thumbnails::person_thumbnail_max_width(),
+                            Some(tag),
+                        );
+                        person_image_bytes = crate::thumbnails::load_cached_image_bytes(&image_url)
+                            .or_else(|| {
+                                crate::thumbnails::fetch_and_cache_image_bytes(
+                                    &image_url,
+                                    Some(&session.access_token),
+                                )
+                            });
+                    }
                 }
             }
-        }
 
-        // 3. Query resolver for bio, nationality, birth, aliases
-        let res_url = local_store
-            .get_setting("resolver_base_url")
-            .ok()
-            .flatten()
-            .or_else(|| server_url.clone())
-            .unwrap_or_default();
-        let bio_info = if !res_url.is_empty() {
-            resolver.get_performer_bio(&res_url, &p_name).ok()
-        } else {
-            None
-        };
-
-        // 4. Query filmography from Jellyfin
-        let remote_result = if let Some(session) = session.as_ref() {
-            let q = GetItemsQuery {
-                person: Some(&p_name),
-                limit: PROFILE_PAGE_SIZE,
-                include_item_types: Some("Movie,Video"),
-                sort_by: "SortName",
-                ..Default::default()
+            // 3. Query resolver for bio, nationality, birth, aliases
+            let res_url = local_store
+                .get_setting("resolver_base_url")
+                .ok()
+                .flatten()
+                .or_else(|| server_url.clone())
+                .unwrap_or_default();
+            bio_info = if !res_url.is_empty() {
+                resolver.get_performer_bio(&res_url, &p_name).ok()
+            } else {
+                None
             };
-            fetch_profile_items(&jellyfin, session, &q)
-        } else {
-            Ok(Vec::new())
+
+            // 4. Query filmography from Jellyfin
+            if let Some(session) = session.as_ref() {
+                let q = GetItemsQuery {
+                    person: Some(&p_name),
+                    limit: PROFILE_PAGE_SIZE,
+                    include_item_types: Some("Movie,Video"),
+                    sort_by: "SortName",
+                    ..Default::default()
+                };
+                fetch_profile_items(&jellyfin, session, &q)
+            } else {
+                Ok(Vec::new())
+            }
         };
 
         let is_remote_err = remote_result.is_err();
@@ -255,17 +369,25 @@ fn load_performer_profile_data(ui: &MainWindow, ctx: &AppContext, p_name: String
             }
         }
         let filtered_items = filter_catalog_items(merged, &local_store);
-        *performer_catalog
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = filtered_items.clone();
 
         // 5. Update UI on event loop
-        let p_name_clone = p_name.clone();
+        let p_key_clone = p_key.clone();
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = weak.upgrade() else { return };
-            if ui.get_performer_name() != p_name_clone.as_str() {
+            let current_id = ui.get_performer_id();
+            let current_name = ui.get_performer_name();
+            let matches_identity = if !current_id.is_empty() {
+                current_id == p_key_clone.as_str()
+            } else {
+                current_name == p_key_clone.as_str()
+            };
+            if !matches_identity {
                 return;
             }
+
+            *performer_catalog
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = filtered_items.clone();
 
             ui.set_performer_loading(false);
 
@@ -294,11 +416,14 @@ fn load_performer_profile_data(ui: &MainWindow, ctx: &AppContext, p_name: String
                 ui.set_performer_bio(resolved_bio.into());
             }
 
-            if let Some(bio) = bio_info {
-                if let Some(nat) = bio.nationality {
+            if let Some(bio) = bio_info.as_ref() {
+                if !bio.name.is_empty() {
+                    ui.set_performer_name(bio.name.clone().into());
+                }
+                if let Some(nat) = bio.nationality.as_deref() {
                     ui.set_performer_nationality(nat.into());
                 }
-                if let Some(birth) = bio.birth {
+                if let Some(birth) = bio.birth.as_deref() {
                     ui.set_performer_birth(birth.into());
                 }
                 if !bio.aliases.is_empty() {
@@ -325,7 +450,7 @@ fn load_performer_profile_data(ui: &MainWindow, ctx: &AppContext, p_name: String
                 ui.set_performer_items(Rc::new(slint::VecModel::from(cards.clone())).into());
 
                 if let Some(token) = token {
-                    fetch_cards_thumbnails(weak.clone(), "performer", p_name_clone, cards, token);
+                    fetch_cards_thumbnails(weak.clone(), "performer", p_key_clone, cards, token);
                 }
             }
         });
@@ -363,10 +488,22 @@ fn load_studio_profile_data(ui: &MainWindow, ctx: &AppContext, s_name: String) {
     let session = credential_store.get().ok().flatten();
     let server_url = session.as_ref().map(|s| s.server_url.clone());
     let token = session.as_ref().map(|s| s.access_token.clone());
+    let is_adult_hub_api = local_store.is_adult_hub_api_enabled().unwrap_or(false);
 
     std::thread::spawn(move || {
-        // Query studio items from Jellyfin
-        let remote_result = if let Some(session) = session.as_ref() {
+        let remote_result = if is_adult_hub_api {
+            if let Some(session) = session.as_ref() {
+                match adult_hub_client::AdultHubClient::new(&session.server_url) {
+                    Ok(client) => {
+                        let client = client.with_token(&session.access_token);
+                        fetch_adult_hub_profile_items(&client, "studio", &s_name)
+                    }
+                    Err(e) => Err(e.to_string()),
+                }
+            } else {
+                Ok(Vec::new())
+            }
+        } else if let Some(session) = session.as_ref() {
             let q = GetItemsQuery {
                 studio: Some(&s_name),
                 limit: PROFILE_PAGE_SIZE,
@@ -427,14 +564,20 @@ pub fn install_stage7_handlers(ui: &MainWindow, ctx: &AppContext) {
     {
         let weak = ui.as_weak();
         let ctx_prof = ctx.clone();
-        ui.on_open_performer_profile(move |name| {
+        ui.on_open_performer_profile(move |id_or_name| {
             let Some(ui) = weak.upgrade() else { return };
             ui.invoke_cache_catalog_view();
             ctx_prof.push_nav_destination(crate::handlers::browsing::current_nav_destination(
                 &ui, &ctx_prof,
             ));
-            let name_str = name.to_string();
-            ui.set_performer_name(name);
+            let key_str = id_or_name.to_string();
+            let display_name = if key_str.starts_with("name:") {
+                key_str.trim_start_matches("name:").trim().to_string()
+            } else {
+                key_str.clone()
+            };
+            ui.set_performer_id(key_str.clone().into());
+            ui.set_performer_name(display_name.into());
             ui.set_performer_scroll_y(0.0);
             ui.set_performer_anchor_index(0);
             ui.set_performer_anchor_screen_y(0.0);
@@ -453,7 +596,7 @@ pub fn install_stage7_handlers(ui: &MainWindow, ctx: &AppContext) {
             ui.set_performer_items(Rc::new(slint::VecModel::default()).into());
             ui.set_active_screen("performer-details".into());
 
-            load_performer_profile_data(&ui, &ctx_prof, name_str);
+            load_performer_profile_data(&ui, &ctx_prof, key_str);
         });
     }
 
@@ -463,13 +606,25 @@ pub fn install_stage7_handlers(ui: &MainWindow, ctx: &AppContext) {
         let ctx_retry = ctx.clone();
         ui.on_retry_performer_profile(move || {
             let Some(ui) = weak.upgrade() else { return };
-            let name_str = ui.get_performer_name().to_string();
-            if name_str.is_empty() {
+            let id_str = ui.get_performer_id().to_string();
+            let key_str = if !id_str.is_empty() {
+                id_str
+            } else {
+                let name = ui.get_performer_name().to_string();
+                if name.starts_with("name:") {
+                    name
+                } else if !name.is_empty() {
+                    format!("name:{name}")
+                } else {
+                    String::new()
+                }
+            };
+            if key_str.is_empty() {
                 return;
             }
             ui.set_performer_loading(true);
             ui.set_performer_error("".into());
-            load_performer_profile_data(&ui, &ctx_retry, name_str);
+            load_performer_profile_data(&ui, &ctx_retry, key_str);
         });
     }
 
@@ -605,6 +760,7 @@ mod tests {
             username: "tester".into(),
             access_token: "token".into(),
             server_name: "Mock".into(),
+            refresh_token: None,
         };
         let jellyfin = JellyfinClient::new("test-device");
         let query = GetItemsQuery {
@@ -619,6 +775,70 @@ mod tests {
         assert_eq!(items.len(), 450, "every server page is collected");
         assert_eq!(items.first().map(|item| item.id.as_str()), Some("film-0"));
         assert_eq!(items.last().map(|item| item.id.as_str()), Some("film-449"));
+        let _ = server.join();
+    }
+
+    #[test]
+    fn adult_hub_profile_items_page_through_catalog_videos() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut served = 0;
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                while let Ok(count) = stream.read(&mut buffer) {
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..count]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let request = String::from_utf8_lossy(&request).into_owned();
+                let offset = request
+                    .split("offset=")
+                    .nth(1)
+                    .and_then(|tail| tail.split('&').next())
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(0);
+
+                let (count, has_more) = if offset == 0 {
+                    (100, true)
+                } else {
+                    (25, false)
+                };
+                let items_json = (offset..offset + count)
+                    .map(|i| format!(r#"{{"id":"vid-{i}","title":"Video {i}","duration_seconds":60,"performers":[],"categories":[],"tags":[]}}"#))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let body = format!(
+                    r#"{{"items":[{items_json}],"total_count":125,"offset":{offset},"limit":100,"has_more":{has_more}}}"#
+                );
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+                served += 1;
+                if served >= 2 {
+                    break;
+                }
+            }
+        });
+
+        let client = adult_hub_client::AdultHubClient::new(&format!("http://{address}"))
+            .unwrap()
+            .with_token("test-token");
+        let items = fetch_adult_hub_profile_items(&client, "performer", "Performer A")
+            .expect("adult hub paged query succeeds");
+
+        assert_eq!(items.len(), 125, "all 125 items collected across 2 pages");
+        assert_eq!(items[0].id, "vid-0");
+        assert_eq!(items[124].id, "vid-124");
         let _ = server.join();
     }
 }

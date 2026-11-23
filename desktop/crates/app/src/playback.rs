@@ -59,6 +59,7 @@ pub fn show_error(ui: &MainWindow, message: impl Into<slint::SharedString>) {
     let msg = message.into();
     crate::diagnostics::GLOBAL_LOG.e("UI", msg.as_str());
     ui.set_is_switching_movie(false);
+    ui.set_is_changing_quality(false);
     if ui.get_active_screen() == "player" {
         ui.set_player_media_loaded(false);
         ui.set_player_controls_visible(true);
@@ -87,6 +88,7 @@ pub fn show_playback_error(
     let det = detail.into();
     crate::diagnostics::GLOBAL_LOG.e("Playback", &format!("{short}: {det}"));
     ui.set_is_switching_movie(false);
+    ui.set_is_changing_quality(false);
     if ui.get_active_screen() == "player" {
         ui.set_player_media_loaded(false);
         ui.set_player_controls_visible(true);
@@ -227,12 +229,15 @@ pub fn stop_active_playback_for_navigation(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take()
     {
+        let is_ended = ui.get_playback_ended_visible();
+        let is_completed = PlaybackSessionController::is_playback_completed(position_ms, duration_ms, is_ended);
         session_ctrl.checkpoint_progress(
             &item,
             position_ms,
             duration_ms,
-            ui.get_playback_ended_visible(),
+            is_completed,
         );
+        reporter.report_api_progress(&item.id, position_ms, duration_ms, is_completed);
     }
     reporter.stop_session(position_ms);
     session_ctrl.next_request_id();
@@ -316,17 +321,34 @@ pub fn start_item_playback_with_resume(
 ) {
     session_ctrl.next_request_id();
 
+    let is_adult_hub_api = match check_playback_api_mode(local_store) {
+        Ok(enabled) => enabled,
+        Err(err) => {
+            ui.set_player_state("failed".into());
+            show_error(ui, err.clone());
+            ui.set_toast_message(err.into());
+            ui.set_toast_type("error".into());
+            ui.set_toast_visible(true);
+            return;
+        }
+    };
+
     // 1. Persist outgoing video's progress and stop session
-    if let Some(prev) = current_item
+    let prev = current_item
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take()
-    {
+        .take();
+    if let Some(prev) = prev {
         let pos = (player.position().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
         let dur = (player.duration().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
-        session_ctrl.checkpoint_progress(&prev, pos, dur, false);
-        reporter.stop_session(pos);
+        let is_completed = PlaybackSessionController::is_playback_completed(pos, dur, false);
+        session_ctrl.checkpoint_progress(&prev, pos, dur, is_completed);
+        if reporter.is_active_for_item(&prev.id) {
+            reporter.stop_session(pos);
+        }
+        reporter.report_api_progress(&prev.id, pos, dur, is_completed);
     }
+    reporter.set_api_mode(is_adult_hub_api);
 
     // 2. Resolve stream URL
     let session = credential_store.get().ok().flatten();
@@ -335,98 +357,144 @@ pub fn start_item_playback_with_resume(
 
     let mut resolved_media_source_id = item.media_source_id.clone();
     let mut play_session_id = None;
-    let (stream_url, play_method, required_headers) =
-        if item.is_telegram() || item.id == "sample" || uuid::Uuid::parse_str(&item.id).is_err() {
-            match PlaybackSessionController::resolve_stream_url(
-                &item,
-                session.as_ref().map(|s| s.server_url.as_str()),
-                resolver_url.as_deref(),
-                session.as_ref().map(|s| s.access_token.as_str()),
-            ) {
-                Ok((url, method)) => (url, method, Vec::new()),
-                Err(err) => {
-                    if item.is_telegram()
-                        && (resolver_url.is_none()
-                            || resolver_url.as_deref().unwrap_or("").trim().is_empty())
-                    {
-                        ui.set_resolver_prompt_dialog_visible(true);
-                        ui.set_toast_message(
+    let (stream_url, play_method, required_headers) = if is_adult_hub_api {
+        let Some(session) = session.as_ref() else {
+            ui.set_player_state("failed".into());
+            show_error(ui, "Sign in to Adult Hub before playing this item.");
+            return;
+        };
+        let client = match adult_hub_client::AdultHubClient::new(&session.server_url) {
+            Ok(c) => c.with_token(&session.access_token),
+            Err(err) => {
+                ui.set_player_state("failed".into());
+                show_error(ui, format!("Failed to initialize Adult Hub client: {err}"));
+                return;
+            }
+        };
+        let descriptor = match client.get_playback_descriptor(&item.id) {
+            Ok(d) => d,
+            Err(err) => {
+                let safe_msg = format!("Could not resolve Adult Hub playback: {}", format_safe_adult_hub_error(&err));
+                ui.set_player_state("failed".into());
+                show_error(ui, safe_msg);
+                return;
+            }
+        };
+        match resolve_adult_hub_stream_target(&client, &descriptor, None) {
+            Ok(res) => res,
+            Err(err) => {
+                ui.set_player_state("failed".into());
+                show_error(ui, format!("Could not resolve Adult Hub playback: {err}"));
+                return;
+            }
+        }
+    } else if item.is_telegram() || item.id == "sample" || uuid::Uuid::parse_str(&item.id).is_err() {
+        match PlaybackSessionController::resolve_stream_url(
+            &item,
+            session.as_ref().map(|s| s.server_url.as_str()),
+            resolver_url.as_deref(),
+            session.as_ref().map(|s| s.access_token.as_str()),
+        ) {
+            Ok((url, method)) => (url, method, Vec::new()),
+            Err(err) => {
+                if item.is_telegram()
+                    && (resolver_url.is_none()
+                        || resolver_url.as_deref().unwrap_or("").trim().is_empty())
+                {
+                    ui.set_resolver_prompt_dialog_visible(true);
+                    ui.set_toast_message(
                         "Resolver URL required to stream Telegram videos. Click here to configure."
                             .into(),
                     );
-                        ui.set_toast_type("warning".into());
-                        ui.set_toast_action_text("Configure".into());
-                        ui.set_toast_visible(true);
-                    } else {
-                        *current_item
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                            Some(item.clone());
-                        ui.set_has_active_media(true);
-                        ui.set_player_title(crate::catalog::display_title(&item).into());
-                        ui.set_player_subtitle(format_player_subtitle(&item).into());
-                        ui.set_active_screen("player".into());
-                        ui.invoke_focus_keys();
-                        show_error(ui, err.clone());
-                        ui.set_toast_message(err.into());
-                        ui.set_toast_type("error".into());
-                        ui.set_toast_action_text("".into());
-                        ui.set_toast_visible(true);
-                    }
-                    return;
-                }
-            }
-        } else {
-            let Some(session) = session.as_ref() else {
-                show_error(ui, "Sign in to Jellyfin before playing this item.");
-                return;
-            };
-            match jellyfin.resolve_playback(
-                &session.server_url,
-                &session.user_id,
-                &session.access_token,
-                &item.id,
-            ) {
-                Ok(resolution) => {
-                    resolved_media_source_id = resolution.media_source_id;
-                    play_session_id = resolution.play_session_id;
-                    (
-                        resolution.stream_url,
-                        resolution.play_method,
-                        resolution.required_headers,
-                    )
-                }
-                Err(err) => {
+                    ui.set_toast_type("warning".into());
+                    ui.set_toast_action_text("Configure".into());
+                    ui.set_toast_visible(true);
+                } else {
                     *current_item
                         .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(item.clone());
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(item.clone());
                     ui.set_has_active_media(true);
                     ui.set_player_title(crate::catalog::display_title(&item).into());
                     ui.set_player_subtitle(format_player_subtitle(&item).into());
                     ui.set_active_screen("player".into());
                     ui.invoke_focus_keys();
-                    show_error(ui, format!("Could not resolve Jellyfin playback: {err}"));
-                    return;
+                    show_error(ui, err.clone());
+                    ui.set_toast_message(err.into());
+                    ui.set_toast_type("error".into());
+                    ui.set_toast_action_text("".into());
+                    ui.set_toast_visible(true);
                 }
-            }
-        };
-
-    let mut stream_headers = headers.to_vec();
-    stream_headers.extend(required_headers);
-    if uuid::Uuid::parse_str(&item.id).is_ok() {
-        if let Some(sess) = &session {
-            if !sess.access_token.is_empty() {
-                stream_headers.push(format!("X-Emby-Token: {}", sess.access_token));
+                return;
             }
         }
-    }
+    } else {
+        let Some(session) = session.as_ref() else {
+            show_error(ui, "Sign in to Jellyfin before playing this item.");
+            return;
+        };
+        match jellyfin.resolve_playback(
+            &session.server_url,
+            &session.user_id,
+            &session.access_token,
+            &item.id,
+        ) {
+            Ok(resolution) => {
+                resolved_media_source_id = resolution.media_source_id;
+                play_session_id = resolution.play_session_id;
+                (
+                    resolution.stream_url,
+                    resolution.play_method,
+                    resolution.required_headers,
+                )
+            }
+            Err(err) => {
+                *current_item
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(item.clone());
+                ui.set_has_active_media(true);
+                ui.set_player_title(crate::catalog::display_title(&item).into());
+                ui.set_player_subtitle(format_player_subtitle(&item).into());
+                ui.set_active_screen("player".into());
+                ui.invoke_focus_keys();
+                show_error(ui, format!("Could not resolve Jellyfin playback: {err}"));
+                return;
+            }
+        }
+    };
+
+    let is_jellyfin_item = !is_adult_hub_api && uuid::Uuid::parse_str(&item.id).is_ok();
+    let stream_headers = route_playback_headers(
+        is_adult_hub_api,
+        is_jellyfin_item,
+        session.as_ref().map(|s| s.access_token.as_str()),
+        headers,
+        &required_headers,
+    );
 
     // 3. Determine resume position
     let duration_ms = item.runtime_ticks.map(|t| (t / 10_000) as u64).unwrap_or(0);
     let mut start_pos_secs = 0.0;
 
-    let calculated_resume_ms =
-        PlaybackSessionController::resolve_item_resume_position(local_store, session_ctrl, &item);
+    let mut server_progress = None;
+    if is_adult_hub_api {
+        if let Some(session) = session.as_ref() {
+            if let Ok(client) = adult_hub_client::AdultHubClient::new(&session.server_url) {
+                let authed_client = client.with_token(&session.access_token);
+                if let Ok(progress) = authed_client.get_watch_progress(&item.id) {
+                    server_progress = progress;
+                }
+            }
+        }
+    }
+
+    let calculated_resume_ms = resolve_playback_resume_ms(
+        is_adult_hub_api,
+        server_progress.as_ref(),
+        local_store,
+        session_ctrl,
+        &item,
+    );
 
     match resume_choice {
         Some(true) => {
@@ -525,7 +593,6 @@ pub fn start_item_playback_with_resume(
         }
     }
 
-    let is_jellyfin_item = uuid::Uuid::parse_str(&item.id).is_ok();
     if is_jellyfin_item {
         reporter.start_session(
             &item.id,
@@ -545,6 +612,162 @@ pub fn start_item_playback_with_resume(
         .unwrap_or(false);
     if phash_enabled && (is_jellyfin_item || item.is_telegram()) {
         phash_coord.enqueue_generation(&item, None);
+    }
+}
+
+pub fn check_playback_api_mode(local_store: &adult_hub_storage::LocalStore) -> Result<bool, String> {
+    local_store
+        .is_adult_hub_api_enabled()
+        .map_err(|e| format!("Could not read Adult Hub API mode: {e}"))
+}
+
+pub fn format_safe_adult_hub_error(err: &adult_hub_client::AdultHubError) -> String {
+    match err {
+        adult_hub_client::AdultHubError::Unauthorized { message, .. } => {
+            format!("Session unauthorized: {message}")
+        }
+        adult_hub_client::AdultHubError::NotFound(msg) => format!("Item not found: {msg}"),
+        adult_hub_client::AdultHubError::RateLimited(msg) => format!("Rate limited: {msg}"),
+        adult_hub_client::AdultHubError::OriginMismatch { expected, actual } => {
+            format!("Origin mismatch: expected {expected}, got {actual}")
+        }
+        adult_hub_client::AdultHubError::InvalidUrl(_) => "Invalid stream URL".to_string(),
+        adult_hub_client::AdultHubError::Api { status, message, .. } => {
+            format!("API error (HTTP {status}): {message}")
+        }
+        adult_hub_client::AdultHubError::Http(e) => {
+            if let Some(status) = e.status() {
+                format!("HTTP error {status}")
+            } else {
+                "Network request failed".to_string()
+            }
+        }
+        adult_hub_client::AdultHubError::Serialization(_) => "Invalid response format".to_string(),
+        adult_hub_client::AdultHubError::Conflict(msg) => format!("Conflict: {msg}"),
+        adult_hub_client::AdultHubError::PayloadTooLarge { limit } => {
+            format!("Response too large (exceeded {limit} bytes)")
+        }
+        adult_hub_client::AdultHubError::Io(e) => {
+            format!("I/O error: {e}")
+        }
+    }
+}
+
+pub fn resolve_adult_hub_stream_target(
+    client: &adult_hub_client::AdultHubClient,
+    descriptor: &adult_hub_client::PlaybackDescriptorDto,
+    selected_variant_id: Option<&str>,
+) -> std::result::Result<(String, adult_hub_client::PlayMethod, Vec<String>), String> {
+    let active_id = selected_variant_id.unwrap_or("original");
+    let stream_path = if active_id != "original" {
+        let rendition = descriptor
+            .rendition_by_id(active_id)
+            .ok_or_else(|| format!("Selected rendition '{active_id}' not found in playback descriptor"))?;
+        let path = rendition
+            .stream_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .ok_or_else(|| format!("Selected rendition '{active_id}' does not have a stream path"))?;
+        path
+    } else {
+        descriptor
+            .default_stream_path()
+            .ok_or_else(|| "No stream path available in Adult Hub playback descriptor".to_string())?
+    };
+
+    let trimmed = stream_path.trim();
+    if trimmed.is_empty() {
+        return Err("Stream path cannot be empty".to_string());
+    }
+    if trimmed.starts_with("//") {
+        return Err("Protocol-relative stream URLs are not allowed".to_string());
+    }
+
+    let stream_url = client
+        .resolve_stream_url(trimmed)
+        .map_err(|e| format!("Invalid stream URL: {e}"))?;
+
+    let parsed = url::Url::parse(&stream_url)
+        .map_err(|e| format!("Invalid stream URL: {e}"))?;
+    if parsed.origin().ascii_serialization() != client.origin() {
+        return Err(format!(
+            "Origin mismatch: expected {}, got {}",
+            client.origin(),
+            parsed.origin().ascii_serialization()
+        ));
+    }
+
+    let mut headers = Vec::new();
+    if let Some(auth) = client.auth_header_value() {
+        headers.push(format!("Authorization: {auth}"));
+    } else if let Some(token) = client.token() {
+        if !token.is_empty() {
+            headers.push(format!("Authorization: Bearer {token}"));
+        }
+    }
+
+    Ok((stream_url, adult_hub_client::PlayMethod::DirectPlay, headers))
+}
+
+pub fn route_playback_headers(
+    is_adult_hub_api: bool,
+    is_jellyfin_item: bool,
+    session_token: Option<&str>,
+    base_headers: &[String],
+    required_headers: &[String],
+) -> Vec<String> {
+    let mut stream_headers = Vec::new();
+    if is_adult_hub_api {
+        for h in base_headers {
+            let lower = h.to_ascii_lowercase();
+            if !lower.starts_with("authorization:") && !lower.starts_with("x-emby-token:") {
+                stream_headers.push(h.clone());
+            }
+        }
+        for h in required_headers {
+            let lower = h.to_ascii_lowercase();
+            if !lower.starts_with("x-emby-token:") {
+                stream_headers.push(h.clone());
+            }
+        }
+    } else {
+        stream_headers.extend_from_slice(base_headers);
+        for h in required_headers {
+            stream_headers.push(h.clone());
+        }
+        if is_jellyfin_item {
+            if let Some(token) = session_token {
+                if !token.trim().is_empty() {
+                    stream_headers.push(format!("X-Emby-Token: {}", token.trim()));
+                }
+            }
+        }
+    }
+    stream_headers
+}
+
+pub fn resolve_playback_resume_ms(
+    is_adult_hub_api: bool,
+    server_progress: Option<&adult_hub_client::WatchProgressDto>,
+    local_store: &adult_hub_storage::LocalStore,
+    session_ctrl: &PlaybackSessionController,
+    item: &TvItem,
+) -> Option<u64> {
+    if is_adult_hub_api {
+        if let Some(progress) = server_progress {
+            if progress.is_played {
+                None
+            } else if progress.position_seconds > 0 {
+                Some(progress.position_seconds * 1000)
+            } else {
+                None
+            }
+        } else {
+            PlaybackSessionController::resolve_item_resume_position(local_store, session_ctrl, item)
+        }
+    } else {
+        PlaybackSessionController::resolve_item_resume_position(local_store, session_ctrl, item)
     }
 }
 
@@ -575,9 +798,21 @@ pub fn start_item_playback_with_resume_ctx(
         return;
     }
 
+    let is_adult_hub_api = match check_playback_api_mode(&ctx.local_store) {
+        Ok(enabled) => enabled,
+        Err(err) => {
+            ui.set_player_state("failed".into());
+            show_error(ui, err.clone());
+            ui.set_toast_message(err.into());
+            ui.set_toast_type("error".into());
+            ui.set_toast_visible(true);
+            return;
+        }
+    };
+
     let request_id = ctx.session_ctrl.next_request_id();
     crate::log_debug(&format!(
-        "playback req={request_id}: dispatch direct={} telegram={}",
+        "playback req={request_id}: dispatch direct={} telegram={} adult_hub_api={is_adult_hub_api}",
         item.is_direct_media(),
         item.is_telegram()
     ));
@@ -585,20 +820,48 @@ pub fn start_item_playback_with_resume_ctx(
     // 1. Checkpoint outgoing video's progress BEFORE touching playback state
     let pos = (player.position().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
     let dur = (player.duration().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
-    if let Some(prev) = ctx
+    let is_same_item = ctx
         .current_playing_item
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take()
-    {
-        if pos >= 5000 && prev.id != item.id {
-            ctx.session_ctrl.checkpoint_progress(&prev, pos, dur, false);
+        .as_ref()
+        .is_some_and(|cur| cur.id == item.id);
+    let preserve_quality = is_adult_hub_api && is_same_item;
+
+    let prev_item = ctx
+        .current_playing_item
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+
+    if let Some(prev) = prev_item {
+        let is_completed = PlaybackSessionController::is_playback_completed(pos, dur, false);
+        if prev.id != item.id {
+            ctx.session_ctrl.checkpoint_progress(&prev, pos, dur, is_completed);
+            ctx.reporter.report_api_progress(&prev.id, pos, dur, is_completed);
         }
-        ctx.reporter.stop_session(pos);
+        if ctx.reporter.is_active_for_item(&prev.id) {
+            ctx.reporter.stop_session(pos);
+        }
     }
+
+    ctx.reporter.set_api_mode(is_adult_hub_api);
 
     // Pause outgoing playback without stopping mpv pipeline or discarding buffer
     let _ = player.set_pause(true);
+
+    let initial_quality_id = ctx.active_quality_id
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let selected_quality = if preserve_quality && initial_quality_id != "original" {
+        initial_quality_id
+    } else {
+        *ctx.active_quality_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = "original".to_string();
+        "original".to_string()
+    };
 
     // 2. Immediately update UI to show player screen and loading/resolving overlay
     *ctx.current_playing_item
@@ -607,7 +870,7 @@ pub fn start_item_playback_with_resume_ctx(
     ui.set_has_active_media(true);
     ui.set_playing(true);
     ui.set_player_is_favorite(item.is_favorite);
-    ui.set_player_favorite_enabled(!item.is_telegram() && uuid::Uuid::parse_str(&item.id).is_ok());
+    ui.set_player_favorite_enabled(!is_adult_hub_api && !item.is_telegram() && uuid::Uuid::parse_str(&item.id).is_ok());
     ui.set_player_error_message(String::new().into());
     ui.set_toast_visible(false); // Clear any stale error toast
     ui.set_player_controls_visible(true);
@@ -617,8 +880,8 @@ pub fn start_item_playback_with_resume_ctx(
     ui.set_player_has_quality_alternatives(false);
     ui.set_player_quality_panel_open(false);
     ui.set_player_quality_subpage_open(false);
-    ui.set_player_selected_quality_id("original".into());
-    ui.set_player_selected_quality_label("Original".into());
+    ui.set_player_selected_quality_id(selected_quality.clone().into());
+    ui.set_player_selected_quality_label(if selected_quality == "original" { "Original".into() } else { selected_quality.clone().into() });
     ui.set_player_quality_options(slint::ModelRc::default());
     ui.set_player_media_loaded(false);
     ui.set_player_state("resolving".into());
@@ -627,15 +890,9 @@ pub fn start_item_playback_with_resume_ctx(
     ui.set_player_subtitle(format_player_subtitle(&item).into());
     ui.set_status(format!("Preparing: {}", item.title).into());
     ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
-    ui.set_player_is_telegram_stream(item.is_telegram());
+    ui.set_player_is_telegram_stream(!is_adult_hub_api && item.is_telegram());
     ui.set_player_has_quality_alternatives(false);
     ui.set_player_quality_subpage_open(false);
-    ui.set_player_selected_quality_id("original".into());
-    ui.set_player_selected_quality_label("Original".into());
-    ui.set_player_quality_options(slint::ModelRc::default());
-    *ctx.active_quality_id
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = "original".to_string();
     *ctx.current_video_variants
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Vec::new();
@@ -655,8 +912,8 @@ pub fn start_item_playback_with_resume_ctx(
     let ctx_clone = ctx.clone();
     let headers = ctx.headers.clone();
 
-    // Asynchronously fetch video quality alternatives for Telegram content
-    if item.is_telegram() {
+    // Asynchronously fetch video quality alternatives for Telegram content (legacy mode only)
+    if !is_adult_hub_api && item.is_telegram() {
         let weak_ui_variants = ui.as_weak();
         let ctx_variants = ctx.clone();
         let vid_ref = if item.id.starts_with("telegram:") {
@@ -757,7 +1014,144 @@ pub fn start_item_playback_with_resume_ctx(
 
         let mut resolved_media_source_id = item.media_source_id.clone();
         let mut play_session_id = None;
-        let resolution_result = if item.is_telegram()
+        let mut server_progress = None;
+        let resolution_result = if is_adult_hub_api {
+            let Some(session) = session.as_ref() else {
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak_ui.upgrade() {
+                        if !ctx_clone.session_ctrl.is_request_current(request_id) {
+                            return;
+                        }
+                        ui.set_player_state("failed".into());
+                        ui.set_is_changing_quality(false);
+                        ui.set_is_switching_movie(false);
+                        show_error(&ui, "Sign in to Adult Hub before playing this item.");
+                        ui.set_toast_message("Sign in to Adult Hub before playing this item.".into());
+                        ui.set_toast_type("error".into());
+                        ui.set_toast_action_text("".into());
+                        ui.set_toast_visible(true);
+                    }
+                });
+                return;
+            };
+
+            let client = match adult_hub_client::AdultHubClient::new(&session.server_url) {
+                Ok(c) => c.with_token(&session.access_token),
+                Err(err) => {
+                    let msg = format!("Failed to initialize Adult Hub client: {err}");
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak_ui.upgrade() {
+                            if !ctx_clone.session_ctrl.is_request_current(request_id) {
+                                return;
+                            }
+                            ui.set_player_state("failed".into());
+                            ui.set_is_changing_quality(false);
+                            ui.set_is_switching_movie(false);
+                            show_error(&ui, msg.clone());
+                            ui.set_toast_message(msg.into());
+                            ui.set_toast_type("error".into());
+                            ui.set_toast_action_text("".into());
+                            ui.set_toast_visible(true);
+                        }
+                    });
+                    return;
+                }
+            };
+
+            if let Ok(progress) = client.get_watch_progress(&item.id) {
+                server_progress = progress;
+            }
+
+            let descriptor = match client.get_playback_descriptor(&item.id) {
+                Ok(d) => d,
+                Err(err) => {
+                    let is_unauth = err.is_unauthorized();
+                    let safe_err = format_safe_adult_hub_error(&err);
+                    let msg = format!("Could not resolve Adult Hub playback: {safe_err}");
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak_ui.upgrade() {
+                            if !ctx_clone.session_ctrl.is_request_current(request_id) {
+                                return;
+                            }
+                            ui.set_player_state("failed".into());
+                            ui.set_is_changing_quality(false);
+                            ui.set_is_switching_movie(false);
+                            show_error(&ui, msg.clone());
+                            if is_unauth {
+                                ui.set_is_logged_in(false);
+                                ui.set_login_modal_visible(true);
+                                ui.set_login_modal_message(
+                                    "Session expired (401 Unauthorized). Please sign in again.".into(),
+                                );
+                                ui.set_toast_message("Session expired. Please reconnect.".into());
+                                ui.set_toast_type("warning".into());
+                                ui.set_toast_action_text("Sign In".into());
+                                ui.set_toast_visible(true);
+                            } else {
+                                ui.set_toast_message(msg.into());
+                                ui.set_toast_type("error".into());
+                                ui.set_toast_action_text("".into());
+                                ui.set_toast_visible(true);
+                            }
+                        }
+                    });
+                    return;
+                }
+            };
+
+            let renditions = descriptor.renditions.clone();
+            if !renditions.is_empty() {
+                let variants: Vec<adult_hub_client::VideoVariantDto> = renditions
+                    .iter()
+                    .map(|r| adult_hub_client::VideoVariantDto {
+                        id: r.id.clone(),
+                        is_original: r.is_default,
+                        width: r.width,
+                        height: r.height,
+                        codec: None,
+                        mime_type: r.mime_type.clone(),
+                        file_size: r.file_size_bytes,
+                        duration: descriptor.duration_seconds,
+                        bitrate: None,
+                        estimated_average_bitrate: None,
+                    })
+                    .collect();
+
+                let weak_ui_q = weak_ui.clone();
+                let variants_q = variants.clone();
+                let active_q = selected_quality.clone();
+                let player_q = ctx_clone.player.clone();
+                let ctx_q = ctx_clone.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = weak_ui_q.upgrade() else { return };
+                    if !ctx_q.session_ctrl.is_request_current(request_id) {
+                        return;
+                    }
+
+                    *ctx_q
+                        .current_video_variants
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = variants_q.clone();
+
+                    if variants_q.len() > 1 {
+                        let opts = format_variant_options(&variants_q, &active_q);
+                        let active_label = opts
+                            .iter()
+                            .find(|o| o.id == active_q)
+                            .map(|o| o.label.to_string())
+                            .unwrap_or_else(|| "Original".to_string());
+                        ui.set_player_has_quality_alternatives(true);
+                        ui.set_player_selected_quality_label(active_label.clone().into());
+                        if let Some(p) = player_q {
+                            p.set_quality_variant(Some(active_label));
+                        }
+                        update_slint_quality_options(&ui, &opts);
+                    }
+                });
+            }
+
+            resolve_adult_hub_stream_target(&client, &descriptor, Some(&selected_quality))
+        } else if item.is_telegram()
             || item.id == "sample"
             || uuid::Uuid::parse_str(&item.id).is_err()
         {
@@ -817,7 +1211,8 @@ pub fn start_item_playback_with_resume_ctx(
                         if !ctx_clone.session_ctrl.is_request_current(request_id) {
                             return;
                         }
-                        if item.is_telegram()
+                        if !is_adult_hub_api
+                            && item.is_telegram()
                             && (resolver_url.is_none()
                                 || resolver_url.as_deref().unwrap_or("").trim().is_empty())
                         {
@@ -843,21 +1238,23 @@ pub fn start_item_playback_with_resume_ctx(
             }
         };
 
-        let mut stream_headers = headers;
-        stream_headers.extend(required_headers);
-        if uuid::Uuid::parse_str(&item.id).is_ok() {
-            if let Some(sess) = &session {
-                if !sess.access_token.is_empty() {
-                    stream_headers.push(format!("X-Emby-Token: {}", sess.access_token));
-                }
-            }
-        }
+        let is_jellyfin_item = !is_adult_hub_api && uuid::Uuid::parse_str(&item.id).is_ok();
+        let session_token = session.as_ref().map(|s| s.access_token.as_str());
+        let stream_headers = route_playback_headers(
+            is_adult_hub_api,
+            is_jellyfin_item,
+            session_token,
+            &headers,
+            &required_headers,
+        );
 
         // Determine resume position
         let duration_ms = item.runtime_ticks.map(|t| (t / 10_000) as u64).unwrap_or(0);
         let mut start_pos_secs = 0.0;
 
-        let calculated_resume_ms = PlaybackSessionController::resolve_item_resume_position(
+        let calculated_resume_ms = resolve_playback_resume_ms(
+            is_adult_hub_api,
+            server_progress.as_ref(),
             &ctx_clone.local_store,
             &ctx_clone.session_ctrl,
             &item,
@@ -939,7 +1336,6 @@ pub fn start_item_playback_with_resume_ctx(
                     }
                 }
 
-                let is_jellyfin_item = uuid::Uuid::parse_str(&item.id).is_ok();
                 if is_jellyfin_item {
                     ctx_clone.reporter.start_session(
                         &item.id,
@@ -1135,7 +1531,16 @@ pub fn switch_video_quality(ui: &MainWindow, ctx: &AppContext, target_variant_id
     let Some(item) = item else {
         return;
     };
-    if !item.is_telegram() {
+    let is_adult_hub_api = match check_playback_api_mode(&ctx.local_store) {
+        Ok(v) => v,
+        Err(e) => {
+            ui.set_toast_message(e.into());
+            ui.set_toast_type("error".into());
+            ui.set_toast_visible(true);
+            return;
+        }
+    };
+    if !item.is_telegram() && !is_adult_hub_api {
         return;
     }
 
@@ -1164,14 +1569,84 @@ pub fn switch_video_quality(ui: &MainWindow, ctx: &AppContext, target_variant_id
     std::thread::spawn(move || {
         let session = ctx_clone.credential_store.get().ok().flatten();
         let resolver_url = ctx_clone.get_resolver_url();
+        let mut quality_headers = Vec::new();
 
-        let resolution_result = PlaybackSessionController::resolve_stream_url_with_variant(
-            &item,
-            session.as_ref().map(|s| s.server_url.as_str()),
-            resolver_url.as_deref(),
-            session.as_ref().map(|s| s.access_token.as_str()),
-            Some(&target_variant_id),
-        );
+        let resolution_result = if is_adult_hub_api {
+            let Some(session) = session.as_ref() else {
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak_ui.upgrade() {
+                        if !ctx_clone.session_ctrl.is_request_current(quality_req_id) {
+                            return;
+                        }
+                        ui.set_is_changing_quality(false);
+                        ui.set_toast_message("Session expired. Please reconnect.".into());
+                        ui.set_toast_type("warning".into());
+                        ui.set_toast_action_text("Sign In".into());
+                        ui.set_toast_visible(true);
+                    }
+                });
+                return;
+            };
+            let client = match adult_hub_client::AdultHubClient::new(&session.server_url) {
+                Ok(c) => c.with_token(&session.access_token),
+                Err(e) => {
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak_ui.upgrade() {
+                            if !ctx_clone.session_ctrl.is_request_current(quality_req_id) {
+                                return;
+                            }
+                            ui.set_is_changing_quality(false);
+                            ui.set_toast_message(format!("Could not switch quality: {e}").into());
+                            ui.set_toast_type("error".into());
+                            ui.set_toast_action_text("".into());
+                            ui.set_toast_visible(true);
+                        }
+                    });
+                    return;
+                }
+            };
+            let descriptor = match client.get_playback_descriptor(&item.id) {
+                Ok(d) => d,
+                Err(e) => {
+                    let safe_msg = format!("Could not switch quality: {}", format_safe_adult_hub_error(&e));
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak_ui.upgrade() {
+                            if !ctx_clone.session_ctrl.is_request_current(quality_req_id) {
+                                return;
+                            }
+                            ui.set_is_changing_quality(false);
+                            ui.set_toast_message(safe_msg.into());
+                            ui.set_toast_type("error".into());
+                            ui.set_toast_action_text("".into());
+                            ui.set_toast_visible(true);
+                        }
+                    });
+                    return;
+                }
+            };
+            match resolve_adult_hub_stream_target(&client, &descriptor, Some(&target_variant_id)) {
+                Ok((url, method, req_headers)) => {
+                    quality_headers = route_playback_headers(
+                        true,
+                        false,
+                        None,
+                        &headers,
+                        &req_headers,
+                    );
+                    Ok((url, method))
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            quality_headers = headers;
+            PlaybackSessionController::resolve_stream_url_with_variant(
+                &item,
+                session.as_ref().map(|s| s.server_url.as_str()),
+                resolver_url.as_deref(),
+                session.as_ref().map(|s| s.access_token.as_str()),
+                Some(&target_variant_id),
+            )
+        };
 
         match resolution_result {
             Ok((new_stream_url, _play_method)) => {
@@ -1193,14 +1668,14 @@ pub fn switch_video_quality(ui: &MainWindow, ctx: &AppContext, target_variant_id
                     };
 
                     let path = resolve_media_input(&new_stream_url);
-                    if let Err(e) = player_clone.load_with_start(&path, &headers, Some(target_pos))
+                    if let Err(e) = player_clone.load_with_start(&path, &quality_headers, Some(target_pos))
                     {
                         crate::diagnostics::GLOBAL_LOG
                             .e("Player", &format!("Quality load failed: {e}"));
                         // Attempt fallback to previous URL to preserve working source
                         let _ = player_clone.load_with_start(
                             &resolve_media_input(&previous_stream_url),
-                            &headers,
+                            &quality_headers,
                             Some(target_pos),
                         );
                         let _ = player_clone.set_pause(was_paused);
@@ -1384,5 +1859,306 @@ mod tests {
         assert_eq!(normalize_codec_name("av01"), "AV1");
         assert_eq!(normalize_codec_name("vp9"), "VP9");
         assert_eq!(normalize_codec_name(""), "");
+    }
+
+    #[test]
+    fn test_adult_hub_api_mode_playback_resolution_and_auth_routing() {
+        use adult_hub_client::{AdultHubClient, PlayMethod, PlaybackDescriptorDto, PlaybackRenditionDto};
+
+        let client = AdultHubClient::new("http://127.0.0.1:8090")
+            .expect("valid client")
+            .with_token("test_bearer_token_123");
+
+        let descriptor = PlaybackDescriptorDto {
+            video_id: "telegram:-100123456:789:012".into(),
+            stream_path: Some("/api/v1/playback/stream/telegram%3A-100123456%3A789%3A012".into()),
+            mime_type: Some("video/mp4".into()),
+            duration_seconds: Some(120.0),
+            file_size_bytes: Some(100_000_000),
+            width: Some(1920),
+            height: Some(1080),
+            renditions: vec![
+                PlaybackRenditionDto {
+                    id: "1080p".into(),
+                    label: "1080p Original".into(),
+                    mime_type: Some("video/mp4".into()),
+                    file_size_bytes: Some(100_000_000),
+                    width: Some(1920),
+                    height: Some(1080),
+                    is_default: true,
+                    stream_path: Some("/api/v1/playback/stream/telegram%3A-100123456%3A789%3A012?rendition=1080p".into()),
+                },
+                PlaybackRenditionDto {
+                    id: "720p".into(),
+                    label: "720p".into(),
+                    mime_type: Some("video/mp4".into()),
+                    file_size_bytes: Some(50_000_000),
+                    width: Some(1280),
+                    height: Some(720),
+                    is_default: false,
+                    stream_path: Some("/api/v1/playback/stream/telegram%3A-100123456%3A789%3A012?rendition=720p".into()),
+                },
+            ],
+        };
+
+        // 1. In API mode, default stream target resolution uses same-origin and passes Bearer auth
+        let (url, play_method, auth_headers) = resolve_adult_hub_stream_target(&client, &descriptor, None)
+            .expect("resolution succeeds");
+        assert_eq!(
+            url,
+            "http://127.0.0.1:8090/api/v1/playback/stream/telegram%3A-100123456%3A789%3A012"
+        );
+        assert_eq!(play_method, PlayMethod::DirectPlay);
+        assert_eq!(auth_headers, vec!["Authorization: Bearer test_bearer_token_123"]);
+
+        // 2. Selected existing rendition routing
+        let (r_url, _, _) = resolve_adult_hub_stream_target(&client, &descriptor, Some("720p"))
+            .expect("rendition resolution succeeds");
+        assert_eq!(
+            r_url,
+            "http://127.0.0.1:8090/api/v1/playback/stream/telegram%3A-100123456%3A789%3A012?rendition=720p"
+        );
+
+        // 3. Non-original rendition selection: if missing or empty stream path, returns error and never defaults
+        let missing_rendition_err = resolve_adult_hub_stream_target(&client, &descriptor, Some("nonexistent_quality"))
+            .expect_err("must fail when selected non-original rendition is missing");
+        assert!(missing_rendition_err.contains("nonexistent_quality"));
+
+        let empty_path_descriptor = PlaybackDescriptorDto {
+            video_id: "empty_path_vid".into(),
+            stream_path: Some("/api/v1/playback/stream/default".into()),
+            mime_type: None,
+            duration_seconds: None,
+            file_size_bytes: None,
+            width: None,
+            height: None,
+            renditions: vec![PlaybackRenditionDto {
+                id: "empty_rendition".into(),
+                label: "Empty Rendition".into(),
+                mime_type: None,
+                file_size_bytes: None,
+                width: None,
+                height: None,
+                is_default: false,
+                stream_path: Some("   ".into()),
+            }],
+        };
+        let empty_path_err = resolve_adult_hub_stream_target(&client, &empty_path_descriptor, Some("empty_rendition"))
+            .expect_err("must fail when non-original rendition stream path is whitespace");
+        assert!(empty_path_err.contains("empty_rendition"));
+
+        // 4. Enforces single-origin client policy (rejects cross-origin stream path specifically)
+        let hostile_descriptor = PlaybackDescriptorDto {
+            video_id: "hostile".into(),
+            stream_path: Some("https://evil.attacker.com/leak/stream.mp4".into()),
+            mime_type: None,
+            duration_seconds: None,
+            file_size_bytes: None,
+            width: None,
+            height: None,
+            renditions: Vec::new(),
+        };
+        let hostile_err = resolve_adult_hub_stream_target(&client, &hostile_descriptor, None)
+            .expect_err("must reject cross-origin stream URL");
+        assert!(hostile_err.to_ascii_lowercase().contains("origin mismatch"));
+
+        // 5. Enforces rejection of protocol-relative stream URLs specifically
+        let proto_rel_descriptor = PlaybackDescriptorDto {
+            video_id: "proto_rel".into(),
+            stream_path: Some("//evil.attacker.com/leak/stream.mp4".into()),
+            mime_type: None,
+            duration_seconds: None,
+            file_size_bytes: None,
+            width: None,
+            height: None,
+            renditions: Vec::new(),
+        };
+        let proto_rel_err = resolve_adult_hub_stream_target(&client, &proto_rel_descriptor, None)
+            .expect_err("must reject protocol-relative stream URL");
+        assert!(proto_rel_err.to_ascii_lowercase().contains("protocol-relative"));
+
+        // 6. Header routing: API mode never appends X-Emby-Token even if item ID is UUID and session token is given
+        let api_headers = route_playback_headers(
+            true,
+            true, // would be jellyfin item if in jellyfin mode
+            Some("session_token_xyz"),
+            &[],
+            &auth_headers,
+        );
+        assert!(api_headers.contains(&"Authorization: Bearer test_bearer_token_123".to_string()));
+        assert!(!api_headers.iter().any(|h| h.starts_with("X-Emby-Token")));
+
+        // 7. Header routing: Legacy Jellyfin mode attaches X-Emby-Token and preserves valid Jellyfin required Authorization headers
+        let jellyfin_req_headers = vec![
+            "Authorization: MediaBrowser Client=\"AdultHub\", Device=\"Desktop\", Token=\"jellyfin_token_abc\"".to_string(),
+        ];
+        let jellyfin_headers = route_playback_headers(
+            false,
+            true,
+            Some("jellyfin_token_abc"),
+            &[],
+            &jellyfin_req_headers,
+        );
+        assert!(jellyfin_headers.contains(&"X-Emby-Token: jellyfin_token_abc".to_string()));
+        assert!(jellyfin_headers.iter().any(|h| h.starts_with("Authorization: MediaBrowser")));
+    }
+
+    #[test]
+    fn test_mode_read_failure_blocks_playback_before_networking() {
+        struct TempDirGuard(std::path::PathBuf);
+        impl Drop for TempDirGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let temp_dir = std::env::temp_dir().join(format!("ah-db-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).expect("create test temp dir");
+        let _guard = TempDirGuard(temp_dir.clone());
+        let db_file = temp_dir.join("test.db");
+
+        let store = adult_hub_storage::LocalStore::open(&db_file).expect("open local store");
+        assert_eq!(check_playback_api_mode(&store).expect("initial mode read"), false);
+
+        // Deterministic failure setup: dropping settings table forces subsequent reads to fail
+        store.execute_raw_for_test("DROP TABLE settings").expect("drop settings table");
+
+        let err = check_playback_api_mode(&store).expect_err("mode read must return error on failure");
+        assert!(err.contains("Could not read Adult Hub API mode"));
+    }
+
+    #[test]
+    fn test_route_playback_headers_filters_base_and_required_in_api_mode() {
+        let base_headers = vec![
+            "Authorization: Bearer stale_token".to_string(),
+            "X-Emby-Token: old_emby_token".to_string(),
+            "User-Agent: AdultHub/1.0".to_string(),
+        ];
+        let required_headers = vec![
+            "Authorization: Bearer valid_api_token".to_string(),
+            "X-Emby-Token: leaked_emby_token".to_string(),
+            "X-Custom-Header: value".to_string(),
+        ];
+        let routed = route_playback_headers(
+            true,
+            true,
+            Some("session_token_123"),
+            &base_headers,
+            &required_headers,
+        );
+        // Base headers: User-Agent kept, Authorization and X-Emby-Token filtered
+        assert!(routed.contains(&"User-Agent: AdultHub/1.0".to_string()));
+        assert!(!routed.contains(&"Authorization: Bearer stale_token".to_string()));
+        assert!(!routed.contains(&"X-Emby-Token: old_emby_token".to_string()));
+
+        // Required headers: Authorization kept, X-Emby-Token filtered, custom kept
+        assert!(routed.contains(&"Authorization: Bearer valid_api_token".to_string()));
+        assert!(!routed.contains(&"X-Emby-Token: leaked_emby_token".to_string()));
+        assert!(routed.contains(&"X-Custom-Header: value".to_string()));
+
+        // Session token not appended in API mode
+        assert!(!routed.contains(&"X-Emby-Token: session_token_123".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_playback_resume_remote_truth_and_fallback() {
+        struct TempDirGuard(std::path::PathBuf);
+        impl Drop for TempDirGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let temp_dir = std::env::temp_dir().join(format!("ah-resume-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).expect("create test temp dir");
+        let _guard = TempDirGuard(temp_dir.clone());
+        let db_file = temp_dir.join("test.db");
+
+        let store = adult_hub_storage::LocalStore::open(&db_file).expect("open local store");
+        let session_ctrl = PlaybackSessionController::new(Arc::new(adult_hub_storage::LocalStore::open(&db_file).unwrap()));
+
+        let mut item = TvItem::default();
+        item.id = "video-test-123".into();
+        item.runtime_ticks = Some(1_000_000 * 10_000); // 1000s duration
+
+        // Save local progress at 45 seconds (45_000 ms)
+        store.save_progress("local", &item.id, 45_000, 1_000_000).expect("save local");
+
+        // 1. API mode with remote progress: remote is the truth (e.g. 120s -> 120_000ms)
+        let remote_progress = adult_hub_client::WatchProgressDto {
+            video_id: item.id.clone(),
+            position_seconds: 120,
+            duration_seconds: 1000,
+            played_percentage: 12.0,
+            is_played: false,
+            last_watched_at: "2026-11-22T20:00:00Z".into(),
+        };
+        let resume_api = resolve_playback_resume_ms(
+            true,
+            Some(&remote_progress),
+            &store,
+            &session_ctrl,
+            &item,
+        );
+        assert_eq!(resume_api, Some(120_000));
+
+        // 2. API mode with completed remote item: remote truth (is_played: true) returns None even if local has progress
+        let remote_completed = adult_hub_client::WatchProgressDto {
+            video_id: item.id.clone(),
+            position_seconds: 980,
+            duration_seconds: 1000,
+            played_percentage: 98.0,
+            is_played: true,
+            last_watched_at: "2026-11-22T20:00:00Z".into(),
+        };
+        let resume_completed = resolve_playback_resume_ms(
+            true,
+            Some(&remote_completed),
+            &store,
+            &session_ctrl,
+            &item,
+        );
+        assert_eq!(resume_completed, None);
+
+        // 3. API mode with missing / error remote progress (None): falls back to local progress
+        let resume_fallback = resolve_playback_resume_ms(
+            true,
+            None,
+            &store,
+            &session_ctrl,
+            &item,
+        );
+        assert_eq!(resume_fallback, Some(45_000));
+
+        // 4. Legacy mode uses local/candidate resolution
+        let resume_legacy = resolve_playback_resume_ms(
+            false,
+            Some(&remote_progress),
+            &store,
+            &session_ctrl,
+            &item,
+        );
+        assert_eq!(resume_legacy, Some(45_000));
+    }
+
+    #[test]
+    fn test_playback_completion_and_state_derivation() {
+        // Duration: 100 seconds (100_000 ms)
+        let duration_ms = 100_000;
+
+        // Position 50s (50%) -> not completed
+        assert!(!PlaybackSessionController::is_playback_completed(50_000, duration_ms, false));
+
+        // Position 89s (89%) -> not completed
+        assert!(!PlaybackSessionController::is_playback_completed(89_000, duration_ms, false));
+
+        // Position 90s (90%) -> completed
+        assert!(PlaybackSessionController::is_playback_completed(90_000, duration_ms, false));
+
+        // Position 95s (95%) -> completed
+        assert!(PlaybackSessionController::is_playback_completed(95_000, duration_ms, false));
+
+        // Position 10s with is_eof = true -> completed
+        assert!(PlaybackSessionController::is_playback_completed(10_000, duration_ms, true));
     }
 }

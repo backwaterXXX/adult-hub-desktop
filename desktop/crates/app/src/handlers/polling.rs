@@ -554,6 +554,7 @@ pub fn install_polling(ui: &MainWindow, ctx: &AppContext, frame_pending: Arc<Ato
             rep.tick_periodic(pos_ms, paused);
             if let Some(item) = cur_item.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
                 sctrl.checkpoint_progress(item, pos_ms, dur_ms, false);
+                rep.report_api_progress(&item.id, pos_ms, dur_ms, false);
             }
         }
     });
@@ -801,7 +802,9 @@ fn handle_event(
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .take();
                 if let Some(ref item) = finished_item {
-                    session_ctrl.checkpoint_progress(item, pos_ms, dur_ms, true);
+                    let is_completed = crate::session::PlaybackSessionController::is_playback_completed(pos_ms, dur_ms, true);
+                    session_ctrl.checkpoint_progress(item, pos_ms, dur_ms, is_completed);
+                    reporter.report_api_progress(&item.id, pos_ms, dur_ms, is_completed);
                 }
                 reporter.stop_session(pos_ms);
 

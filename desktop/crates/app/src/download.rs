@@ -30,9 +30,11 @@ pub struct DownloadTask {
     pub temp_path: PathBuf,
     pub bytes_downloaded: Arc<AtomicU64>,
     pub total_bytes: Arc<AtomicU64>,
+    pub expected_total_bytes: Arc<AtomicU64>,
     pub cancel_flag: Arc<AtomicBool>,
     pub pause_flag: Arc<AtomicBool>,
     pub supports_range: Arc<AtomicBool>,
+    pub rendition_id: Option<String>,
     pub status: Arc<Mutex<DownloadStatus>>,
     pub child_process: Arc<Mutex<Option<Child>>>,
 }
@@ -134,6 +136,7 @@ impl DownloadManager {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             *st = DownloadStatus::Error("Download cancelled".to_string());
             let _ = std::fs::remove_file(&task.temp_path);
+            adult_hub_client::PartFileMetadata::remove_sidecar(&task.temp_path);
         }
         self.speed_samples
             .lock()
@@ -200,6 +203,16 @@ impl DownloadManager {
         item: &TvItem,
         target_path: PathBuf,
     ) {
+        self.enqueue_task_with_rendition(ctx, item, target_path, None);
+    }
+
+    pub fn enqueue_task_with_rendition(
+        &self,
+        ctx: &crate::context::AppContext,
+        item: &TvItem,
+        target_path: PathBuf,
+        rendition_id: Option<String>,
+    ) {
         if self.is_active_or_queued_for_item(&item.id) {
             return;
         }
@@ -218,14 +231,12 @@ impl DownloadManager {
             target_path,
             temp_path,
             bytes_downloaded: Arc::new(AtomicU64::new(0)),
-            total_bytes: Arc::new(AtomicU64::new(
-                // Placeholder/referral sizes (`.strm` pointers) must never seed
-                // the progress bar; the real total arrives from the server.
-                item.media_size_bytes().unwrap_or(0).max(0) as u64,
-            )),
+            total_bytes: Arc::new(AtomicU64::new(0)),
+            expected_total_bytes: Arc::new(AtomicU64::new(0)),
             cancel_flag: Arc::new(AtomicBool::new(false)),
             pause_flag: Arc::new(AtomicBool::new(false)),
             supports_range: Arc::new(AtomicBool::new(false)),
+            rendition_id,
             status: Arc::new(Mutex::new(DownloadStatus::Queued)),
             child_process: Arc::new(Mutex::new(None)),
         });
@@ -784,7 +795,129 @@ pub fn start_item_download(
     target_path: PathBuf,
     manager: Arc<DownloadManager>,
 ) {
-    manager.enqueue_task(ctx, item, target_path);
+    let rendition_id = {
+        let is_playing = ctx
+            .current_playing_item
+            .lock()
+            .ok()
+            .and_then(|opt| opt.as_ref().map(|it| it.id == item.id))
+            .unwrap_or(false);
+        if is_playing {
+            ctx.active_quality_id
+                .lock()
+                .ok()
+                .map(|q| q.clone())
+                .filter(|q| !q.is_empty() && q != "original")
+        } else {
+            None
+        }
+    };
+    start_item_download_with_rendition(ctx, item, target_path, manager, rendition_id);
+}
+
+pub fn start_item_download_with_rendition(
+    ctx: &crate::context::AppContext,
+    item: &TvItem,
+    target_path: PathBuf,
+    manager: Arc<DownloadManager>,
+    rendition_id: Option<String>,
+) {
+    manager.enqueue_task_with_rendition(ctx, item, target_path, rendition_id);
+}
+
+static AH_TOKEN_REFRESH_MUTEX: Mutex<()> = Mutex::new(());
+
+fn safe_error_category(err: &adult_hub_client::AdultHubError) -> &'static str {
+    match err {
+        adult_hub_client::AdultHubError::Unauthorized { .. } => "Unauthorized",
+        adult_hub_client::AdultHubError::RateLimited(_) => "RateLimited",
+        adult_hub_client::AdultHubError::NotFound(_) => "NotFound",
+        adult_hub_client::AdultHubError::Conflict(_) => "Conflict",
+        adult_hub_client::AdultHubError::PayloadTooLarge { .. } => "PayloadTooLarge",
+        adult_hub_client::AdultHubError::Api { .. } => "Api",
+        adult_hub_client::AdultHubError::InvalidUrl(_) => "InvalidUrl",
+        adult_hub_client::AdultHubError::OriginMismatch { .. } => "OriginMismatch",
+        adult_hub_client::AdultHubError::Io(_) => "Io",
+        adult_hub_client::AdultHubError::Http(_) => "Http",
+        adult_hub_client::AdultHubError::Serialization(_) => "Serialization",
+    }
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+enum RefreshSessionError {
+    NoSessionOrToken,
+    ClientError(String),
+    RefreshFailed(String),
+    PersistenceFailed(String),
+}
+
+/// Synchronously refreshes the Adult Hub session if the token has not already been refreshed
+/// by another task. Returns the active session on success.
+fn refresh_adult_hub_session_if_current(
+    ctx: &crate::context::AppContext,
+    failed_access_token: &str,
+) -> Result<adult_hub_storage::Session, RefreshSessionError> {
+    let _lock = AH_TOKEN_REFRESH_MUTEX
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    // Reread current session after acquiring lock (double-checked pattern)
+    let mut current_sess = ctx
+        .credential_store
+        .get()
+        .ok()
+        .flatten()
+        .ok_or(RefreshSessionError::NoSessionOrToken)?;
+
+    // If another task already rotated the access token, adopt the new session
+    if current_sess.access_token != failed_access_token {
+        crate::log_debug("download: session token was already rotated by another task; reusing new token");
+        return Ok(current_sess);
+    }
+
+    let rt = current_sess
+        .refresh_token
+        .as_ref()
+        .ok_or(RefreshSessionError::NoSessionOrToken)?;
+    let hub_client = match adult_hub_client::AdultHubClient::new(&current_sess.server_url) {
+        Ok(c) => c,
+        Err(e) => {
+            crate::diagnostics::GLOBAL_LOG.w("Auth", &format!("Cannot create client for token refresh: {e}"));
+            return Err(RefreshSessionError::ClientError(e.to_string()));
+        }
+    };
+
+    match hub_client.refresh_token(rt) {
+        Ok(refreshed) => {
+            current_sess.access_token = refreshed.access_token.clone();
+            current_sess.refresh_token = Some(refreshed.refresh_token.clone());
+            if let Err(e) = ctx.credential_store.save(current_sess.clone()) {
+                crate::diagnostics::GLOBAL_LOG.e("Auth", &format!("Failed to persist rotated credentials: {e}"));
+                return Err(RefreshSessionError::PersistenceFailed(format!(
+                    "Failed to save refreshed credentials: {e}"
+                )));
+            }
+            ctx.reporter.set_auth(
+                Some(current_sess.server_url.clone()),
+                Some(current_sess.access_token.clone()),
+            );
+            crate::thumbnails::set_resolver_auth_token(Some(&current_sess.access_token));
+            ctx.phash_coord.update_auth(
+                &current_sess.server_url,
+                Some(&current_sess.access_token),
+            );
+            Ok(current_sess)
+        }
+        Err(e) => {
+            // Log refresh error category safely: no tokens
+            crate::diagnostics::GLOBAL_LOG.w(
+                "Auth",
+                &format!("Adult Hub token refresh failed: category={}", safe_error_category(&e)),
+            );
+            Err(RefreshSessionError::RefreshFailed(safe_error_category(&e).to_string()))
+        }
+    }
 }
 
 /// Execute a single download task (called sequentially from queue worker thread)
@@ -810,13 +943,24 @@ fn run_download_task(
         }
     }
 
-    let existing_bytes = if task.temp_path.is_file() {
-        task.temp_path.metadata().map(|m| m.len()).unwrap_or(0)
-    } else {
-        0
-    };
-
     // Step 2: Resolve media URL and headers
+    let is_adult_hub_api = match ctx.local_store.is_adult_hub_api_enabled() {
+        Ok(enabled) => enabled,
+        Err(e) => {
+            crate::diagnostics::GLOBAL_LOG.e(
+                "Download",
+                &format!("Failed to read Adult Hub API mode setting: {e}"),
+            );
+            *task
+                .status
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = DownloadStatus::Error(
+                "Could not verify storage configuration. Download aborted for safety.".into(),
+            );
+            manager.advance_queue_if_idle(ctx);
+            return;
+        }
+    };
     let session = ctx.credential_store.get().ok().flatten();
     let server_url = session.as_ref().map(|s| s.server_url.as_str());
     let resolver_url = ctx.get_resolver_url();
@@ -825,6 +969,7 @@ fn run_download_task(
     let download_url;
     let mut download_headers = Vec::new();
     let mut is_local_file = false;
+    let source_identity;
 
     let item_opt = ctx.find_catalog_item(&task.item_id).or_else(|| {
         ctx.current_playing_item
@@ -845,6 +990,7 @@ fn run_download_task(
         if !download_url.starts_with("http://") && !download_url.starts_with("https://") {
             is_local_file = true;
         }
+        source_identity = format!("sample:{filename}");
     } else if task.item_id.starts_with("direct:") {
         download_url = task
             .item_id
@@ -852,6 +998,135 @@ fn run_download_task(
             .unwrap_or(&task.item_id)
             .to_owned();
         is_local_file = true;
+        source_identity = format!("direct:{download_url}");
+    } else if is_adult_hub_api {
+        let Some(mut active_session) = session.clone() else {
+            *task
+                .status
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                DownloadStatus::Error("Sign in to Adult Hub before downloading this video.".into());
+            manager.advance_queue_if_idle(ctx);
+            return;
+        };
+
+        let client = match adult_hub_client::AdultHubClient::new(&active_session.server_url) {
+            Ok(c) => c.with_token(&active_session.access_token),
+            Err(e) => {
+                *task
+                    .status
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    DownloadStatus::Error(format!("Invalid Adult Hub server configuration: {e}"));
+                manager.advance_queue_if_idle(ctx);
+                return;
+            }
+        };
+
+        // Fetch playback descriptor, refreshing token if 401
+        let mut descriptor_res = client.get_playback_descriptor(&task.item_id);
+        if let Err(ref err) = descriptor_res {
+            if err.is_unauthorized() {
+                match refresh_adult_hub_session_if_current(ctx, &active_session.access_token) {
+                    Ok(new_sess) => {
+                        active_session = new_sess;
+                        client.set_token(Some(active_session.access_token.clone()));
+                        descriptor_res = client.get_playback_descriptor(&task.item_id);
+                    }
+                    Err(RefreshSessionError::PersistenceFailed(msg)) => {
+                        *task
+                            .status
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            DownloadStatus::Error(format!(
+                                "Failed to persist refreshed session ({msg}). Please sign in again."
+                            ));
+                        manager.advance_queue_if_idle(ctx);
+                        return;
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+
+        let descriptor = match descriptor_res {
+            Ok(d) => d,
+            Err(err) => {
+                let msg = if err.is_unauthorized() {
+                    "Session expired (401 Unauthorized). Please sign in again.".to_string()
+                } else {
+                    format!(
+                        "Could not resolve download descriptor: {}",
+                        crate::playback::format_safe_adult_hub_error(&err)
+                    )
+                };
+                *task
+                    .status
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    DownloadStatus::Error(msg);
+                manager.advance_queue_if_idle(ctx);
+                return;
+            }
+        };
+
+        // Safely set expected_total_bytes and total_bytes from current descriptor / rendition
+        let descriptor_file_size = if let Some(ref rid) = task.rendition_id {
+            if rid != "original" {
+                descriptor
+                    .rendition_by_id(rid)
+                    .and_then(|r| r.file_size_bytes)
+                    .or(descriptor.file_size_bytes)
+            } else {
+                descriptor.file_size_bytes
+            }
+        } else {
+            descriptor.file_size_bytes
+        };
+
+        if let Some(sz) = descriptor_file_size {
+            if sz > 0 {
+                task.expected_total_bytes.store(sz, Ordering::SeqCst);
+                task.total_bytes.store(sz, Ordering::SeqCst);
+            }
+        }
+
+        let stream_path = descriptor.rendition_stream_path(task.rendition_id.as_deref());
+        let Some(stream_path) = stream_path else {
+            *task
+                .status
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                DownloadStatus::Error("No stream path available in Adult Hub playback descriptor".into());
+            manager.advance_queue_if_idle(ctx);
+            return;
+        };
+
+        let resolved = match client.resolve_stream_url(stream_path) {
+            Ok(u) => u,
+            Err(e) => {
+                *task
+                    .status
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    DownloadStatus::Error(format!("Invalid stream URL: {e}"));
+                manager.advance_queue_if_idle(ctx);
+                return;
+            }
+        };
+
+        // client.resolve_stream_url(stream_path) has already validated canonical origin
+        // (including port canonicalization) and rejected embedded credentials.
+        download_url = resolved;
+        let token_val = client.token().unwrap_or_else(|| active_session.access_token.clone());
+        download_headers.push(("Authorization".to_string(), format!("Bearer {token_val}")));
+        source_identity = format!(
+            "adulthub:{}|{}|{}|{}",
+            active_session.server_url.trim_end_matches('/'),
+            task.item_id,
+            task.rendition_id.as_deref().unwrap_or("default"),
+            stream_path
+        );
     } else if task.item_id.starts_with("telegram:")
         || item_opt.as_ref().is_some_and(|it| it.is_telegram())
     {
@@ -896,6 +1171,7 @@ fn run_download_task(
                 return;
             }
         }
+        source_identity = format!("telegram:{}", task.item_id);
     } else {
         // Jellyfin media item: prefer direct static stream (the original unmodified media)
         let server = server_url.unwrap_or("").trim_end_matches('/');
@@ -916,6 +1192,22 @@ fn run_download_task(
                 download_headers.push(("X-Emby-Token".to_string(), token.to_string()));
             }
         }
+        source_identity = format!("jellyfin:{}|{}", server, task.item_id);
+    }
+
+    let mut existing_bytes = 0;
+    if !is_local_file && task.temp_path.is_file() {
+        if let Some(meta) = adult_hub_client::PartFileMetadata::read_from_sidecar(&task.temp_path) {
+            if meta.matches(&task.item_id, task.rendition_id.as_deref(), &source_identity) {
+                existing_bytes = task.temp_path.metadata().map(|m| m.len()).unwrap_or(0);
+            } else {
+                crate::log_debug("download: partial file source identity or rendition mismatch; resetting to byte 0");
+                existing_bytes = 0;
+            }
+        } else {
+            crate::log_debug("download: partial file exists but Range metadata cannot be proven; resetting to byte 0");
+            existing_bytes = 0;
+        }
     }
 
     if task.cancel_flag.load(Ordering::SeqCst) {
@@ -925,6 +1217,7 @@ fn run_download_task(
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             DownloadStatus::Error("Download cancelled".into());
         let _ = std::fs::remove_file(&task.temp_path);
+        adult_hub_client::PartFileMetadata::remove_sidecar(&task.temp_path);
         manager.advance_queue_if_idle(ctx);
         return;
     }
@@ -1018,29 +1311,19 @@ fn run_download_task(
         }
     };
 
-    let mut req = client.get(&download_url);
-    for (k, v) in &download_headers {
-        req = req.header(k, v);
-    }
-
-    if existing_bytes > 0 {
-        req = req.header("Range", format!("bytes={existing_bytes}-"));
-    }
-
-    let mut response = match req.send() {
-        Ok(resp) => {
-            if !resp.status().is_success() && resp.status() != reqwest::StatusCode::PARTIAL_CONTENT
-            {
-                *task
-                    .status
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                    DownloadStatus::Error(format!("Server returned HTTP {}", resp.status()));
-                manager.advance_queue_if_idle(ctx);
-                return;
-            }
-            resp
+    let send_stream_request = |range_offset: u64, hdrs: &[(String, String)]| -> reqwest::Result<reqwest::blocking::Response> {
+        let mut req = client.get(&download_url);
+        for (k, v) in hdrs {
+            req = req.header(k, v);
         }
+        if range_offset > 0 {
+            req = req.header("Range", format!("bytes={range_offset}-"));
+        }
+        req.send()
+    };
+
+    let mut response = match send_stream_request(existing_bytes, &download_headers) {
+        Ok(resp) => resp,
         Err(e) => {
             crate::log_debug(&format!("download: connection error: {e}"));
             *task
@@ -1053,38 +1336,180 @@ fn run_download_task(
         }
     };
 
+    // If 401 in Adult Hub mode, attempt token renewal and retry once
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED && is_adult_hub_api {
+        let failed_token = download_headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+            .and_then(|(_, v)| {
+                v.strip_prefix("Bearer ")
+                    .or_else(|| v.strip_prefix("bearer "))
+            })
+            .unwrap_or("");
+        match refresh_adult_hub_session_if_current(ctx, failed_token) {
+            Ok(new_sess) => {
+                download_headers.retain(|(k, _)| !k.eq_ignore_ascii_case("authorization"));
+                download_headers.push((
+                    "Authorization".to_string(),
+                    format!("Bearer {}", new_sess.access_token),
+                ));
+                if let Ok(retried) = send_stream_request(existing_bytes, &download_headers) {
+                    response = retried;
+                }
+            }
+            Err(RefreshSessionError::PersistenceFailed(msg)) => {
+                *task
+                    .status
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    DownloadStatus::Error(format!(
+                        "Failed to persist refreshed session ({msg}). Please sign in again."
+                    ));
+                manager.advance_queue_if_idle(ctx);
+                return;
+            }
+            Err(_) => {}
+        }
+    }
+
+    let prev_expected = {
+        let e = task.expected_total_bytes.load(Ordering::SeqCst);
+        if e > 0 {
+            Some(e)
+        } else {
+            let t = task.total_bytes.load(Ordering::SeqCst);
+            if t > 0 { Some(t) } else { None }
+        }
+    };
+
+    let cr_hdr = response
+        .headers()
+        .get("content-range")
+        .and_then(|v| v.to_str().ok());
+
+    let mut outcome = adult_hub_client::evaluate_range_resume(
+        response.status().as_u16(),
+        cr_hdr,
+        response.content_length(),
+        existing_bytes,
+        prev_expected,
+    );
+
+    // If 416 was returned when trying to resume with existing_bytes,
+    // safely restart from byte 0:
+    if response.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE && existing_bytes > 0 {
+        crate::log_debug("download: 416 Range Not Satisfiable; attempting restart from byte 0");
+        match send_stream_request(0, &download_headers) {
+            Ok(retried) => {
+                response = retried;
+                let cr = response
+                    .headers()
+                    .get("content-range")
+                    .and_then(|v| v.to_str().ok());
+                outcome = adult_hub_client::evaluate_range_resume(
+                    response.status().as_u16(),
+                    cr,
+                    response.content_length(),
+                    0,
+                    prev_expected,
+                );
+            }
+            Err(e) => {
+                *task
+                    .status
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    DownloadStatus::Error(format!("Connection error on restart: {e}"));
+                manager.advance_queue_if_idle(ctx);
+                return;
+            }
+        }
+    }
+
+    // If range resume evaluation required a restart (e.g. 206 start offset mismatch or missing Content-Range),
+    // and the response was NOT already an HTTP 200 full stream, request the full stream from byte 0:
+    if let adult_hub_client::RangeResumeOutcome::Restart { ref reason, .. } = outcome {
+        if response.status() != reqwest::StatusCode::OK {
+            crate::log_debug(&format!("download: range resume incompatible ({reason}); requesting full stream from byte 0"));
+            match send_stream_request(0, &download_headers) {
+                Ok(retried) => {
+                    response = retried;
+                    let cr = response
+                        .headers()
+                        .get("content-range")
+                        .and_then(|v| v.to_str().ok());
+                    outcome = adult_hub_client::evaluate_range_resume(
+                        response.status().as_u16(),
+                        cr,
+                        response.content_length(),
+                        0,
+                        prev_expected,
+                    );
+                }
+                Err(e) => {
+                    *task
+                        .status
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        DownloadStatus::Error(format!("Connection error on full restart: {e}"));
+                    manager.advance_queue_if_idle(ctx);
+                    return;
+                }
+            }
+        }
+    }
+
+    let current_source_total = match outcome {
+        adult_hub_client::RangeResumeOutcome::Error { message, .. } => {
+            *task
+                .status
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                DownloadStatus::Error(message);
+            manager.advance_queue_if_idle(ctx);
+            return;
+        }
+        adult_hub_client::RangeResumeOutcome::Resume { start_byte, total_bytes } => {
+            if response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+                task.supports_range.store(true, Ordering::SeqCst);
+            }
+            if let Some(tot) = total_bytes {
+                task.total_bytes.store(tot, Ordering::SeqCst);
+                if task.expected_total_bytes.load(Ordering::SeqCst) == 0 {
+                    task.expected_total_bytes.store(tot, Ordering::SeqCst);
+                }
+            }
+            existing_bytes = start_byte;
+            total_bytes
+        }
+        adult_hub_client::RangeResumeOutcome::Restart { reason, total_bytes } => {
+            crate::log_debug(&format!(
+                "download: range resume incompatible ({reason}); restarting from byte 0"
+            ));
+            existing_bytes = 0;
+            if let Some(tot) = total_bytes {
+                task.total_bytes.store(tot, Ordering::SeqCst);
+                task.expected_total_bytes.store(tot, Ordering::SeqCst);
+            }
+            total_bytes
+        }
+    };
+
     let is_partial = response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
     crate::log_debug(&format!(
         "download: HTTP {} after {} ms, resume_from={existing_bytes} bytes, partial={is_partial}",
         response.status().as_u16(),
         download_started.elapsed().as_millis()
     ));
+
     let accepts_ranges = response
         .headers()
         .get("accept-ranges")
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.eq_ignore_ascii_case("bytes"));
 
-    if is_partial || accepts_ranges {
+    if accepts_ranges {
         task.supports_range.store(true, Ordering::SeqCst);
-    }
-
-    if is_partial {
-        if let Some(cr) = response
-            .headers()
-            .get("content-range")
-            .and_then(|v| v.to_str().ok())
-        {
-            if let Some(total_str) = cr.rsplit('/').next() {
-                if let Ok(tot) = total_str.trim().parse::<u64>() {
-                    task.total_bytes.store(tot, Ordering::SeqCst);
-                }
-            }
-        }
-    } else if let Some(len) = response.content_length() {
-        if len > 0 {
-            task.total_bytes.store(len, Ordering::SeqCst);
-        }
     }
 
     let content_type = response
@@ -1185,10 +1610,10 @@ fn run_download_task(
     }
 
     // Step 6: Direct stream download with Range append or fresh create
-    let mut out_file = if is_partial && existing_bytes > 0 {
+    let mut out_file = if existing_bytes > 0 && response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
         task.bytes_downloaded
             .store(existing_bytes, Ordering::SeqCst);
-        match std::fs::OpenOptions::new()
+        let f = match std::fs::OpenOptions::new()
             .append(true)
             .open(&task.temp_path)
         {
@@ -1202,10 +1627,18 @@ fn run_download_task(
                 manager.advance_queue_if_idle(ctx);
                 return;
             }
-        }
-    } else {
+        };
+        let meta = adult_hub_client::PartFileMetadata::new(
+            &task.item_id,
+            task.rendition_id.clone(),
+            &source_identity,
+            current_source_total,
+        );
+        let _ = meta.save_to_sidecar(&task.temp_path);
+        f
+    } else if response.status() == reqwest::StatusCode::OK || response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
         task.bytes_downloaded.store(0, Ordering::SeqCst);
-        match File::create(&task.temp_path) {
+        let f = match File::create(&task.temp_path) {
             Ok(f) => f,
             Err(e) => {
                 *task
@@ -1216,7 +1649,23 @@ fn run_download_task(
                 manager.advance_queue_if_idle(ctx);
                 return;
             }
-        }
+        };
+        let meta = adult_hub_client::PartFileMetadata::new(
+            &task.item_id,
+            task.rendition_id.clone(),
+            &source_identity,
+            current_source_total,
+        );
+        let _ = meta.save_to_sidecar(&task.temp_path);
+        f
+    } else {
+        *task
+            .status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            DownloadStatus::Error(format!("Server returned unexpected status {}", response.status()));
+        manager.advance_queue_if_idle(ctx);
+        return;
     };
 
     let mut buffer = [0u8; 64 * 1024]; // 64 KB streaming buffer
@@ -1226,6 +1675,7 @@ fn run_download_task(
         if task.cancel_flag.load(Ordering::SeqCst) {
             drop(out_file);
             let _ = std::fs::remove_file(&task.temp_path);
+            adult_hub_client::PartFileMetadata::remove_sidecar(&task.temp_path);
             *task
                 .status
                 .lock()
@@ -1253,7 +1703,6 @@ fn run_download_task(
                         "download: write error after {downloaded_accum} bytes: {e}"
                     ));
                     drop(out_file);
-                    let _ = std::fs::remove_file(&task.temp_path);
                     *task
                         .status
                         .lock()
@@ -1270,8 +1719,9 @@ fn run_download_task(
                 crate::log_debug(&format!(
                     "download: network read error after {downloaded_accum} bytes: {e}"
                 ));
+                let _ = out_file.flush();
                 drop(out_file);
-                let _ = std::fs::remove_file(&task.temp_path);
+                // Do NOT delete task.temp_path on network read error: preserve partial data for future resume!
                 *task
                     .status
                     .lock()
@@ -1285,7 +1735,6 @@ fn run_download_task(
 
     if let Err(e) = out_file.flush() {
         drop(out_file);
-        let _ = std::fs::remove_file(&task.temp_path);
         *task
             .status
             .lock()
@@ -1337,6 +1786,7 @@ fn finalize_download(
         // Fallback to copy + remove if across filesystem boundary
         if let Err(ce) = std::fs::copy(temp_path, &final_dest) {
             let _ = std::fs::remove_file(temp_path);
+            adult_hub_client::PartFileMetadata::remove_sidecar(temp_path);
             *status
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) =
@@ -1345,6 +1795,7 @@ fn finalize_download(
         }
         let _ = std::fs::remove_file(temp_path);
     }
+    adult_hub_client::PartFileMetadata::remove_sidecar(temp_path);
 
     let folder = final_dest
         .parent()
@@ -1494,9 +1945,11 @@ mod tests {
             temp_path: PathBuf::from("/tmp/test1.mp4.part"),
             bytes_downloaded: Arc::new(AtomicU64::new(100)),
             total_bytes: Arc::new(AtomicU64::new(1000)),
+            expected_total_bytes: Arc::new(AtomicU64::new(1000)),
             cancel_flag: Arc::new(AtomicBool::new(false)),
             pause_flag: Arc::new(AtomicBool::new(false)),
             supports_range: Arc::new(AtomicBool::new(true)),
+            rendition_id: None,
             status: status.clone(),
             child_process: Arc::new(Mutex::new(None)),
         });
@@ -1538,9 +1991,11 @@ mod tests {
             temp_path: PathBuf::from("/tmp/test2.mp4.part"),
             bytes_downloaded: Arc::new(AtomicU64::new(0)),
             total_bytes: Arc::new(AtomicU64::new(500)),
+            expected_total_bytes: Arc::new(AtomicU64::new(500)),
             cancel_flag: Arc::new(AtomicBool::new(false)),
             pause_flag: Arc::new(AtomicBool::new(false)),
             supports_range: Arc::new(AtomicBool::new(false)),
+            rendition_id: Some("alt_720".to_string()),
             status: Arc::new(Mutex::new(DownloadStatus::Queued)),
             child_process: Arc::new(Mutex::new(None)),
         });
@@ -1555,5 +2010,130 @@ mod tests {
         manager.cancel_queued("test-task-2");
         assert_eq!(manager.queued_tasks().len(), 0);
         assert!(!manager.is_active_or_queued_for_item("test-task-2"));
+    }
+
+    #[test]
+    fn test_sidecar_metadata_optional_expected_total_bytes() {
+        let temp_dir = std::env::temp_dir().join(format!("ah-down-opt-{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let part_file = temp_dir.join("test_opt.mp4.part");
+        std::fs::write(&part_file, b"data").unwrap();
+
+        // Unknown size: expected_total_bytes is None (preserves optional behavior)
+        let meta = adult_hub_client::PartFileMetadata::new(
+            "vid_unknown",
+            None,
+            "adulthub:https://server.test|vid_unknown|default|/stream",
+            None,
+        );
+        meta.save_to_sidecar(&part_file).unwrap();
+
+        let loaded = adult_hub_client::PartFileMetadata::read_from_sidecar(&part_file).unwrap();
+        assert_eq!(loaded.expected_total_bytes, None);
+        assert!(loaded.matches(
+            "vid_unknown",
+            None,
+            "adulthub:https://server.test|vid_unknown|default|/stream"
+        ));
+
+        // When source total is established, updating sidecar records the validated total
+        let updated_meta = adult_hub_client::PartFileMetadata::new(
+            "vid_unknown",
+            None,
+            "adulthub:https://server.test|vid_unknown|default|/stream",
+            Some(2048),
+        );
+        updated_meta.save_to_sidecar(&part_file).unwrap();
+        let loaded2 = adult_hub_client::PartFileMetadata::read_from_sidecar(&part_file).unwrap();
+        assert_eq!(loaded2.expected_total_bytes, Some(2048));
+
+        adult_hub_client::PartFileMetadata::remove_sidecar(&part_file);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_safe_error_category() {
+        use adult_hub_client::AdultHubError;
+        assert_eq!(
+            safe_error_category(&AdultHubError::Unauthorized {
+                status: 401,
+                message: "token secret_123 expired".into()
+            }),
+            "Unauthorized"
+        );
+        assert_eq!(
+            safe_error_category(&AdultHubError::RateLimited("429".into())),
+            "RateLimited"
+        );
+        assert_eq!(
+            safe_error_category(&AdultHubError::NotFound("404".into())),
+            "NotFound"
+        );
+        assert_eq!(
+            safe_error_category(&AdultHubError::Conflict("409".into())),
+            "Conflict"
+        );
+        assert_eq!(
+            safe_error_category(&AdultHubError::PayloadTooLarge { limit: 1000 }),
+            "PayloadTooLarge"
+        );
+        assert_eq!(
+            safe_error_category(&AdultHubError::InvalidUrl("bad".into())),
+            "InvalidUrl"
+        );
+    }
+
+    #[test]
+    fn test_source_mismatch_and_proven_metadata_check() {
+        let temp_dir = std::env::temp_dir().join(format!("ah-down-test-{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let part_file = temp_dir.join("test_file.mp4.part");
+
+        // Write some partial data
+        std::fs::write(&part_file, b"existing 100 bytes of data").unwrap();
+        assert!(part_file.is_file());
+
+        // Without metadata sidecar: Range metadata cannot be proven -> existing_bytes must be 0
+        let unproven_meta = adult_hub_client::PartFileMetadata::read_from_sidecar(&part_file);
+        assert!(unproven_meta.is_none());
+
+        // Save metadata for rendition "720p"
+        let meta = adult_hub_client::PartFileMetadata::new(
+            "item_123",
+            Some("720p".to_string()),
+            "adulthub:https://server.example|item_123|720p|/stream/720",
+            Some(100_000),
+        );
+        meta.save_to_sidecar(&part_file).unwrap();
+
+        // When queried with matching rendition/source:
+        let loaded = adult_hub_client::PartFileMetadata::read_from_sidecar(&part_file).unwrap();
+        assert!(loaded.matches(
+            "item_123",
+            Some("720p"),
+            "adulthub:https://server.example|item_123|720p|/stream/720"
+        ));
+
+        // When queried after rendition changed to "1080p":
+        assert!(!loaded.matches(
+            "item_123",
+            Some("1080p"),
+            "adulthub:https://server.example|item_123|1080p|/stream/1080"
+        ));
+
+        // When queried after rendition changed to original (None):
+        assert!(!loaded.matches(
+            "item_123",
+            None,
+            "adulthub:https://server.example|item_123|default|/stream/orig"
+        ));
+
+        // Sidecar removal on cancellation / finalize
+        adult_hub_client::PartFileMetadata::remove_sidecar(&part_file);
+        assert!(adult_hub_client::PartFileMetadata::read_from_sidecar(&part_file).is_none());
+        // Verify partial file was NOT removed by sidecar removal
+        assert!(part_file.is_file());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

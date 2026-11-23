@@ -533,6 +533,7 @@ export component SettingsView inherits Rectangle {
     // Authentication & Jellyfin Server state
     in property <bool> is-logged-in: false;
     in property <string> logged-in-user: "";
+    in-out property <bool> adult-hub-api-enabled: false;
     in-out property <string> server-url-input: "http://localhost:8096";
     in-out property <string> username-input: "";
     in-out property <string> password-input: "";
@@ -658,6 +659,7 @@ export component SettingsView inherits Rectangle {
     callback category-changed(string);
     callback perform-login(string, string, string);
     callback perform-logout();
+    callback toggle-adult-hub-api();
     callback start-quick-connect();
     callback cancel-quick-connect();
     callback scan-servers();
@@ -1012,7 +1014,7 @@ export component SettingsView inherits Rectangle {
                                         height: 26px;
 
                                         Text {
-                                            text: "Jellyfin Server";
+                                            text: root.adult-hub-api-enabled ? "Adult Hub Server (API Preview)" : "Jellyfin Server";
                                             color: HubTheme.text-primary;
                                             font-size: HubTheme.card-title-size;
                                             font-weight: 700;
@@ -1025,6 +1027,37 @@ export component SettingsView inherits Rectangle {
                                         }
 
                                         Rectangle { horizontal-stretch: 1; }
+                                    }
+
+                                    HorizontalLayout {
+                                        spacing: 12px;
+                                        alignment: center;
+
+                                        VerticalLayout {
+                                            horizontal-stretch: 1;
+                                            spacing: 2px;
+
+                                            Text {
+                                                text: "Adult Hub Direct API (Opt-in)";
+                                                color: HubTheme.text-primary;
+                                                font-size: 13px;
+                                                font-weight: 600;
+                                            }
+
+                                            Text {
+                                                text: "Connect to the native Adult Hub Server API. Keep disabled for legacy Jellyfin fallback.";
+                                                color: HubTheme.text-secondary;
+                                                font-size: 11px;
+                                                wrap: word-wrap;
+                                            }
+                                        }
+
+                                        SettingsToggle {
+                                            checked: root.adult-hub-api-enabled;
+                                            disabled: root.is-logged-in;
+                                            accessible-name: "Adult Hub Direct API";
+                                            toggled => { root.toggle-adult-hub-api(); }
+                                        }
                                     }
 
                                 if !root.is-logged-in : VerticalLayout {
@@ -1050,7 +1083,7 @@ export component SettingsView inherits Rectangle {
                                     }
 
                                     // Local LAN Server Discovery
-                                    VerticalLayout {
+                                    if !root.adult-hub-api-enabled : VerticalLayout {
                                         spacing: 8px;
 
                                         HorizontalLayout {
@@ -1198,7 +1231,7 @@ export component SettingsView inherits Rectangle {
                                             }
                                         }
 
-                                        SettingsButton {
+                                        if !root.adult-hub-api-enabled : SettingsButton {
                                             text: root.quick-connect-active
                                                 ? (root.quick-connect-authenticating ? "Signing in…" : (root.quick-connect-code == "" ? "Connecting…" : "Waiting…"))
                                                 : "Quick Connect";
@@ -1210,7 +1243,7 @@ export component SettingsView inherits Rectangle {
                                     }
 
                                     // Quick Connect PIN banner
-                                    if root.quick-connect-active || root.quick-connect-expired : Rectangle {
+                                    if !root.adult-hub-api-enabled && (root.quick-connect-active || root.quick-connect-expired) : Rectangle {
                                         border-radius: HubTheme.control-radius;
                                         background: HubTheme.surface;
                                         border-width: 1px;
@@ -1359,7 +1392,7 @@ export component SettingsView inherits Rectangle {
                                         }
                                     }
 
-                                    HorizontalLayout {
+                                    if !root.adult-hub-api-enabled : HorizontalLayout {
                                         spacing: 12px;
 
                                         Text {
@@ -1378,7 +1411,20 @@ export component SettingsView inherits Rectangle {
                                         }
                                     }
 
-                                    if root.library-options.length > 0 : VerticalLayout {
+                                    if root.adult-hub-api-enabled : HorizontalLayout {
+                                        spacing: 12px;
+
+                                        Text {
+                                            text: "Active Catalog: Canonical Direct Play API";
+                                            color: HubTheme.text-primary;
+                                            font-size: 13px;
+                                            font-weight: 600;
+                                            vertical-alignment: center;
+                                            horizontal-stretch: 1;
+                                        }
+                                    }
+
+                                    if !root.adult-hub-api-enabled && root.library-options.length > 0 : VerticalLayout {
                                         spacing: 6px;
                                         for library in root.library-options : Rectangle {
                                             height: 40px;

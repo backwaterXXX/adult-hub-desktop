@@ -1882,7 +1882,7 @@ component CatalogGridCard inherits Rectangle {
         card-width: root.card-width;
         item: root.card;
         is-focused: root.focused-index == root.card.card-index;
-        clicked => { root.open-performer(root.card.title); }
+        clicked => { root.open-performer(root.card.id != "" ? root.card.id : (root.card.title != "" ? "name:" + root.card.title : "")); }
     }
     if root.card.provider == "studio" : StudioCard {
         width: 100%;
@@ -2621,6 +2621,7 @@ export component MainWindow inherits Window {
     in-out property <string> home-performer-error: "";
 
     // Auth & Settings state
+    in-out property <bool> adult-hub-api-enabled: false;
     in-out property <string> server-url-input: "http://localhost:8096";
     in-out property <string> username-input: "";
     in-out property <string> password-input: "";
@@ -2697,6 +2698,7 @@ export component MainWindow inherits Window {
     // Catalog & Auth Callbacks
     callback perform-login(string, string, string);
     callback perform-logout();
+    callback toggle-adult-hub-api();
     callback start-quick-connect();
     callback cancel-quick-connect();
     callback accept-cleartext-http-consent();
@@ -2853,6 +2855,7 @@ export component MainWindow inherits Window {
     in-out property <bool> performer-loading: false;
     in-out property <string> performer-error: "";
     in-out property <string> performer-name: "";
+    in-out property <string> performer-id: "";
     in-out property <int> performer-movie-count: -1;
     in-out property <image> performer-image;
     in-out property <bool> performer-has-image: false;
@@ -7928,6 +7931,7 @@ export component MainWindow inherits Window {
                 build-id: root.build-id;
                 is-logged-in: root.is-logged-in;
                 logged-in-user: root.logged-in-user;
+                adult-hub-api-enabled <=> root.adult-hub-api-enabled;
                 server-url-input <=> root.server-url-input;
                 username-input <=> root.username-input;
                 password-input <=> root.password-input;
@@ -7997,6 +8001,7 @@ export component MainWindow inherits Window {
                 category-changed(section) => { root.settings-section = section; }
                 perform-login(username, password, server-url) => { root.perform-login(username, password, server-url); }
                 perform-logout => { root.perform-logout(); }
+                toggle-adult-hub-api => { root.toggle-adult-hub-api(); }
                 start-quick-connect => { root.start-quick-connect(); }
                 cancel-quick-connect => { root.cancel-quick-connect(); }
                 scan-servers => { root.scan-servers(); }
@@ -8294,7 +8299,7 @@ export component MainWindow inherits Window {
                                     role: performer.role;
                                     has-image: performer.has-image;
                                     image: performer.image;
-                                    clicked => { root.open-performer-profile(performer.name); }
+                                    clicked => { root.open-performer-profile(performer.id != "" ? performer.id : (performer.name != "" ? "name:" + performer.name : "")); }
                                 }
                             }
                         }

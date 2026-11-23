@@ -1143,14 +1143,14 @@ pub fn tv_item_to_card(item: &TvItem) -> VideoCardData {
     let duration_str = item.formatted_duration();
     let provider = if item.is_telegram() {
         "telegram".to_string()
-    } else if let Some(provider) = item.source_provider.as_deref() {
-        provider.to_ascii_lowercase()
     } else if item.genres.iter().any(|tag| tag == "__adult_hub_performer") {
         "performer".to_string()
     } else if item.genres.iter().any(|tag| tag == "__adult_hub_studio") {
         "studio".to_string()
     } else if item.genres.iter().any(|tag| tag == "__adult_hub_genre") {
         "genre".to_string()
+    } else if let Some(provider) = item.source_provider.as_deref() {
+        provider.to_ascii_lowercase()
     } else if item.id == "sample"
         || item.id == "sample2"
         || item.id.starts_with('/')
@@ -1280,11 +1280,48 @@ pub fn tv_item_to_card(item: &TvItem) -> VideoCardData {
 
 pub fn tv_item_to_card_for_server(item: &TvItem, server_url: &str) -> VideoCardData {
     let mut card = tv_item_to_card(item);
-    let (image_url, fallback_image_url, alternate_image_url) = if item.source_provider.is_some() {
+    let (image_url, fallback_image_url, alternate_image_url) = if item.source_provider.is_some()
+        || item.primary_image_tag.as_deref().is_some_and(|t| {
+            let trimmed = t.trim();
+            !trimmed.starts_with("//")
+                && (trimmed.starts_with('/')
+                    || trimmed.starts_with("http://")
+                    || trimmed.starts_with("https://"))
+        })
+    {
         (
             item.primary_image_tag
                 .as_deref()
-                .and_then(crate::thumbnails::resolve_resolver_thumbnail_url),
+                .and_then(crate::thumbnails::resolve_resolver_thumbnail_url)
+                .or_else(|| {
+                    let tag = item.primary_image_tag.as_deref()?.trim();
+                    if tag.is_empty() || tag.starts_with("//") {
+                        return None;
+                    }
+                    let base = url::Url::parse(server_url).ok()?;
+                    if !matches!(base.scheme(), "http" | "https") {
+                        return None;
+                    }
+                    if tag.starts_with("http://") || tag.starts_with("https://") {
+                        let parsed_tag = url::Url::parse(tag).ok()?;
+                        if parsed_tag.origin() == base.origin() {
+                            Some(parsed_tag.to_string())
+                        } else {
+                            None
+                        }
+                    } else {
+                        let base_path = base.path().trim_end_matches('/');
+                        let rel_path = tag.trim_start_matches('/');
+                        let mut resolved_url = base.clone();
+                        let full_path = if base_path.is_empty() {
+                            format!("/{rel_path}")
+                        } else {
+                            format!("{base_path}/{rel_path}")
+                        };
+                        resolved_url.set_path(&full_path);
+                        Some(resolved_url.to_string())
+                    }
+                }),
             None,
             None,
         )

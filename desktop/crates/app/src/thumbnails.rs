@@ -12,7 +12,25 @@ static LOW_RAM_MODE: AtomicBool = AtomicBool::new(false);
 static CACHE_WRITE_LOCK: Mutex<()> = Mutex::new(());
 static RESOLVER_BASE_URL: OnceLock<RwLock<String>> = OnceLock::new();
 static RESOLVER_AUTH_TOKEN: OnceLock<RwLock<Option<String>>> = OnceLock::new();
+static JELLYFIN_BASE_URL: OnceLock<RwLock<String>> = OnceLock::new();
 static JELLYFIN_DEVICE_ID: OnceLock<RwLock<String>> = OnceLock::new();
+
+pub fn set_jellyfin_base_url(base_url: &str) {
+    if let Ok(mut current) = jellyfin_base_url().write() {
+        *current = base_url.trim().trim_end_matches('/').to_string();
+    }
+}
+
+pub fn current_jellyfin_base_url() -> String {
+    jellyfin_base_url()
+        .read()
+        .map(|current| current.clone())
+        .unwrap_or_default()
+}
+
+fn jellyfin_base_url() -> &'static RwLock<String> {
+    JELLYFIN_BASE_URL.get_or_init(|| RwLock::new(String::new()))
+}
 
 pub fn set_jellyfin_device_id(device_id: &str) {
     if let Ok(mut current) = jellyfin_device_id().write() {
@@ -207,24 +225,43 @@ pub fn resolve_resolver_thumbnail_url(url_or_path: &str) -> Option<String> {
 
 fn resolve_resolver_thumbnail_url_at(url_or_path: &str, base: &str) -> Option<String> {
     let value = url_or_path.trim();
-    if value.is_empty() {
+    if value.is_empty() || value.starts_with("//") {
         return None;
     }
     if let Ok(image_url) = url::Url::parse(value) {
+        if !matches!(image_url.scheme(), "http" | "https") {
+            return None;
+        }
         if !image_url.username().is_empty() || image_url.password().is_some() {
             return None;
         }
-        if image_url.path().starts_with("/admin/") && !base.is_empty() {
-            let mut configured_origin = url::Url::parse(base).ok()?;
+        let is_rewrite_route = image_url.path().starts_with("/admin/")
+            || image_url.path() == "/admin"
+            || image_url.path().starts_with("/api/v1/artwork/")
+            || image_url.path() == "/api/v1/artwork";
+
+        if is_rewrite_route {
+            if base.is_empty() {
+                return None;
+            }
+            let configured_origin = url::Url::parse(base).ok()?;
             if !matches!(configured_origin.scheme(), "http" | "https") {
                 return None;
             }
-            configured_origin.set_path(image_url.path());
-            configured_origin.set_query(image_url.query());
-            configured_origin.set_fragment(image_url.fragment());
-            return Some(configured_origin.into());
+            let mut configured = configured_origin.clone();
+            let base_path = configured_origin.path().trim_end_matches('/');
+            let target_path = image_url.path();
+            let full_path = if base_path.is_empty() {
+                target_path.to_string()
+            } else {
+                format!("{base_path}{target_path}")
+            };
+            configured.set_path(&full_path);
+            configured.set_query(image_url.query());
+            configured.set_fragment(image_url.fragment());
+            return Some(configured.into());
         }
-        return matches!(image_url.scheme(), "http" | "https").then(|| image_url.to_string());
+        return Some(image_url.to_string());
     }
 
     if base.is_empty() {
@@ -234,12 +271,25 @@ fn resolve_resolver_thumbnail_url_at(url_or_path: &str, base: &str) -> Option<St
     if !matches!(base_url.scheme(), "http" | "https") {
         return None;
     }
-    if !base_url.path().ends_with('/') {
-        let path = format!("{}/", base_url.path());
-        base_url.set_path(&path);
-    }
-    let resolved = base_url.join(value).ok()?;
-    matches!(resolved.scheme(), "http" | "https").then(|| resolved.to_string())
+    let (without_frag, frag) = match value.split_once('#') {
+        Some((w, f)) => (w, Some(f)),
+        None => (value, None),
+    };
+    let (path_only, query) = match without_frag.split_once('?') {
+        Some((p, q)) => (p, Some(q)),
+        None => (without_frag, None),
+    };
+    let base_path = base_url.path().trim_end_matches('/');
+    let rel_path = path_only.trim_start_matches('/');
+    let full_path = if base_path.is_empty() {
+        format!("/{rel_path}")
+    } else {
+        format!("{base_path}/{rel_path}")
+    };
+    base_url.set_path(&full_path);
+    base_url.set_query(query);
+    base_url.set_fragment(frag);
+    matches!(base_url.scheme(), "http" | "https").then(|| base_url.to_string())
 }
 
 pub fn cache_dir() -> PathBuf {
@@ -512,21 +562,35 @@ fn send_image_request(
             && is_jellyfin_item_image_url(current.as_str())
             && let Some(token) = token.filter(|token| !token.is_empty())
         {
-            let device_id = jellyfin_device_id()
+            let jellyfin_base = jellyfin_base_url()
                 .read()
-                .map(|value| value.clone())
-                .unwrap_or_else(|_| "adult-hub-desktop".into());
-            let authorization = format!(
-                "MediaBrowser Client=\"{}\", Device=\"Desktop\", DeviceId=\"{}\", Version=\"{}\", Token=\"{}\"",
-                adult_hub_client::CLIENT_NAME,
-                device_id,
-                env!("CARGO_PKG_VERSION"),
-                token
-            );
-            request = request
-                .header("X-Emby-Authorization", &authorization)
-                .header(reqwest::header::AUTHORIZATION, &authorization)
-                .header("X-Emby-Token", token);
+                .map(|base| base.clone())
+                .unwrap_or_default();
+            let server_origin_matches = if !jellyfin_base.is_empty() {
+                url::Url::parse(&jellyfin_base)
+                    .ok()
+                    .map(|u| u.origin())
+                    == Some(current.origin())
+            } else {
+                false
+            };
+            if server_origin_matches {
+                let device_id = jellyfin_device_id()
+                    .read()
+                    .map(|value| value.clone())
+                    .unwrap_or_else(|_| "adult-hub-desktop".into());
+                let authorization = format!(
+                    "MediaBrowser Client=\"{}\", Device=\"Desktop\", DeviceId=\"{}\", Version=\"{}\", Token=\"{}\"",
+                    adult_hub_client::CLIENT_NAME,
+                    device_id,
+                    env!("CARGO_PKG_VERSION"),
+                    token
+                );
+                request = request
+                    .header("X-Emby-Authorization", &authorization)
+                    .header(reqwest::header::AUTHORIZATION, &authorization)
+                    .header("X-Emby-Token", token);
+            }
         }
         if is_resolver_origin_request(&original, &current, &resolver_base)
             && !is_jellyfin_item_image_url(current.as_str())
@@ -537,7 +601,9 @@ fn send_image_request(
                 .and_then(|value| value.clone())
                 .or_else(|| token.map(str::to_owned));
             if let Some(token) = resolver_token.filter(|value| !value.is_empty()) {
-                request = request.header("X-Emby-Token", token);
+                request = request
+                    .header("X-Emby-Token", &token)
+                    .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"));
             }
         }
         let response = request.send().map_err(ImageRequestError::Transport)?;
@@ -1043,8 +1109,48 @@ mod tests {
         assert_eq!(
             resolved.as_deref(),
             Some(
+                "https://resolver.example/prefix/admin/api/v2/video-phash/thumbnail?video_id=telegram%3Ac%3A1"
+            )
+        );
+
+        let resolved_trailing = resolve_resolver_thumbnail_url_at(
+            "https://old.example/admin/api/v2/video-phash/thumbnail?video_id=telegram%3Ac%3A1",
+            "https://resolver.example/prefix/",
+        );
+        assert_eq!(
+            resolved_trailing.as_deref(),
+            Some(
+                "https://resolver.example/prefix/admin/api/v2/video-phash/thumbnail?video_id=telegram%3Ac%3A1"
+            )
+        );
+
+        let resolved_no_prefix = resolve_resolver_thumbnail_url_at(
+            "https://old.example/admin/api/v2/video-phash/thumbnail?video_id=telegram%3Ac%3A1",
+            "https://resolver.example",
+        );
+        assert_eq!(
+            resolved_no_prefix.as_deref(),
+            Some(
                 "https://resolver.example/admin/api/v2/video-phash/thumbnail?video_id=telegram%3Ac%3A1"
             )
+        );
+
+        let resolved_api = resolve_resolver_thumbnail_url_at(
+            "https://old.example/api/v1/artwork/video/telegram%3Ac%3A1/poster",
+            "https://resolver.example/prefix",
+        );
+        assert_eq!(
+            resolved_api.as_deref(),
+            Some("https://resolver.example/prefix/api/v1/artwork/video/telegram%3Ac%3A1/poster")
+        );
+
+        let resolved_rel_api = resolve_resolver_thumbnail_url_at(
+            "/api/v1/artwork/performer/stashdb%3Auuid-123/photo",
+            "https://resolver.example/prefix",
+        );
+        assert_eq!(
+            resolved_rel_api.as_deref(),
+            Some("https://resolver.example/prefix/api/v1/artwork/performer/stashdb%3Auuid-123/photo")
         );
     }
 
@@ -1067,6 +1173,47 @@ mod tests {
             "https://resolver.example",
         );
         assert_eq!(resolved.as_deref(), Some("https://cdn.example/poster.jpg"));
+
+        // External CDN URL remains usable even when resolver base is empty or invalid
+        assert_eq!(
+            resolve_resolver_thumbnail_url_at("https://cdn.example/poster.jpg", "").as_deref(),
+            Some("https://cdn.example/poster.jpg")
+        );
+        assert_eq!(
+            resolve_resolver_thumbnail_url_at("https://cdn.example/poster.jpg", "invalid-scheme://").as_deref(),
+            Some("https://cdn.example/poster.jpg")
+        );
+
+        // External /api/... URLs untouched (not narrowed /api/v1/artwork/ rewrite routes)
+        assert_eq!(
+            resolve_resolver_thumbnail_url_at(
+                "https://cdn.example/api/v2/items/poster.jpg",
+                "https://resolver.example"
+            )
+            .as_deref(),
+            Some("https://cdn.example/api/v2/items/poster.jpg")
+        );
+        assert_eq!(
+            resolve_resolver_thumbnail_url_at("https://cdn.example/api/v2/items/poster.jpg", "")
+                .as_deref(),
+            Some("https://cdn.example/api/v2/items/poster.jpg")
+        );
+
+        // Resolver local routes require valid resolver base; rejected when base is empty
+        assert_eq!(
+            resolve_resolver_thumbnail_url_at(
+                "https://old.example/api/v1/artwork/video/v1/poster",
+                ""
+            ),
+            None
+        );
+        assert_eq!(
+            resolve_resolver_thumbnail_url_at(
+                "https://old.example/admin/api/v2/video-phash/thumbnail?id=1",
+                ""
+            ),
+            None
+        );
     }
 
     #[test]
@@ -1076,12 +1223,57 @@ mod tests {
             None
         );
         assert_eq!(
+            resolve_resolver_thumbnail_url_at("file:///tmp/poster.jpg", ""),
+            None
+        );
+        assert_eq!(
+            resolve_resolver_thumbnail_url_at("ftp://cdn.example/poster.jpg", "https://resolver.example"),
+            None
+        );
+        assert_eq!(
+            resolve_resolver_thumbnail_url_at("javascript:alert(1)", "https://resolver.example"),
+            None
+        );
+        assert_eq!(
+            resolve_resolver_thumbnail_url_at("data:image/png;base64,123", ""),
+            None
+        );
+        assert_eq!(
             resolve_resolver_thumbnail_url_at(
                 "https://user:secret@cdn.example/poster.jpg",
                 "https://resolver.example"
             ),
             None
         );
+        assert_eq!(
+            resolve_resolver_thumbnail_url_at(
+                "https://user:secret@cdn.example/poster.jpg",
+                ""
+            ),
+            None
+        );
+        assert_eq!(
+            resolve_resolver_thumbnail_url_at(
+                "https://user@cdn.example/poster.jpg",
+                "https://resolver.example"
+            ),
+            None
+        );
+        assert_eq!(
+            resolve_resolver_thumbnail_url_at(
+                "https://:secret@cdn.example/poster.jpg",
+                "https://resolver.example"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn jellyfin_base_url_getter_and_clearing() {
+        super::set_jellyfin_base_url("https://jellyfin.example:8096/");
+        assert_eq!(super::current_jellyfin_base_url(), "https://jellyfin.example:8096");
+        super::set_jellyfin_base_url("");
+        assert_eq!(super::current_jellyfin_base_url(), "");
     }
 
     #[test]
@@ -1159,6 +1351,77 @@ mod tests {
         assert!(!cdn_request.contains("x-emby-token:"));
         super::set_resolver_auth_token(None);
         super::set_resolver_base_url("");
+    }
+
+    #[test]
+    fn jellyfin_auth_token_sent_only_to_configured_jellyfin_origin_and_fails_closed() {
+        let _guard = RESOLVER_REQUEST_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        // 1. Unset Jellyfin base fails closed (no token sent)
+        super::set_jellyfin_base_url("");
+        let listener_unconfigured = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr_unconfigured = listener_unconfigured.local_addr().unwrap();
+        let server_unconfigured = std::thread::spawn(move || {
+            let (mut stream, _) = listener_unconfigured.accept().unwrap();
+            let request = read_request(&mut stream);
+            respond(
+                &mut stream,
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+            );
+            request
+        });
+
+        let result = super::send_image_request(
+            &format!("http://{addr_unconfigured}/Items/12345678-1234-4234-8234-123456789012/Images/Primary"),
+            Some("secret-jellyfin-token"),
+        );
+        assert!(result.is_ok());
+        let unconfigured_req = server_unconfigured.join().unwrap().to_ascii_lowercase();
+        assert!(!unconfigured_req.contains("x-emby-token"));
+        assert!(!unconfigured_req.contains("secret-jellyfin-token"));
+
+        // 2. Configured Jellyfin base sends token to configured origin but strips on redirect to CDN
+        let jf = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let jf_addr = jf.local_addr().unwrap();
+        let cdn = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let cdn_addr = cdn.local_addr().unwrap();
+
+        let cdn_server = std::thread::spawn(move || {
+            let (mut stream, _) = cdn.accept().unwrap();
+            let request = read_request(&mut stream);
+            respond(
+                &mut stream,
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+            );
+            request
+        });
+
+        let jf_server = std::thread::spawn(move || {
+            let (mut stream, _) = jf.accept().unwrap();
+            let request = read_request(&mut stream);
+            let location = format!("http://{cdn_addr}/image.jpg");
+            let response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            respond(&mut stream, response.as_bytes());
+            request
+        });
+
+        super::set_jellyfin_base_url(&format!("http://{jf_addr}"));
+        let result = super::send_image_request(
+            &format!("http://{jf_addr}/Items/12345678-1234-4234-8234-123456789012/Images/Primary"),
+            Some("secret-jellyfin-token"),
+        );
+        assert!(result.is_ok());
+        let jf_req = jf_server.join().unwrap().to_ascii_lowercase();
+        let cdn_req = cdn_server.join().unwrap().to_ascii_lowercase();
+        assert!(jf_req.contains("x-emby-token: secret-jellyfin-token"));
+        assert!(!cdn_req.contains("x-emby-token"));
+        assert!(!cdn_req.contains("secret-jellyfin-token"));
+
+        super::set_jellyfin_base_url("");
     }
 
     #[test]

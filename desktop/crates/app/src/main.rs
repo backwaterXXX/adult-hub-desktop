@@ -252,12 +252,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             String::new()
         }
     };
+    let is_adult_hub_api = local_store.is_adult_hub_api_enabled().unwrap_or(false);
     let initial_auth_token = session_opt
         .as_ref()
         .filter(|_| session_origin_approved)
         .map(|s| s.access_token.clone());
-    thumbnails::set_resolver_base_url(&initial_resolver_url);
-    thumbnails::set_resolver_auth_token(initial_auth_token.as_deref());
+    if let Some(session) = session_opt.as_ref().filter(|_| session_origin_approved) {
+        apply_session_thumbnail_urls(session, is_adult_hub_api, &initial_resolver_url);
+    } else {
+        thumbnails::set_jellyfin_base_url("");
+        thumbnails::set_resolver_base_url(&initial_resolver_url);
+        thumbnails::set_resolver_auth_token(initial_auth_token.as_deref());
+    }
 
     let phash_coord = phash::PhashCoordinator::new(
         local_store.clone(),
@@ -304,54 +310,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Synchronize initial settings to UI
-    if let Ok(config) = local_store.export_non_secret_config() {
-        let limit_mb = config.cache_limit_mb;
-        thumbnails::set_cache_limit_mb(limit_mb.max(0) as usize);
-        thumbnails::set_low_ram_mode(config.low_ram_mode);
-        autoplay_active.store(config.autoplay_next, std::sync::atomic::Ordering::SeqCst);
-        ui.set_autoplay_active(config.autoplay_next);
-        ui.set_seek_step_sec(config.seek_step_sec);
-        ui.set_seek_step_label(format!("Step: {}s", config.seek_step_sec).into());
-        let limit_str = thumbnails::format_cache_limit(limit_mb);
-        ui.set_cache_limit_label(format!("Cache Limit: {limit_str}").into());
-        ui.set_cache_limit_mb(limit_mb);
-        let used_bytes = thumbnails::current_cache_size_bytes();
-        let used_str = thumbnails::format_cache_bytes(used_bytes);
-        ui.set_cache_usage_text(format!("Used: {used_str} / Limit: {limit_str}").into());
-        ui.set_phash_active(config.phash_on_playback);
-        ui.set_low_ram_active(config.low_ram_mode);
-        if let Some(url) = config
-            .resolver_base_url
-            .clone()
-            .or_else(|| local_store.get_setting("resolver_url").ok().flatten())
-        {
-            ui.set_resolver_url_input(url.clone().into());
-            ui.set_saved_resolver_url(url.into());
-            ui.set_resolver_url_dirty(false);
-        } else if !initial_resolver_url.is_empty() {
-            ui.set_resolver_url_input(initial_resolver_url.clone().into());
-            ui.set_saved_resolver_url(initial_resolver_url.clone().into());
-            ui.set_resolver_url_dirty(false);
+    match local_store.export_non_secret_config() {
+        Ok(config) => {
+            let limit_mb = config.cache_limit_mb;
+            thumbnails::set_cache_limit_mb(limit_mb.max(0) as usize);
+            thumbnails::set_low_ram_mode(config.low_ram_mode);
+            autoplay_active.store(config.autoplay_next, std::sync::atomic::Ordering::SeqCst);
+            ui.set_autoplay_active(config.autoplay_next);
+            ui.set_seek_step_sec(config.seek_step_sec);
+            ui.set_seek_step_label(format!("Step: {}s", config.seek_step_sec).into());
+            let limit_str = thumbnails::format_cache_limit(limit_mb);
+            ui.set_cache_limit_label(format!("Cache Limit: {limit_str}").into());
+            ui.set_cache_limit_mb(limit_mb);
+            let used_bytes = thumbnails::current_cache_size_bytes();
+            let used_str = thumbnails::format_cache_bytes(used_bytes);
+            ui.set_cache_usage_text(format!("Used: {used_str} / Limit: {limit_str}").into());
+            ui.set_phash_active(config.phash_on_playback);
+            ui.set_low_ram_active(config.low_ram_mode);
+            if let Some(enabled) = config.adult_hub_api_enabled {
+                ui.set_adult_hub_api_enabled(enabled);
+            }
+            if let Some(url) = config
+                .resolver_base_url
+                .clone()
+                .or_else(|| local_store.get_setting("resolver_url").ok().flatten())
+            {
+                ui.set_resolver_url_input(url.clone().into());
+                ui.set_saved_resolver_url(url.into());
+                ui.set_resolver_url_dirty(false);
+            } else if !initial_resolver_url.is_empty() {
+                ui.set_resolver_url_input(initial_resolver_url.clone().into());
+                ui.set_saved_resolver_url(initial_resolver_url.clone().into());
+                ui.set_resolver_url_dirty(false);
+            }
+            if let Some(lib_name) = config.selected_library_name {
+                ui.set_current_library(lib_name.into());
+            }
+            let tags_model = Rc::new(slint::VecModel::from(
+                config
+                    .excluded_tags
+                    .into_iter()
+                    .map(slint::SharedString::from)
+                    .collect::<Vec<_>>(),
+            ));
+            ui.set_excluded_tags_list(tags_model.into());
+            let channels_model = Rc::new(slint::VecModel::from(
+                config
+                    .hidden_channel_ids
+                    .into_iter()
+                    .map(slint::SharedString::from)
+                    .collect::<Vec<_>>(),
+            ));
+            ui.set_hidden_channels_list(channels_model.into());
         }
-        if let Some(lib_name) = config.selected_library_name {
-            ui.set_current_library(lib_name.into());
+        Err(err) => {
+            eprintln!("Failed to load configuration: {err}");
+            ui.set_status(format!("Failed to load configuration: {err}").into());
+            ui.set_status_color(slint::Color::from_rgb_u8(240, 100, 100));
         }
-        let tags_model = Rc::new(slint::VecModel::from(
-            config
-                .excluded_tags
-                .into_iter()
-                .map(slint::SharedString::from)
-                .collect::<Vec<_>>(),
-        ));
-        ui.set_excluded_tags_list(tags_model.into());
-        let channels_model = Rc::new(slint::VecModel::from(
-            config
-                .hidden_channel_ids
-                .into_iter()
-                .map(slint::SharedString::from)
-                .collect::<Vec<_>>(),
-        ));
-        ui.set_hidden_channels_list(channels_model.into());
     }
     handlers::refresh_approved_http_origins(&ui, &local_store);
 
@@ -1973,6 +1989,25 @@ fn set_window_icon(ui: &MainWindow) {
         .with_winit_window(|window| window.set_window_icon(Some(icon)));
 }
 
+pub(crate) fn apply_session_thumbnail_urls(
+    session: &Session,
+    is_adult_hub_api: bool,
+    resolver_url: &str,
+) {
+    if is_adult_hub_api {
+        crate::thumbnails::set_jellyfin_base_url("");
+    } else {
+        crate::thumbnails::set_jellyfin_base_url(&session.server_url);
+    }
+    let effective_resolver_url = if resolver_url.is_empty() {
+        session.server_url.as_str()
+    } else {
+        resolver_url
+    };
+    crate::thumbnails::set_resolver_base_url(effective_resolver_url);
+    crate::thumbnails::set_resolver_auth_token(Some(&session.access_token));
+}
+
 fn activate_session(
     ui: &MainWindow,
     session: &Session,
@@ -1991,8 +2026,8 @@ fn activate_session(
     } else {
         resolver_url
     };
-    crate::thumbnails::set_resolver_base_url(effective_resolver_url);
-    crate::thumbnails::set_resolver_auth_token(Some(&session.access_token));
+    let is_adult_hub_api = local_store.is_adult_hub_api_enabled().unwrap_or(false);
+    apply_session_thumbnail_urls(session, is_adult_hub_api, effective_resolver_url);
     phash_coord.update_auth(effective_resolver_url, Some(&session.access_token));
     ui.set_is_logged_in(true);
     ui.set_logged_in_user(session.username.clone().into());
@@ -2016,6 +2051,47 @@ mod tests {
     use catalog::*;
     use options::Options;
     use playback::*;
+
+    #[test]
+    fn test_apply_session_thumbnail_urls_clears_stale_jellyfin_url_in_api_mode() {
+        let session = Session {
+            server_url: "https://adulthub.example:8090".into(),
+            user_id: "user-1".into(),
+            username: "tester".into(),
+            access_token: "token-abc".into(),
+            server_name: "Adult Hub".into(),
+            refresh_token: None,
+        };
+
+        // Precondition: Jellyfin base URL has stale value from prior session
+        crate::thumbnails::set_jellyfin_base_url("https://stale-jf.example:8096");
+        assert_eq!(
+            crate::thumbnails::current_jellyfin_base_url(),
+            "https://stale-jf.example:8096"
+        );
+
+        // Adult Hub API mode: stale Jellyfin base URL MUST be cleared
+        apply_session_thumbnail_urls(&session, true, "");
+        assert_eq!(crate::thumbnails::current_jellyfin_base_url(), "");
+
+        // Jellyfin mode: Jellyfin base URL MUST be preserved/set to session.server_url
+        let jf_session = Session {
+            server_url: "https://jf.example:8096".into(),
+            user_id: "user-2".into(),
+            username: "tester2".into(),
+            access_token: "token-xyz".into(),
+            server_name: "Jellyfin".into(),
+            refresh_token: None,
+        };
+        apply_session_thumbnail_urls(&jf_session, false, "");
+        assert_eq!(
+            crate::thumbnails::current_jellyfin_base_url(),
+            "https://jf.example:8096"
+        );
+
+        // Clean up
+        crate::thumbnails::set_jellyfin_base_url("");
+    }
 
     #[test]
     fn options_parse_empty() {
@@ -2767,9 +2843,11 @@ mod tests {
             temp_path: temp_dir.join("Movie ABC.mp4.part"),
             bytes_downloaded: Arc::new(AtomicU64::new(500)),
             total_bytes: Arc::new(AtomicU64::new(1000)),
+            expected_total_bytes: Arc::new(AtomicU64::new(1000)),
             cancel_flag: Arc::new(AtomicBool::new(false)),
             pause_flag: Arc::new(AtomicBool::new(false)),
             supports_range: Arc::new(AtomicBool::new(false)),
+            rendition_id: None,
             status: status.clone(),
             child_process: Arc::new(Mutex::new(None)),
         });

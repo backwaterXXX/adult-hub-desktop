@@ -1199,6 +1199,46 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
         });
     }
 
+    // Toggle Adult Hub API (Opt-in)
+    {
+        let weak = ui.as_weak();
+        let local_store = local_store.clone();
+        let credential_store = credential_store.clone();
+        ui.on_toggle_adult_hub_api(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let active = !ui.get_adult_hub_api_enabled();
+            if let Err(err) = adult_hub_storage::check_adult_hub_mode_change(
+                ui.get_is_logged_in(),
+                active,
+                &local_store,
+                &credential_store,
+            ) {
+                show_error(&ui, err.to_string());
+                return;
+            }
+            match local_store.set_adult_hub_api_enabled(active) {
+                Ok(()) => {
+                    if active {
+                        crate::thumbnails::set_jellyfin_base_url("");
+                    }
+                    ui.set_adult_hub_api_enabled(active);
+                    if active {
+                        ui.set_toast_message("Adult Hub API mode enabled (opt-in preview)".into());
+                        ui.set_toast_type("info".into());
+                    } else {
+                        ui.set_toast_message("Jellyfin fallback mode enabled".into());
+                        ui.set_toast_type("info".into());
+                    }
+                    ui.set_toast_action_text("".into());
+                    ui.set_toast_visible(true);
+                }
+                Err(err) => {
+                    show_error(&ui, format!("Failed to update API mode setting: {err}"));
+                }
+            }
+        });
+    }
+
     // 10. Excluded Tags
     {
         let weak = ui.as_weak();
@@ -1345,30 +1385,52 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
         ui.on_import_config(move || {
             let Some(ui) = weak.upgrade() else { return };
             let import_path = pick_config_file();
-            match import_path.and_then(|p| std::fs::read_to_string(&p).ok()) {
-                Some(json) => match local_store.import_non_secret_config_json(&json) {
-                    Ok(()) => {
-                        crate::diagnostics::GLOBAL_LOG.i("Config", "Config imported successfully");
-                        if let Ok(config) = local_store.export_non_secret_config() {
-                            crate::thumbnails::set_cache_limit_mb(
-                                config.cache_limit_mb.max(0) as usize
-                            );
-                            ui.set_seek_step_sec(config.seek_step_sec);
-                            ui.set_seek_step_label(
-                                format!("Step: {}s", config.seek_step_sec).into(),
-                            );
-                            ui.set_cache_limit_label(
-                                format!(
-                                    "Cache Limit: {}",
-                                    crate::thumbnails::format_cache_limit(config.cache_limit_mb)
-                                )
-                                .into(),
-                            );
-                            ui.set_phash_active(config.phash_on_playback);
-                            autoplay_active.store(config.autoplay_next, Ordering::SeqCst);
-                            ui.set_autoplay_active(config.autoplay_next);
-                            crate::thumbnails::set_low_ram_mode(config.low_ram_mode);
-                            ui.set_low_ram_active(config.low_ram_mode);
+            let Some(json) = import_path.and_then(|p| std::fs::read_to_string(&p).ok()) else {
+                show_error(&ui, "Nie wybrano pliku konfiguracji");
+                return;
+            };
+
+            // Finding 5: Refuse an imported mode change while a session is active
+            if let Ok(parsed) = serde_json::from_str::<adult_hub_storage::AppConfigExport>(&json) {
+                if let Some(imported_mode) = parsed.adult_hub_api_enabled {
+                    if let Err(err) = adult_hub_storage::check_adult_hub_mode_change(
+                        ui.get_is_logged_in(),
+                        imported_mode,
+                        &local_store,
+                        &credential_store,
+                    ) {
+                        show_error(&ui, err.to_string());
+                        return;
+                    }
+                }
+            }
+
+            match local_store.import_non_secret_config_json(&json) {
+                Ok(()) => {
+                    crate::diagnostics::GLOBAL_LOG.i("Config", "Config imported successfully");
+                    if let Ok(config) = local_store.export_non_secret_config() {
+                        crate::thumbnails::set_cache_limit_mb(
+                            config.cache_limit_mb.max(0) as usize
+                        );
+                        ui.set_seek_step_sec(config.seek_step_sec);
+                        ui.set_seek_step_label(
+                            format!("Step: {}s", config.seek_step_sec).into(),
+                        );
+                        ui.set_cache_limit_label(
+                            format!(
+                                "Cache Limit: {}",
+                                crate::thumbnails::format_cache_limit(config.cache_limit_mb)
+                            )
+                            .into(),
+                        );
+                        ui.set_phash_active(config.phash_on_playback);
+                        autoplay_active.store(config.autoplay_next, Ordering::SeqCst);
+                        ui.set_autoplay_active(config.autoplay_next);
+                        crate::thumbnails::set_low_ram_mode(config.low_ram_mode);
+                        ui.set_low_ram_active(config.low_ram_mode);
+                        if let Some(enabled) = config.adult_hub_api_enabled {
+                            ui.set_adult_hub_api_enabled(enabled);
+                        }
                             if let Some(url) = config.resolver_base_url {
                                 ui.set_resolver_url_input(url.into());
                             }
@@ -1455,13 +1517,9 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
                         crate::thumbnails::set_resolver_auth_token(active_token.as_deref());
                     }
                     Err(err) => show_error(&ui, format!("Odrzucono import konfiguracji: {err}")),
-                },
-                None => {
-                    show_error(&ui, "Nie wybrano pliku konfiguracji");
                 }
-            }
-        });
-    }
+            });
+        }
 
     // 15. Export Redacted Diagnostics
     {

@@ -1100,6 +1100,248 @@ fn get_resume_search_catalog_page(
     })
 }
 
+fn get_adult_hub_catalog_page(
+    session: &Session,
+    local_store: &LocalStore,
+    category: &str,
+    query: &str,
+    start_index: usize,
+    filters: CatalogFilters,
+) -> std::result::Result<CatalogPage, JellyfinError> {
+    if category == "Watch History" {
+        let query = query.trim().to_lowercase();
+        let mut history = local_store
+            .get_watch_history(100)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|json| serde_json::from_str::<TvItem>(&json).ok())
+            .filter(|item| item_matches_query(item, &query) && filters.accepts(item))
+            .collect::<Vec<_>>();
+        if filters.sort == 1 {
+            history.sort_by_key(|a| a.title.to_lowercase());
+        } else if filters.sort == 2 {
+            history.sort_by_key(|item| item.runtime_ticks.unwrap_or(0));
+        }
+        if !filters.descending && filters.sort != 0 {
+            history.reverse();
+        }
+        let total_count = history.len();
+        let items = history
+            .into_iter()
+            .skip(start_index)
+            .take(CATALOG_PAGE_SIZE)
+            .collect::<Vec<_>>();
+        let next_start = start_index + items.len();
+        return Ok(CatalogPage {
+            items,
+            next_start,
+            total_count,
+            has_more: next_start < total_count,
+            supplemental_total: 0,
+        });
+    }
+
+    let client = adult_hub_client::AdultHubClient::new(&session.server_url)
+        .map_err(|e| JellyfinError::Api(format!("Failed to initialize Adult Hub client: {e}")))?
+        .with_token(&session.access_token);
+
+    if category == "Categories" {
+        let q_term = (!query.trim().is_empty()).then(|| query.trim());
+        let cat_resp = client
+            .get_categories(&adult_hub_client::CatalogTaxonomyQuery {
+                offset: Some(start_index as u64),
+                limit: Some(CATALOG_PAGE_SIZE as u64),
+                q: q_term,
+            })
+            .map_err(|err| {
+                if err.is_unauthorized() {
+                    JellyfinError::Unauthorized(401)
+                } else {
+                    JellyfinError::Api(err.to_string())
+                }
+            })?;
+
+        let total_count = cat_resp.total_count as usize;
+        let has_more = cat_resp.has_more();
+        let items: Vec<TvItem> = cat_resp
+            .items
+            .into_iter()
+            .map(|item| item.to_category_tv_item())
+            .collect();
+        let next_start = start_index + items.len();
+
+        return Ok(CatalogPage {
+            items,
+            next_start,
+            total_count,
+            has_more,
+            supplemental_total: 0,
+        });
+    }
+
+    if category == "Studios" {
+        let q_term = (!query.trim().is_empty()).then(|| query.trim());
+        let studio_resp = client
+            .get_studios(&adult_hub_client::CatalogTaxonomyQuery {
+                offset: Some(start_index as u64),
+                limit: Some(CATALOG_PAGE_SIZE as u64),
+                q: q_term,
+            })
+            .map_err(|err| {
+                if err.is_unauthorized() {
+                    JellyfinError::Unauthorized(401)
+                } else {
+                    JellyfinError::Api(err.to_string())
+                }
+            })?;
+
+        let total_count = studio_resp.total_count as usize;
+        let has_more = studio_resp.has_more();
+        let items: Vec<TvItem> = studio_resp
+            .items
+            .into_iter()
+            .map(|item| item.to_studio_tv_item())
+            .collect();
+        let next_start = start_index + items.len();
+
+        return Ok(CatalogPage {
+            items,
+            next_start,
+            total_count,
+            has_more,
+            supplemental_total: 0,
+        });
+    }
+
+    if category == "Performers" {
+        let q_term = (!query.trim().is_empty()).then(|| query.trim());
+        let letter_term = (!filters.performer_letter.trim().is_empty())
+            .then(|| filters.performer_letter.trim());
+        let perf_resp = client
+            .get_performers(&adult_hub_client::CatalogPerformersQuery {
+                offset: Some(start_index as u64),
+                limit: Some(CATALOG_PAGE_SIZE as u64),
+                q: q_term,
+                letter: letter_term,
+                photo_only: filters.performer_photo_only.then_some(true),
+                sort: Some("name"),
+                direction: filters.descending.then_some("desc"),
+            })
+            .map_err(|err| {
+                if err.is_unauthorized() {
+                    JellyfinError::Unauthorized(401)
+                } else {
+                    JellyfinError::Api(err.to_string())
+                }
+            })?;
+
+        let total_count = perf_resp.total_count as usize;
+        let has_more = perf_resp.has_more();
+        let items: Vec<TvItem> = perf_resp
+            .items
+            .into_iter()
+            .map(TvItem::from)
+            .collect();
+        let next_start = start_index + items.len();
+
+        return Ok(CatalogPage {
+            items,
+            next_start,
+            total_count,
+            has_more,
+            supplemental_total: 0,
+        });
+    }
+
+    let sort_str = match filters.sort {
+        1 => "title",
+        2 => "duration",
+        _ => "latest",
+    };
+    let direction_str = if filters.descending { "desc" } else { "asc" };
+
+    let q_term = (!query.trim().is_empty()).then(|| query.trim());
+    let category_filter = (!filters.genre.is_empty()).then(|| filters.genre.as_str());
+    let studio_filter = (!filters.studio.is_empty()).then(|| filters.studio.as_str());
+    let performer_filter = (!filters.performer.is_empty()).then(|| filters.performer.as_str());
+
+    let is_favorites_category = category == "Favorites";
+    let is_fav_filter = is_favorites_category || filters.favorites_only;
+
+    if is_favorites_category
+        && q_term.is_none()
+        && category_filter.is_none()
+        && studio_filter.is_none()
+        && performer_filter.is_none()
+        && filters.sort == 0
+    {
+        let fav_resp = client
+            .get_favorites(
+                Some(start_index as u64),
+                Some(CATALOG_PAGE_SIZE as u64),
+                Some(sort_str),
+                Some(direction_str),
+            )
+            .map_err(|err| {
+                if err.is_unauthorized() {
+                    JellyfinError::Unauthorized(401)
+                } else {
+                    JellyfinError::Api(err.to_string())
+                }
+            })?;
+
+        let total_count = fav_resp.total_count as usize;
+        let has_more = fav_resp.has_more();
+        let items: Vec<TvItem> = fav_resp.items.into_iter().map(TvItem::from).collect();
+        let next_start = start_index + items.len();
+
+        return Ok(CatalogPage {
+            items,
+            next_start,
+            total_count,
+            has_more,
+            supplemental_total: 0,
+        });
+    }
+
+    let req = adult_hub_client::CatalogVideosQuery {
+        offset: Some(start_index as u64),
+        limit: Some(CATALOG_PAGE_SIZE as u64),
+        sort: Some(sort_str),
+        direction: Some(direction_str),
+        channel_id: None,
+        q: q_term,
+        category: category_filter,
+        tag: None,
+        studio: studio_filter,
+        performer: performer_filter,
+        performer_id: None,
+        min_duration: None,
+        is_favorite: is_fav_filter.then_some(true),
+    };
+
+    let resp = client.get_videos(&req).map_err(|err| {
+        if err.is_unauthorized() {
+            JellyfinError::Unauthorized(401)
+        } else {
+            JellyfinError::Api(err.to_string())
+        }
+    })?;
+
+    let items: Vec<TvItem> = resp.items.into_iter().map(TvItem::from).collect();
+    let total_count = resp.total_count as usize;
+    let next_start = start_index + items.len();
+    let has_more = resp.has_more;
+
+    Ok(CatalogPage {
+        items,
+        next_start,
+        total_count,
+        has_more,
+        supplemental_total: 0,
+    })
+}
+
 fn get_catalog_page(
     jellyfin: &JellyfinClient,
     resolver: &ResolverClient,
@@ -1111,6 +1353,20 @@ fn get_catalog_page(
     start_index: usize,
     filters: CatalogFilters,
 ) -> std::result::Result<CatalogPage, JellyfinError> {
+    match local_store.is_adult_hub_api_enabled() {
+        Ok(true) => {
+            return get_adult_hub_catalog_page(
+                session,
+                local_store,
+                category,
+                query,
+                start_index,
+                filters,
+            );
+        }
+        Err(e) => return Err(JellyfinError::Api(format!("Failed to read server API mode setting: {e}"))),
+        Ok(false) => {}
+    }
     if category == "Watch History" {
         let query = query.trim().to_lowercase();
         let mut history = local_store
@@ -1863,8 +2119,23 @@ pub fn current_nav_destination(
         "video-details" => NavDestination::VideoDetails {
             id: ui.get_detail_id().to_string(),
         },
-        "performer-details" => NavDestination::PerformerDetails {
-            name: ui.get_performer_name().to_string(),
+        "performer-details" => {
+            let pid = ui.get_performer_id().to_string();
+            let key = if !pid.is_empty() {
+                pid
+            } else {
+                let name = ui.get_performer_name().to_string();
+                if name.starts_with("name:") {
+                    name
+                } else if !name.is_empty() {
+                    format!("name:{name}")
+                } else {
+                    String::new()
+                }
+            };
+            NavDestination::PerformerDetails {
+                name: key,
+            }
         },
         "studio-details" => NavDestination::StudioDetails {
             name: ui.get_studio_name().to_string(),
@@ -2152,7 +2423,89 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     ui.set_status("Connecting to server...".into());
                     ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
 
+                    let is_adult_hub_api = match local_store.is_adult_hub_api_enabled() {
+                        Ok(enabled) => enabled,
+                        Err(e) => {
+                            let msg = format!("Failed to read server API mode setting: {e}");
+                            show_error(&ui, &msg);
+                            ui.set_login_modal_message(msg.clone().into());
+                            ui.set_toast_message(msg.into());
+                            ui.set_toast_type("error".into());
+                            ui.set_toast_action_text("".into());
+                            ui.set_toast_visible(true);
+                            return;
+                        }
+                    };
                     std::thread::spawn(move || {
+                        if is_adult_hub_api {
+                            match adult_hub_client::AdultHubClient::new(&normalized)
+                                .and_then(|client| client.login(&username, &password))
+                            {
+                                Ok(auth) => {
+                                    let session = Session {
+                                        server_url: normalized.clone(),
+                                        user_id: auth.user.id.clone(),
+                                        username: auth.user.username.clone(),
+                                        access_token: auth.access_token.clone(),
+                                        server_name: "Adult Hub".into(),
+                                        refresh_token: Some(auth.refresh_token.clone()),
+                                    };
+                                    let session_save = credential_store.save(session.clone());
+                                    reporter.set_auth(
+                                        Some(session.server_url.clone()),
+                                        Some(session.access_token.clone()),
+                                    );
+                                    crate::thumbnails::set_jellyfin_base_url("");
+                                    crate::thumbnails::set_resolver_base_url(&session.server_url);
+                                    crate::thumbnails::set_resolver_auth_token(Some(&session.access_token));
+                                    phash_coord.update_auth(&session.server_url, Some(&session.access_token));
+                                    slint::invoke_from_event_loop(move || {
+                                        let Some(ui) = weak.upgrade() else { return };
+                                        ui.set_is_logged_in(true);
+                                        ui.set_login_modal_visible(false);
+                                        ui.set_login_modal_message("".into());
+                                        ui.set_logged_in_user(session.username.into());
+                                        ui.set_server_url_input(session.server_url.into());
+                                        ui.invoke_filter_category("Latest".into());
+                                        ui.set_active_screen("home".into());
+                                        ui.invoke_refresh_home();
+                                        let warning = session_save.err().map(|_| {
+                                            "Could not save this session securely. You can use it until the app closes, then sign in again.".to_owned()
+                                        });
+                                        if let Some(message) = warning {
+                                            ui.set_status(message.clone().into());
+                                            ui.set_status_color(slint::Color::from_rgb_u8(255, 190, 90));
+                                            ui.set_toast_message(message.into());
+                                            ui.set_toast_type("warning".into());
+                                        } else {
+                                            ui.set_status("Logged in successfully".into());
+                                            ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
+                                            ui.set_toast_message("Connected to Adult Hub successfully!".into());
+                                            ui.set_toast_type("success".into());
+                                        }
+                                        ui.set_toast_action_text("".into());
+                                        ui.set_toast_visible(true);
+                                    })
+                                    .ok();
+                                }
+                                Err(error) => {
+                                    slint::invoke_from_event_loop(move || {
+                                        let Some(ui) = weak.upgrade() else { return };
+                                        show_error(&ui, format!("Login failed: {error}"));
+                                        ui.set_login_modal_message(
+                                            format!("Login failed: {error}").into(),
+                                        );
+                                        ui.set_toast_message(format!("Login failed: {error}").into());
+                                        ui.set_toast_type("error".into());
+                                        ui.set_toast_action_text("".into());
+                                        ui.set_toast_visible(true);
+                                    })
+                                    .ok();
+                                }
+                            }
+                            return;
+                        }
+
                         let public_info = jellyfin.get_public_system_info(&normalized).ok();
                         match jellyfin.authenticate_by_name(&normalized, &username, &password) {
                             Ok(auth) => {
@@ -2164,6 +2517,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                                     server_name: public_info
                                         .map(|p| p.name)
                                         .unwrap_or_else(|| "Jellyfin".into()),
+                                    refresh_token: None,
                                 };
                                 let session_save = credential_store.save(session.clone());
                                 reporter.set_auth(
@@ -2171,6 +2525,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                                     Some(session.access_token.clone()),
                                 );
                                 let eff_res_url = resolver_base_url_for(&local_store, &session);
+                                crate::thumbnails::set_jellyfin_base_url(&session.server_url);
                                 phash_coord.update_auth(&eff_res_url, Some(&session.access_token));
                                 slint::invoke_from_event_loop(move || {
                                     let Some(ui) = weak.upgrade() else { return };
@@ -2184,7 +2539,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                                     ui.invoke_refresh_library_list();
                                     ui.invoke_refresh_home();
                                     let warning = session_save.err().map(|_| {
-                                        "Windows could not save this session securely. You can use it until the app closes, then sign in again.".to_owned()
+                                        "Could not save this session securely. You can use it until the app closes, then sign in again.".to_owned()
                                     });
                                     if let Some(message) = warning {
                                         ui.set_status(message.clone().into());
@@ -2241,6 +2596,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             let _ = credential_store.clear();
             reporter.set_auth(None, None);
             crate::thumbnails::set_resolver_auth_token(None);
+            crate::thumbnails::set_jellyfin_base_url("");
             phash_coord.update_auth("", None);
             home_catalog
                 .lock()
@@ -2388,6 +2744,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                                         server_name: public_info
                                             .map(|p| p.name)
                                             .unwrap_or_else(|| "Jellyfin".into()),
+                                        refresh_token: None,
                                     };
                                     let _ = credential_store.save(session.clone());
                                     reporter.set_auth(
@@ -2713,6 +3070,168 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     .ok();
                     return;
                 };
+
+                let is_adult_hub = match local_store.is_adult_hub_api_enabled() {
+                    Ok(enabled) => enabled,
+                    Err(e) => {
+                        let msg = format!("Failed to read server API mode setting: {e}");
+                        slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = weak.upgrade() {
+                                ui.set_home_is_loading(false);
+                                ui.set_home_error_message(msg.into());
+                            }
+                        })
+                        .ok();
+                        return;
+                    }
+                };
+
+                if is_adult_hub {
+                    let client_res = adult_hub_client::AdultHubClient::new(&session.server_url)
+                        .map(|c| c.with_token(&session.access_token));
+
+                    let client = match client_res {
+                        Ok(c) => c,
+                        Err(err) => {
+                            let is_unauth = err.is_unauthorized();
+                            let msg = format!("Failed to initialize Adult Hub client: {err}");
+                            slint::invoke_from_event_loop(move || {
+                                if let Some(ui) = weak.upgrade() {
+                                    ui.set_home_is_loading(false);
+                                    ui.set_home_error_message(msg.clone().into());
+                                    ui.set_home_latest_error(msg.into());
+                                    if is_unauth {
+                                        ui.set_is_logged_in(false);
+                                        ui.set_login_modal_visible(true);
+                                        ui.set_login_modal_message(
+                                            "Session expired (401 Unauthorized). Please sign in again."
+                                                .into(),
+                                        );
+                                        ui.set_toast_message("Session expired. Please reconnect.".into());
+                                        ui.set_toast_type("warning".into());
+                                        ui.set_toast_action_text("Sign In".into());
+                                        ui.set_toast_visible(true);
+                                    }
+                                }
+                            })
+                            .ok();
+                            return;
+                        }
+                    };
+
+                    let latest_res = client.get_catalog_videos(&adult_hub_client::CatalogVideosQuery {
+                        offset: Some(0),
+                        limit: Some(16),
+                        sort: Some("latest"),
+                        ..Default::default()
+                    });
+
+                    let latest_items = match latest_res {
+                        Ok(resp) => resp.items.into_iter().map(TvItem::from).collect::<Vec<_>>(),
+                        Err(err) => {
+                            let is_unauth = err.is_unauthorized();
+                            let msg = format!("Failed to load latest videos: {err}");
+                            slint::invoke_from_event_loop(move || {
+                                if let Some(ui) = weak.upgrade() {
+                                    ui.set_home_is_loading(false);
+                                    ui.set_home_error_message(msg.clone().into());
+                                    ui.set_home_latest_error(msg.into());
+                                    if is_unauth {
+                                        ui.set_is_logged_in(false);
+                                        ui.set_login_modal_visible(true);
+                                        ui.set_login_modal_message(
+                                            "Session expired (401 Unauthorized). Please sign in again."
+                                                .into(),
+                                        );
+                                        ui.set_toast_message("Session expired. Please reconnect.".into());
+                                        ui.set_toast_type("warning".into());
+                                        ui.set_toast_action_text("Sign In".into());
+                                        ui.set_toast_visible(true);
+                                    }
+                                }
+                            })
+                            .ok();
+                            return;
+                        }
+                    };
+
+                    let mut resume = Vec::new();
+                    if let Ok(records) = local_store.get_all_telegram_progress(50) {
+                        for record in records.into_iter().filter(|record| {
+                            !record.is_played
+                                && record.position_ms > 15_000
+                                && (record.duration_ms == 0
+                                    || record.position_ms < record.duration_ms * 9 / 10)
+                        }) {
+                            let provider_id = record.provider_video_id.clone();
+                            resume.push(TvItem {
+                                id: format!("telegram:{provider_id}"),
+                                title: if record.title.is_empty() {
+                                    format!("Telegram {provider_id}")
+                                } else {
+                                    record.title
+                                },
+                                runtime_ticks: Some((record.duration_ms.saturating_mul(10_000)) as i64),
+                                playback_position_ticks: (record.position_ms.saturating_mul(10_000))
+                                    as i64,
+                                played_percentage: (record.duration_ms > 0).then_some(
+                                    record.position_ms as f64 / record.duration_ms as f64 * 100.0,
+                                ),
+                                primary_image_tag: record.thumbnail_url,
+                                source_provider: Some("telegram".into()),
+                                ..Default::default()
+                            });
+                        }
+                    }
+
+                    let history = local_store
+                        .get_watch_history(16)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter_map(|json| serde_json::from_str::<TvItem>(&json).ok())
+                        .collect::<Vec<_>>();
+
+                    let mut all_home_items = Vec::new();
+                    all_home_items.extend(resume.clone());
+                    all_home_items.extend(history.clone());
+                    all_home_items.extend(latest_items.clone());
+
+                    *home_catalog
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = all_home_items;
+
+                    slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak.upgrade() {
+                            let resume_cards = resume.iter().map(tv_item_to_card).collect::<Vec<_>>();
+                            let history_cards = history.iter().map(tv_item_to_card).collect::<Vec<_>>();
+                            let latest_cards = latest_items.iter().map(tv_item_to_card).collect::<Vec<_>>();
+                            let empty_cards: Vec<VideoCardData> = Vec::new();
+
+                            ui.set_home_is_loading(false);
+                            ui.set_home_error_message(String::new().into());
+                            ui.set_home_resume_error(String::new().into());
+                            ui.set_home_latest_error(String::new().into());
+                            ui.set_home_random_error(String::new().into());
+                            ui.set_home_performer_error(String::new().into());
+                            set_home_shelves(
+                                &ui,
+                                &[
+                                    resume_cards,
+                                    history_cards,
+                                    latest_cards,
+                                    empty_cards.clone(),
+                                    empty_cards,
+                                ],
+                            );
+                            set_home_category_options(&ui, &[], &[]);
+                            ui.set_home_category_shelves(
+                                Rc::new(slint::VecModel::from(Vec::new())).into(),
+                            );
+                        }
+                    })
+                    .ok();
+                    return;
+                }
 
                 let parent_id = local_store
                     .get_setting("selected_library_id")
@@ -3092,7 +3611,9 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                         value.sort = (value.sort + 1) % 4;
                     }
                 }
-                "direction" => value.descending = !value.descending,
+                "direction" => {
+                    value.descending = !value.descending;
+                }
                 "unwatched" => value.unwatched = !value.unwatched,
                 "favorites" => value.favorites_only = !value.favorites_only,
                 "hd" => value.hd_only = !value.hd_only,
@@ -4287,6 +4808,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             std::thread::spawn(move || {
                 let mut is_unauth = false;
                 let mut image_auth = None;
+                let mut catalog_error_message: Option<String> = None;
                 let (raw_items, next_start, total_count, has_more, supplemental_total) =
                     if let Some(session) = credential_store.get().ok().flatten() {
                         image_auth =
@@ -4312,6 +4834,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                             ),
                             Err(error) => {
                                 is_unauth = error.is_unauthorized();
+                                catalog_error_message = Some(error.to_string());
                                 (Vec::new(), 0, 0, false, 0)
                             }
                         }
@@ -4374,8 +4897,13 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                         ui.set_catalog_total_count(reported_total as i32);
                         ui.set_is_loading_more(false);
                         ui.set_is_loading_catalog(false);
-                        ui.set_status("Ready".into());
-                        ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
+                        if let Some(ref err_msg) = catalog_error_message {
+                            ui.set_status(format!("Catalog error: {err_msg}").into());
+                            ui.set_status_color(slint::Color::from_rgb_u8(240, 100, 100));
+                        } else {
+                            ui.set_status("Ready".into());
+                            ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
+                        }
                         if let Some(token) = token_for_refresh {
                             refresh_catalog_thumbnails_async(
                                 ui.as_weak(),
@@ -4858,7 +5386,12 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 .iter()
                 .any(|tag| tag == "__adult_hub_performer")
             {
-                ui.invoke_open_performer_profile(target_item.title.into());
+                let performer_key = if !target_item.id.is_empty() {
+                    target_item.id.clone()
+                } else {
+                    format!("name:{}", target_item.title)
+                };
+                ui.invoke_open_performer_profile(performer_key.into());
                 return;
             }
             if target_item

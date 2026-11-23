@@ -1022,11 +1022,13 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
             ui.set_download_indeterminate(true);
             ui.set_download_progress(0.0);
             ui.set_download_bytes_text("Preparing download…".into());
-            crate::download::start_item_download(
+            let rendition = task.rendition_id.clone();
+            crate::download::start_item_download_with_rendition(
                 &ctx_dl,
                 &item,
                 task.target_path.clone(),
                 ctx_dl.download_manager.clone(),
+                rendition,
             );
         });
     }

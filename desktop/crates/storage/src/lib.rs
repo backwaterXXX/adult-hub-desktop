@@ -81,6 +81,8 @@ pub struct AppConfigExport {
     pub excluded_tags: Vec<String>,
     #[serde(default = "default_auto_update_enabled")]
     pub auto_update_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adult_hub_api_enabled: Option<bool>,
 }
 
 fn default_config_version() -> i32 {
@@ -116,6 +118,7 @@ impl Default for AppConfigExport {
             hidden_channel_ids: Vec::new(),
             excluded_tags: Vec::new(),
             auto_update_enabled: default_auto_update_enabled(),
+            adult_hub_api_enabled: None,
         }
     }
 }
@@ -322,6 +325,12 @@ impl LocalStore {
         Ok(())
     }
 
+    pub fn execute_raw_for_test(&self, sql: &str) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute_batch(sql)?;
+        Ok(())
+    }
+
     // Settings helpers
     pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
         let conn = self.conn()?;
@@ -347,6 +356,17 @@ impl LocalStore {
         let conn = self.conn()?;
         conn.execute("DELETE FROM settings WHERE key = ?1", params![key])?;
         Ok(())
+    }
+
+    pub fn is_adult_hub_api_enabled(&self) -> Result<bool> {
+        Ok(self
+            .get_setting("adult_hub_api_enabled")?
+            .map(|s| s == "true" || s == "1")
+            .unwrap_or(false))
+    }
+
+    pub fn set_adult_hub_api_enabled(&self, enabled: bool) -> Result<()> {
+        self.set_setting("adult_hub_api_enabled", if enabled { "true" } else { "false" })
     }
 
     pub fn approved_cleartext_origins(&self) -> Result<Vec<String>> {
@@ -724,6 +744,7 @@ impl LocalStore {
             username,
             access_token,
             server_name,
+            refresh_token: None,
         }))
     }
 
@@ -905,6 +926,10 @@ impl LocalStore {
             .get_setting("auto_update_enabled")?
             .map(|s| s == "true" || s == "1")
             .unwrap_or(true);
+        let adult_hub_api_enabled = self
+            .get_setting("adult_hub_api_enabled")?
+            .map(|s| s == "true" || s == "1")
+            .unwrap_or(false);
 
         Ok(AppConfigExport {
             version: 1,
@@ -921,6 +946,7 @@ impl LocalStore {
             hidden_channel_ids,
             excluded_tags,
             auto_update_enabled,
+            adult_hub_api_enabled: Some(adult_hub_api_enabled),
         })
     }
 
@@ -1042,6 +1068,17 @@ impl LocalStore {
                 "false"
             }],
         )?;
+        if let Some(enabled) = config.adult_hub_api_enabled {
+            tx.execute(
+                "INSERT INTO settings (key, value) VALUES ('adult_hub_api_enabled', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = ?1",
+                params![if enabled {
+                    "true"
+                } else {
+                    "false"
+                }],
+            )?;
+        }
 
         if let Some(cat_ids) = &config.selected_home_category_ids {
             let json_cats = serde_json::to_string(cat_ids)?;
@@ -1301,6 +1338,8 @@ pub struct Session {
     pub username: String,
     pub access_token: String,
     pub server_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
 }
 
 pub struct CredentialStore {
@@ -1398,6 +1437,14 @@ fn load_platform_session(_session_file: &std::path::Path) -> Option<Session> {
 
 #[cfg(not(windows))]
 fn load_platform_session(session_file: &std::path::Path) -> Option<Session> {
+    if !session_file.exists() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(session_file, std::fs::Permissions::from_mode(0o600));
+    }
     let bytes = std::fs::read(session_file).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
@@ -1457,7 +1504,7 @@ fn persist_platform_session(session_file: &std::path::Path, session: &Session) -
     // Write to a fresh owner-only file, then rename over the old one so a crash
     // never leaves a half-written session. `create_new` refuses to follow a
     // pre-existing symlink or reuse a file another process created.
-    let temp = session_file.with_extension("json.tmp");
+    let temp = session_file.with_extension(format!("json.tmp.{}", std::process::id()));
     let _ = std::fs::remove_file(&temp);
     let mut file = private_file_options()
         .write(true)
@@ -1467,6 +1514,11 @@ fn persist_platform_session(session_file: &std::path::Path, session: &Session) -
     file.sync_all()?;
     drop(file);
     std::fs::rename(&temp, session_file)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(session_file, std::fs::Permissions::from_mode(0o600));
+    }
     Ok(())
 }
 
@@ -1498,6 +1550,61 @@ fn clear_platform_session(session_file: &std::path::Path) -> Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.into()),
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ModeChangeGuardError {
+    ActiveSession,
+    Storage(String),
+}
+
+impl std::fmt::Display for ModeChangeGuardError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ActiveSession => write!(
+                f,
+                "Cannot switch server API mode while logged in. Please log out first."
+            ),
+            Self::Storage(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+impl std::error::Error for ModeChangeGuardError {}
+
+/// Shared guard for Adult Hub API mode switching (toggle or config import).
+/// Refuses mode switching if:
+/// - UI session is logged in, OR
+/// - `CredentialStore::get()` returns a persisted session (e.g. after a 401 set `is_logged_in=false`), OR
+/// - reading the current mode or credentials produces an error.
+/// Same-mode requests are permitted when current mode can be read successfully.
+pub fn check_adult_hub_mode_change(
+    is_ui_logged_in: bool,
+    target_mode: bool,
+    local_store: &LocalStore,
+    credential_store: &CredentialStore,
+) -> std::result::Result<(), ModeChangeGuardError> {
+    let current_mode = local_store
+        .is_adult_hub_api_enabled()
+        .map_err(|e| ModeChangeGuardError::Storage(format!("Failed to read server API mode setting: {e}")))?;
+
+    if target_mode == current_mode {
+        return Ok(());
+    }
+
+    if is_ui_logged_in {
+        return Err(ModeChangeGuardError::ActiveSession);
+    }
+
+    let persisted = credential_store
+        .get()
+        .map_err(|e| ModeChangeGuardError::Storage(format!("Failed to read stored credentials: {e}")))?;
+
+    if persisted.is_some() {
+        return Err(ModeChangeGuardError::ActiveSession);
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1625,6 +1732,7 @@ mod tests {
             username: "tester".into(),
             access_token: "tok456".into(),
             server_name: "TestServer".into(),
+            refresh_token: None,
         };
         store.save(session.clone()).unwrap();
         let loaded = store.get().unwrap().unwrap();
@@ -1661,6 +1769,7 @@ mod tests {
                 username: "tester".into(),
                 access_token: "tok".into(),
                 server_name: String::new(),
+                refresh_token: None,
             })
             .unwrap();
         let mode = std::fs::metadata(&session_file)
@@ -1693,6 +1802,7 @@ mod tests {
             username: "adult_fan".into(),
             access_token: "secret-token-xyz".into(),
             server_name: "My Server".into(),
+            refresh_token: None,
         };
         store
             .set_setting("session_server_url", &session.server_url)
@@ -1863,6 +1973,7 @@ mod tests {
         assert_eq!(default_cfg.seek_step_sec, 15);
         assert_eq!(default_cfg.buffer_profile, "standard");
         assert!(!default_cfg.phash_on_playback);
+        assert_eq!(default_cfg.adult_hub_api_enabled, Some(false));
 
         // Custom config matching Android Version 1 JSON schema
         let custom_json = r#"{
@@ -2036,5 +2147,217 @@ mod tests {
         );
         store.set_selected_channel(None).unwrap();
         assert_eq!(store.get_selected_channel().unwrap(), None);
+    }
+
+    #[test]
+    fn test_adult_hub_api_enabled_setting_default_and_backward_compatible_import() {
+        let store = LocalStore::open_in_memory().unwrap();
+
+        // Default setting is false
+        assert_eq!(store.is_adult_hub_api_enabled().unwrap(), false);
+        let default_cfg = store.export_non_secret_config().unwrap();
+        assert_eq!(default_cfg.adult_hub_api_enabled, Some(false));
+
+        // Turn on
+        store.set_adult_hub_api_enabled(true).unwrap();
+        assert_eq!(store.is_adult_hub_api_enabled().unwrap(), true);
+        let exported = store.export_non_secret_config().unwrap();
+        assert_eq!(exported.adult_hub_api_enabled, Some(true));
+
+        // Turn off
+        store.set_adult_hub_api_enabled(false).unwrap();
+        assert_eq!(store.is_adult_hub_api_enabled().unwrap(), false);
+
+        // JSON import with adultHubApiEnabled: true sets it to true
+        let json_with_opt_in = r#"{
+            "version": 1,
+            "adultHubApiEnabled": true
+        }"#;
+        store.import_non_secret_config_json(json_with_opt_in).unwrap();
+        assert_eq!(store.is_adult_hub_api_enabled().unwrap(), true);
+
+        // Finding 5: JSON import with adultHubApiEnabled omitted (older backups)
+        // MUST PRESERVE existing mode, never overwriting it to false!
+        let json_omitted = r#"{
+            "version": 1,
+            "cacheLimitMb": 512
+        }"#;
+        let parsed: AppConfigExport = serde_json::from_str(json_omitted).unwrap();
+        assert_eq!(parsed.adult_hub_api_enabled, None);
+        store.import_non_secret_config_json(json_omitted).unwrap();
+        // Since it was true before import, it must STILL be true!
+        assert_eq!(store.is_adult_hub_api_enabled().unwrap(), true);
+
+        // Explicit JSON import with adultHubApiEnabled: false sets it to false
+        let json_with_opt_out = r#"{
+            "version": 1,
+            "adultHubApiEnabled": false
+        }"#;
+        store.import_non_secret_config_json(json_with_opt_out).unwrap();
+        assert_eq!(store.is_adult_hub_api_enabled().unwrap(), false);
+
+        // Again, older backup omitting the flag preserves the false setting
+        store.import_non_secret_config_json(json_omitted).unwrap();
+        assert_eq!(store.is_adult_hub_api_enabled().unwrap(), false);
+    }
+
+    #[test]
+    fn test_adult_hub_mode_change_guard_with_active_session() {
+        let store = LocalStore::open_in_memory().unwrap();
+        let cred_dir = std::env::temp_dir().join(format!("ah-cred-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cred_dir).unwrap();
+        let session_file = cred_dir.join("session.json");
+        let cred_store = CredentialStore::with_session_file(session_file.clone());
+
+        // Initially no active session, mode is false
+        assert_eq!(store.is_adult_hub_api_enabled().unwrap(), false);
+
+        // Case 1: Same mode is allowed (whether session exists or not, no switch requested)
+        assert_eq!(
+            check_adult_hub_mode_change(false, false, &store, &cred_store),
+            Ok(())
+        );
+
+        // Case 2: Live UI session refuses mode change
+        assert_eq!(
+            check_adult_hub_mode_change(true, true, &store, &cred_store),
+            Err(ModeChangeGuardError::ActiveSession)
+        );
+
+        // Case 3: Stored session refuses mode change even when UI is not logged in (e.g. after 401)
+        cred_store
+            .save(Session {
+                server_url: "https://example.com".into(),
+                user_id: "usr_1".into(),
+                username: "alice".into(),
+                access_token: "tok_123".into(),
+                server_name: "Test Server".into(),
+                refresh_token: None,
+            })
+            .unwrap();
+        assert!(cred_store.get().unwrap().is_some());
+        assert_eq!(
+            check_adult_hub_mode_change(false, true, &store, &cred_store),
+            Err(ModeChangeGuardError::ActiveSession)
+        );
+
+        // Same mode is still allowed with stored session
+        assert_eq!(
+            check_adult_hub_mode_change(false, false, &store, &cred_store),
+            Ok(())
+        );
+
+        // When stored session is cleared and UI not logged in, mode change succeeds
+        cred_store.clear().unwrap();
+        assert!(cred_store.get().unwrap().is_none());
+        assert_eq!(
+            check_adult_hub_mode_change(false, true, &store, &cred_store),
+            Ok(())
+        );
+
+        // Case 4: Credential read error refuses mode change and returns Storage error
+        let _ = std::panic::catch_unwind(|| {
+            let _lock = cred_store.in_memory.write().unwrap();
+            panic!("poisoning credential store lock");
+        });
+        let cred_err_res = check_adult_hub_mode_change(false, true, &store, &cred_store);
+        match cred_err_res {
+            Err(ModeChangeGuardError::Storage(msg)) => {
+                assert!(msg.contains("Failed to read stored credentials"));
+            }
+            other => panic!("Expected Storage error on credential read error, got {other:?}"),
+        }
+
+        // Case 5: Config read error refuses mode change and returns Storage error
+        store
+            .conn()
+            .unwrap()
+            .execute("DROP TABLE settings", [])
+            .unwrap();
+        let config_err_res = check_adult_hub_mode_change(false, true, &store, &cred_store);
+        match config_err_res {
+            Err(ModeChangeGuardError::Storage(msg)) => {
+                assert!(msg.contains("Failed to read server API mode setting"));
+            }
+            other => panic!("Expected Storage error on broken config table, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&cred_dir);
+    }
+
+    #[test]
+    fn test_session_refresh_token_serde_and_persistence() {
+        // Backward-compatibility: legacy JSON without refresh_token deserializes with None
+        let legacy_json = r#"{
+            "server_url": "https://adulthub.example:8090",
+            "user_id": "usr_99",
+            "username": "tester",
+            "access_token": "tok_123",
+            "server_name": "Adult Hub"
+        }"#;
+        let legacy: Session = serde_json::from_str(legacy_json).expect("deserialize legacy session");
+        assert_eq!(legacy.refresh_token, None);
+
+        // Session with refresh_token serializes and deserializes cleanly
+        let active = Session {
+            server_url: "https://adulthub.example:8090".into(),
+            user_id: "usr_99".into(),
+            username: "tester".into(),
+            access_token: "tok_fresh".into(),
+            server_name: "Adult Hub".into(),
+            refresh_token: Some("ah_ref_secret_123".into()),
+        };
+        let serialized = serde_json::to_string(&active).expect("serialize session");
+        assert!(serialized.contains("ah_ref_secret_123"));
+        let roundtrip: Session = serde_json::from_str(&serialized).expect("roundtrip session");
+        assert_eq!(roundtrip.refresh_token.as_deref(), Some("ah_ref_secret_123"));
+
+        // CredentialStore persistence cycle with refresh_token
+        let cred_dir = std::env::temp_dir().join(format!("ah-cred-rt-{}", uuid::Uuid::new_v4()));
+        let store = CredentialStore::with_session_file(cred_dir.join("session.json"));
+        store.save(active.clone()).expect("save session with refresh token");
+        let loaded = store.get().expect("get session").expect("session exists");
+        assert_eq!(loaded.access_token, "tok_fresh");
+        assert_eq!(loaded.refresh_token.as_deref(), Some("ah_ref_secret_123"));
+
+        let _ = std::fs::remove_dir_all(&cred_dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_linux_session_file_permissions_and_atomic_write() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let cred_dir = std::env::temp_dir().join(format!("ah-cred-perm-{}", uuid::Uuid::new_v4()));
+        let session_file = cred_dir.join("session.json");
+        let store = CredentialStore::with_session_file(session_file.clone());
+
+        let session = Session {
+            server_url: "https://adulthub.example:8090".into(),
+            user_id: "usr_harden".into(),
+            username: "tester".into(),
+            access_token: "tok_secure".into(),
+            server_name: "Adult Hub".into(),
+            refresh_token: Some("ah_ref_harden".into()),
+        };
+
+        store.save(session).expect("save session");
+
+        let meta = std::fs::metadata(&session_file).expect("session file exists");
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "Session file must be strictly owner read/write (0600), got {:04o}",
+            mode
+        );
+
+        // Verify loaded session preserves 0600
+        let loaded = store.get().expect("get session").expect("session present");
+        assert_eq!(loaded.username, "tester");
+
+        let meta2 = std::fs::metadata(&session_file).expect("session file exists");
+        assert_eq!(meta2.permissions().mode() & 0o777, 0o600);
+
+        let _ = std::fs::remove_dir_all(&cred_dir);
     }
 }

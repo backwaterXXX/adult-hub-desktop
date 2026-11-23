@@ -157,7 +157,12 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                 .iter()
                 .any(|tag| tag == "__adult_hub_performer")
             {
-                ui.invoke_open_performer_profile(target_item.title.into());
+                let performer_key = if !target_item.id.is_empty() {
+                    target_item.id.clone()
+                } else {
+                    format!("name:{}", target_item.title)
+                };
+                ui.invoke_open_performer_profile(performer_key.into());
                 return;
             }
             if target_item
@@ -232,9 +237,10 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                     if let Some((_, val)) = line.split_once(':') {
                         let trimmed = val.trim();
                         let clean_val = trimmed.strip_prefix("telegram:").unwrap_or(trimmed).trim();
+                        let clean_lower = clean_val.to_ascii_lowercase();
                         if !clean_val.is_empty()
-                            && !clean_val.starts_with("http://")
-                            && !clean_val.starts_with("https://")
+                            && !clean_lower.starts_with("http://")
+                            && !clean_lower.starts_with("https://")
                             && extracted_telegram_id.is_empty()
                         {
                             extracted_telegram_id = clean_val.to_string();
@@ -271,21 +277,32 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
             let artwork_token = artwork_session
                 .as_ref()
                 .map(|session| session.access_token.clone());
-            let backdrop_url = if !is_telegram_item {
-                target_item.backdrop_image_tag.as_deref().and_then(|tag| {
+            let backdrop_url = if let Some(tag) = target_item
+                .backdrop_image_tag
+                .as_deref()
+                .filter(|t| !t.trim().is_empty())
+            {
+                let trimmed = tag.trim();
+                let lower_tag = trimmed.to_ascii_lowercase();
+                if trimmed.starts_with('/')
+                    || lower_tag.starts_with("http://")
+                    || lower_tag.starts_with("https://")
+                {
+                    crate::thumbnails::resolve_resolver_thumbnail_url(trimmed)
+                } else if !is_telegram_item {
                     artwork_server.as_ref().map(|server| {
                         JellyfinClient::image_url(
                             server,
                             &target_item.id,
                             "Backdrop/0",
                             1920,
-                            Some(tag),
+                            Some(trimmed),
                         )
                     })
-                })
+                } else {
+                    None
+                }
             } else {
-                // Telegram pHash images are poster frames, not wide backdrops.
-                // The detail page renders the poster in its contain-fit header.
                 None
             };
             let cached_backdrop = backdrop_url
@@ -403,22 +420,36 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                     // both surfaces share one portrait cache entry. Name-slug
                     // IDs (resolver items) and tag-less entries are resolved
                     // through the Persons endpoint in the worker below.
-                    let direct_url = artwork_server.as_ref().and_then(|server| {
-                        let tag = person
-                            .primary_image_tag
-                            .as_deref()
-                            .filter(|tag| !tag.trim().is_empty())?;
-                        if uuid::Uuid::parse_str(&person.id).is_err() {
-                            return None;
+                    let direct_url = if let Some(tag) = person
+                        .primary_image_tag
+                        .as_deref()
+                        .filter(|tag| !tag.trim().is_empty())
+                    {
+                        let trimmed = tag.trim();
+                        let lower_tag = trimmed.to_ascii_lowercase();
+                        if trimmed.starts_with('/')
+                            || lower_tag.starts_with("http://")
+                            || lower_tag.starts_with("https://")
+                        {
+                            crate::thumbnails::resolve_resolver_thumbnail_url(trimmed)
+                        } else if let Some(server) = artwork_server.as_ref() {
+                            if uuid::Uuid::parse_str(&person.id).is_ok() {
+                                Some(JellyfinClient::image_url(
+                                    server,
+                                    &person.id,
+                                    "Primary",
+                                    person_width,
+                                    Some(trimmed),
+                                ))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
                         }
-                        Some(JellyfinClient::image_url(
-                            server,
-                            &person.id,
-                            "Primary",
-                            person_width,
-                            Some(tag),
-                        ))
-                    });
+                    } else {
+                        None
+                    };
                     let cached_image = direct_url
                         .as_deref()
                         .and_then(crate::thumbnails::load_cached_image);
@@ -1060,10 +1091,97 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
         let cached_catalog = cached_catalog.clone();
         let credential_store = credential_store.clone();
         let jellyfin = jellyfin.clone();
+        let local_store = local_store.clone();
+        let detail_fav_in_flight = adult_hub_client::InFlightGuard::new();
         ui.on_toggle_detail_favorite(move |id| {
             let Some(ui) = weak.upgrade() else { return };
             let id = id.to_string();
             let new_fav = !ui.get_detail_is_favorite();
+            let is_api_mode = local_store.is_adult_hub_api_enabled().unwrap_or(false);
+
+            if is_api_mode {
+                let Some(slot) = detail_fav_in_flight.acquire(&id) else {
+                    log::debug!("Favorite toggle for {id} is already in-flight; ignoring duplicate click");
+                    return;
+                };
+
+                let Some(session) = credential_store.get().ok().flatten() else {
+                    drop(slot);
+                    ui.set_status("Sign in to Adult Hub to change favorites".into());
+                    ui.set_status_color(slint::Color::from_rgb_u8(244, 67, 54));
+                    return;
+                };
+
+                let item_id = id.clone();
+                let weak = weak.clone();
+                let cached_catalog = cached_catalog.clone();
+
+                std::thread::spawn(move || {
+                    let client = match adult_hub_client::AdultHubClient::new(&session.server_url) {
+                        Ok(c) => c.with_token(&session.access_token),
+                        Err(e) => {
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(ui) = weak.upgrade() {
+                                    ui.set_status(format!("Adult Hub client error: {e}").into());
+                                    ui.set_status_color(slint::Color::from_rgb_u8(244, 67, 54));
+                                }
+                                drop(slot);
+                            });
+                            return;
+                        }
+                    };
+
+                    let res = if new_fav {
+                        client.add_favorite(&item_id)
+                    } else {
+                        client.remove_favorite(&item_id)
+                    };
+
+                    match res {
+                        Ok(resp) => {
+                            let actual_fav = resp.is_favorite;
+                            let canonical_vid = resp.video_id;
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(ui) = weak.upgrade() {
+                                    ui.set_detail_is_favorite(actual_fav);
+                                    let mut list = cached_catalog
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                    for item in list.iter_mut() {
+                                        if item.id == item_id || canonical_vid.as_deref() == Some(&item.id) {
+                                            item.is_favorite = actual_fav;
+                                        }
+                                    }
+                                    let cards = list.iter().map(tv_item_to_card).collect::<Vec<_>>();
+                                    drop(list);
+                                    set_catalog(&ui, cards);
+                                    ui.set_status(
+                                        if actual_fav {
+                                            "Added to favorites"
+                                        } else {
+                                            "Removed from favorites"
+                                        }
+                                        .into(),
+                                    );
+                                    ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
+                                }
+                                drop(slot);
+                            });
+                        }
+                        Err(err) => {
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(ui) = weak.upgrade() {
+                                    ui.set_status(format!("Could not update favorite: {err}").into());
+                                    ui.set_status_color(slint::Color::from_rgb_u8(244, 67, 54));
+                                }
+                                drop(slot);
+                            });
+                        }
+                    }
+                });
+                return;
+            }
+
             ui.set_detail_is_favorite(new_fav);
 
             let mut list = cached_catalog
@@ -1126,7 +1244,7 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
         });
     }
 
-    // Favorite the currently playing Jellyfin item without leaving the player.
+    // Favorite the currently playing item without leaving the player.
     {
         let weak = ui.as_weak();
         let current_item = current_item.clone();
@@ -1134,6 +1252,8 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
         let home_catalog = home_catalog.clone();
         let credential_store = credential_store.clone();
         let jellyfin = jellyfin.clone();
+        let local_store = local_store.clone();
+        let player_fav_in_flight = adult_hub_client::InFlightGuard::new();
         ui.on_toggle_player_favorite(move || {
             let Some(ui) = weak.upgrade() else { return };
             let Some(mut item) = current_item
@@ -1141,9 +1261,107 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone()
             else {
-                show_error(&ui, "No active Jellyfin item to favorite");
+                show_error(&ui, "No active item to favorite");
                 return;
             };
+
+            let is_api_mode = local_store.is_adult_hub_api_enabled().unwrap_or(false);
+            if is_api_mode {
+                let Some(slot) = player_fav_in_flight.acquire(&item.id) else {
+                    log::debug!("Player favorite toggle for {} is already in-flight", item.id);
+                    return;
+                };
+
+                let Some(session) = credential_store.get().ok().flatten() else {
+                    drop(slot);
+                    show_error(&ui, "Sign in to Adult Hub to change favorites");
+                    return;
+                };
+
+                let new_favorite = !item.is_favorite;
+                let item_id = item.id.clone();
+                let weak = weak.clone();
+                let current_item = current_item.clone();
+                let cached_catalog = cached_catalog.clone();
+                let home_catalog = home_catalog.clone();
+
+                std::thread::spawn(move || {
+                    let _slot = slot;
+                    let client = match adult_hub_client::AdultHubClient::new(&session.server_url) {
+                        Ok(c) => c.with_token(&session.access_token),
+                        Err(e) => {
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(ui) = weak.upgrade() {
+                                    ui.set_status(format!("Adult Hub client error: {e}").into());
+                                    ui.set_status_color(slint::Color::from_rgb_u8(244, 67, 54));
+                                }
+                            });
+                            return;
+                        }
+                    };
+
+                    let res = if new_favorite {
+                        client.add_favorite(&item_id)
+                    } else {
+                        client.remove_favorite(&item_id)
+                    };
+
+                    match res {
+                        Ok(resp) => {
+                            let actual_fav = resp.is_favorite;
+                            let canonical_vid = resp.video_id;
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(ui) = weak.upgrade() {
+                                    ui.set_player_is_favorite(actual_fav);
+                                    if let Some(ci) = current_item
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .as_mut()
+                                    {
+                                        if ci.id == item_id || canonical_vid.as_deref() == Some(&ci.id) {
+                                            ci.is_favorite = actual_fav;
+                                        }
+                                    }
+                                    for catalog in [&cached_catalog, &home_catalog] {
+                                        if let Ok(mut items) = catalog.lock() {
+                                            for it in items.iter_mut() {
+                                                if it.id == item_id || canonical_vid.as_deref() == Some(&it.id) {
+                                                    it.is_favorite = actual_fav;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    let catalog = cached_catalog
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                    set_catalog(&ui, catalog.iter().map(tv_item_to_card).collect());
+                                    ui.set_status(
+                                        if actual_fav {
+                                            "Added to favorites"
+                                        } else {
+                                            "Removed from favorites"
+                                        }
+                                        .into(),
+                                    );
+                                    ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
+                                    ui.invoke_refresh_home();
+                                }
+                            });
+                        }
+                        Err(err) => {
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(ui) = weak.upgrade() {
+                                    ui.set_status(format!("Could not update favorite: {err}").into());
+                                    ui.set_status_color(slint::Color::from_rgb_u8(244, 67, 54));
+                                    ui.invoke_refresh_home();
+                                }
+                            });
+                        }
+                    }
+                });
+                return;
+            }
+
             if item.is_telegram() || uuid::Uuid::parse_str(&item.id).is_err() {
                 ui.set_status("Favorites are available for Jellyfin library items".into());
                 ui.set_status_color(slint::Color::from_rgb_u8(244, 177, 66));
@@ -1739,5 +1957,62 @@ mod tests {
     fn test_resolve_item_telegram_id_empty_for_regular_media() {
         let item = TvItem::new("regular-id-888", "Standard Movie");
         assert_eq!(resolve_item_telegram_id(&item, None), None);
+    }
+
+    #[test]
+    fn test_favorites_api_mode_vs_jellyfin_mode_eligibility() {
+        use adult_hub_storage::LocalStore;
+
+        let store = LocalStore::open_in_memory().unwrap();
+        // Default mode is false (Jellyfin mode)
+        assert_eq!(store.is_adult_hub_api_enabled().unwrap(), false);
+
+        let tg_item = TvItem::new("telegram:-100123:456:789", "Telegram Scene");
+        let jf_guid_item = TvItem::new("a1b2c3d4-e5f6-7890-abcd-ef1234567890", "Jellyfin Scene");
+
+        // In Jellyfin mode: Telegram items are NOT eligible for player favorites
+        assert!(tg_item.is_telegram());
+        assert!(uuid::Uuid::parse_str(&tg_item.id).is_err());
+        // Jellyfin UUID items ARE eligible in Jellyfin mode
+        assert!(uuid::Uuid::parse_str(&jf_guid_item.id).is_ok());
+
+        // Enable Adult Hub API mode
+        store.set_adult_hub_api_enabled(true).unwrap();
+        assert_eq!(store.is_adult_hub_api_enabled().unwrap(), true);
+
+        // In Adult Hub API mode, Telegram items ARE eligible for favorites
+        assert!(!tg_item.id.is_empty());
+    }
+
+    #[test]
+    fn test_details_favorite_in_flight_guard_prevents_duplicate_actions() {
+        use adult_hub_client::InFlightGuard;
+        let guard = InFlightGuard::new();
+        let item_id = "telegram:-100123:456:789";
+
+        assert!(!guard.is_in_flight(item_id));
+
+        // First click acquires slot
+        let slot1 = guard.acquire(item_id);
+        assert!(slot1.is_some());
+        assert!(guard.is_in_flight(item_id));
+
+        // Rapid second click for same item fails to acquire
+        let slot2 = guard.acquire(item_id);
+        assert!(slot2.is_none());
+        assert!(guard.is_in_flight(item_id));
+
+        // Different item can still acquire independently
+        let other_slot = guard.acquire("telegram:-100999:111:222");
+        assert!(other_slot.is_some());
+
+        // When first slot is dropped (async operation completes), slot is freed
+        drop(slot1);
+        assert!(!guard.is_in_flight(item_id));
+
+        // Subsequent click for first item can now acquire successfully
+        let slot3 = guard.acquire(item_id);
+        assert!(slot3.is_some());
+        assert!(guard.is_in_flight(item_id));
     }
 }
