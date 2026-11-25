@@ -415,7 +415,7 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
                 local_store.set_selected_channel(Some(&cat_str)).ok();
                 category_ids
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .get(&cat_str)
                     .cloned()
                     .unwrap_or_else(|| cat_str.to_lowercase().replace(' ', "_"))

@@ -745,7 +745,7 @@ pub fn start_item_playback_with_resume_ctx(
         && ctx
             .current_playing_item
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
             .is_some_and(|cur| cur.id == item.id)
     {

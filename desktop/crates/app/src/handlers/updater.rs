@@ -383,7 +383,7 @@ pub fn install_stage5_handlers(ui: &MainWindow, ctx: &AppContext) {
         ui.on_install_update(move || {
             let pkg_type = pending
                 .lock()
-                .unwrap()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .as_ref()
                 .map(|(_, p)| p.package_type.clone());
             let paths_opt = downloaded

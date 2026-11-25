@@ -1059,7 +1059,7 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                 let current_id = ctx_play
                     .current_playing_item
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .as_ref()
                     .map(|i| i.id.clone());
                 if current_id.as_deref() == Some(&id) {
@@ -1368,7 +1368,7 @@ fn resolve_real_media_size(
     let playing_matches = ctx
         .current_playing_item
         .lock()
-        .unwrap()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .as_ref()
         .is_some_and(|playing| playing.id == item.id);
     if playing_matches

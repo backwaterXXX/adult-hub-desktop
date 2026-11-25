@@ -161,11 +161,13 @@ impl PlaybackSessionController {
             .provider_video_id
             .as_deref()
             .or_else(|| item.id.strip_prefix("telegram:"));
-        if !item.is_telegram() || prov_id.is_none() {
+        if !item.is_telegram() {
             // Non-Telegram progress is reported to the server via PlaybackReporter
             return;
         }
-        let prov_id = prov_id.unwrap();
+        let Some(prov_id) = prov_id else {
+            return;
+        };
 
         if Self::is_playback_completed(position_ms, duration_ms, is_ended) {
             let _ = self.local_store.mark_telegram_played(

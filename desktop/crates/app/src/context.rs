@@ -175,7 +175,7 @@ impl AppContext {
         if let Some(item) = self
             .home_catalog
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .find(|i| i.id == id)
         {
@@ -204,7 +204,7 @@ impl AppContext {
         if let Some(item) = self
             .cached_catalog
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .find(|i| i.id == id)
         {
@@ -213,7 +213,7 @@ impl AppContext {
         if let Some(item) = self
             .performer_catalog
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .find(|i| i.id == id)
         {
@@ -222,7 +222,7 @@ impl AppContext {
         if let Some(item) = self
             .studio_catalog
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .find(|i| i.id == id)
         {
@@ -231,7 +231,7 @@ impl AppContext {
         if let Some(item) = self
             .channel_catalog
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .find(|i| i.id == id)
         {

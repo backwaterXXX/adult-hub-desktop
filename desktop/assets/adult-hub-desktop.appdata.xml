@@ -37,6 +37,6 @@
     <content_attribute id="sex-themes">intense</content_attribute>
   </content_rating>
   <releases>
-    <release version="0.2.40" date="2026-11-25"/>
+    <release version="0.2.41" date="2026-11-25"/>
   </releases>
 </component>

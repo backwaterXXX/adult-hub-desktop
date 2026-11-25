@@ -188,9 +188,18 @@ pub fn validate_package_urls(
     manifest: &UpdateManifest,
     allowed_hosts: &[&str],
 ) -> Result<(), UpdateError> {
-    // Release notes URL must be HTTPS
+    // Release notes URL must be HTTPS and stay on a trusted release host.
     if !manifest.release_notes_url.starts_with("https://") {
         return Err(UpdateError::InsecureUrl(manifest.release_notes_url.clone()));
+    }
+    let notes_url = url::Url::parse(&manifest.release_notes_url)
+        .map_err(|e| UpdateError::InsecureUrl(format!("{}: {e}", manifest.release_notes_url)))?;
+    let notes_host = notes_url.host_str().unwrap_or("");
+    if !allowed_hosts
+        .iter()
+        .any(|allowed| notes_host == *allowed || notes_host.ends_with(&format!(".{allowed}")))
+    {
+        return Err(UpdateError::DisallowedHost(notes_host.to_string()));
     }
 
     for package in manifest
@@ -567,8 +576,27 @@ pub fn launch_installation(
                     let _ = std::fs::remove_file(&test_file);
                 }
 
-                // Prepare replacement script with safe POSIX shell escaping
-                let helper_script = std::env::temp_dir().join("adult-hub-appimage-replace.sh");
+                // Prepare replacement script inside a private, randomised
+                // directory. A fixed path in /tmp would be vulnerable to a
+                // local symlink or file-replacement race.
+                let helper_dir =
+                    std::env::temp_dir().join(format!("adult-hub-update-{}", uuid::Uuid::new_v4()));
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::DirBuilderExt;
+                    std::fs::DirBuilder::new()
+                        .recursive(true)
+                        .mode(0o700)
+                        .create(&helper_dir)
+                        .map_err(|e| UpdateError::Io(e.to_string()))?;
+                }
+                #[cfg(not(unix))]
+                {
+                    std::fs::create_dir_all(&helper_dir)
+                        .map_err(|e| UpdateError::Io(e.to_string()))?;
+                }
+
+                let helper_script = helper_dir.join("replace-appimage.sh");
                 let pid = std::process::id();
                 let escape_arg = |p: &Path| -> String {
                     format!("'{}'", p.to_string_lossy().replace('\'', "'\\''"))
@@ -577,19 +605,22 @@ pub fn launch_installation(
                 let cur_old_esc = escape_arg(&current_path.with_extension("AppImage.old"));
                 let file_esc = escape_arg(file_path);
                 let script_content = format!(
-                    "#!/bin/sh\nwhile kill -0 {pid} 2>/dev/null; do sleep 0.2; done\ncp -f {cur_esc} {cur_old_esc}\nmv -f {file_esc} {cur_esc}\nchmod +x {cur_esc}\nexec {cur_esc} &\n"
+                    "#!/bin/sh\nwhile kill -0 {pid} 2>/dev/null; do sleep 0.2; done\ncp -f {cur_esc} {cur_old_esc}\nmv -f {file_esc} {cur_esc}\nchmod +x {cur_esc}\nrm -f \"$0\"\nrmdir \"$(dirname \"$0\")\" 2>/dev/null || true\nexec {cur_esc} &\n"
                 );
-                std::fs::write(&helper_script, script_content)
-                    .map_err(|e| UpdateError::Io(e.to_string()))?;
-
+                let mut helper_options = std::fs::OpenOptions::new();
+                helper_options.write(true).create_new(true);
                 #[cfg(unix)]
                 {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(
-                        &helper_script,
-                        std::fs::Permissions::from_mode(0o755),
-                    );
+                    use std::os::unix::fs::OpenOptionsExt;
+                    helper_options.mode(0o700);
                 }
+                let mut helper_file = helper_options
+                    .open(&helper_script)
+                    .map_err(|e| UpdateError::Io(e.to_string()))?;
+                helper_file
+                    .write_all(script_content.as_bytes())
+                    .map_err(|e| UpdateError::Io(e.to_string()))?;
+                drop(helper_file);
 
                 let _ = std::process::Command::new("sh").arg(&helper_script).spawn();
 

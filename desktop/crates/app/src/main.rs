@@ -1140,7 +1140,18 @@ pub(crate) fn log_debug(message: &str) {
 pub(crate) fn log_startup(message: &str) {
     let path = startup_log_path();
     if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            let _ = std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(dir);
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = std::fs::create_dir_all(dir);
+        }
     }
     // Bound the log growth: one rotation keeps the previous tail for the
     // support case where the failure right before the current one matters.
@@ -1168,11 +1179,19 @@ pub(crate) fn log_startup(message: &str) {
         *SESSION_ID,
     );
     eprint!("{line}");
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
     {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    if let Ok(mut file) = options.open(&path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
         let _ = std::io::Write::write_all(&mut file, line.as_bytes());
     }
 }

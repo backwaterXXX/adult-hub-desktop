@@ -234,7 +234,7 @@ pub fn trigger_movie_switch(ui: &MainWindow, ctx: &AppContext, is_random: bool) 
                     if ctx_worker
                         .active_playback_context
                         .lock()
-                        .unwrap()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .is_empty()
                     {
                         ctx_worker.set_playback_context(

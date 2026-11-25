@@ -26,6 +26,15 @@ type HomeCategoriesCache = Mutex<std::collections::HashMap<String, (Instant, Vec
 
 static HOME_CATEGORIES_CACHE: OnceLock<HomeCategoriesCache> = OnceLock::new();
 
+fn clear_home_categories_cache() {
+    if let Some(cache) = HOME_CATEGORIES_CACHE.get() {
+        cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+}
+
 fn cached_home_categories(
     client: &AdultHubClient,
     session: &Session,
@@ -1912,6 +1921,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             let _ = credential_store.clear();
             reporter.set_auth(None, None);
             crate::thumbnails::set_resolver_auth_token(None);
+            clear_home_categories_cache();
             phash_coord.update_auth("", None);
             home_catalog
                 .lock()
