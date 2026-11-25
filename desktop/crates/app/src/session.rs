@@ -71,7 +71,7 @@ impl PlaybackSessionController {
     }
 
     /// Resolve the most accurate resume position for any TvItem, ensuring consistency
-    /// between Home screen indicators, Jellyfin user data, and local storage.
+    /// between Home screen indicators, server user data, and local storage.
     ///
     /// Every path to the same material (Home, Continue Watching, search, details,
     /// shuffle) must yield the same position, so ALL known sources are consulted
@@ -162,7 +162,7 @@ impl PlaybackSessionController {
             .as_deref()
             .or_else(|| item.id.strip_prefix("telegram:"));
         if !item.is_telegram() || prov_id.is_none() {
-            // Jellyfin progress is also reported to server via PlaybackReporter
+            // Non-Telegram progress is reported to the server via PlaybackReporter
             return;
         }
         let prov_id = prov_id.unwrap();
@@ -255,16 +255,8 @@ impl PlaybackSessionController {
             return Ok((url, PlayMethod::DirectStream));
         }
 
-        let server = server_url.unwrap_or("").trim().trim_end_matches('/');
-        if server.is_empty() {
-            return Err("Server URL is required to play Jellyfin content".into());
-        }
-        let token_part = match access_token {
-            Some(t) if !t.is_empty() => format!("&api_key={t}"),
-            _ => String::new(),
-        };
-        let url = format!("{server}/Videos/{}/stream?static=true{token_part}", item.id);
-        Ok((url, PlayMethod::DirectPlay))
+        let _ = (server_url, access_token);
+        Err("Adult Hub playback descriptor is required for this item".into())
     }
 }
 
@@ -349,9 +341,9 @@ mod tests {
     }
 
     #[test]
-    fn jellyfin_mapped_telegram_item_resumes_from_server_ticks() {
+    fn telegram_item_resumes_from_server_ticks() {
         // Regression: "[Tim Tales] …" showed 59% on Home but plain Play on
-        // Details, because a Jellyfin item carrying a `telegram` ProviderId was
+        // Details, because an item carrying a `telegram` ProviderId was
         // classified as Telegram and its resume position was read only from the
         // provider-keyed table, which the 15s checkpoint threshold left empty.
         let store = Arc::new(LocalStore::open_in_memory().unwrap());
@@ -364,7 +356,7 @@ mod tests {
             provider_video_id: Some("tg-999".into()),
             runtime_ticks: Some(duration_ticks),
             playback_position_ticks: (resume_ms * 10_000) as i64,
-            ..base_item("jf-guid-0001")
+            ..base_item("library-guid-0001")
         };
 
         let resume = PlaybackSessionController::resolve_item_resume_position(&store, &ctrl, &item);
@@ -387,14 +379,14 @@ mod tests {
         let store = Arc::new(LocalStore::open_in_memory().unwrap());
         let ctrl = PlaybackSessionController::new(store.clone());
 
-        let mut jf_item = base_item("jf-guid-0002");
-        jf_item.runtime_ticks = Some(600_000_000_000); // 600s
+        let mut library_item = base_item("library-guid-0002");
+        library_item.runtime_ticks = Some(600_000_000_000); // 600s
         let mut tg_item = base_item("telegram:chan:457");
         tg_item.provider_video_id = Some("chan:457".into());
         tg_item.source_provider = Some("telegram".into());
         tg_item.runtime_ticks = Some(600_000_000_000);
 
-        for item in [&mut jf_item, &mut tg_item] {
+        for item in [&mut library_item, &mut tg_item] {
             ctrl.checkpoint_progress(item, 19_000, 600_000, false);
             let resume =
                 PlaybackSessionController::resolve_item_resume_position(&store, &ctrl, item);
@@ -433,10 +425,10 @@ mod tests {
         let item = TvItem {
             runtime_ticks: Some(1_000_000_000),
             playback_position_ticks: 250_000_000, // 25s
-            ..base_item("jf-guid-0003")
+            ..base_item("library-guid-0003")
         };
         store
-            .save_progress("local", "jf-guid-0003", 40_000, 100_000)
+            .save_progress("local", "library-guid-0003", 40_000, 100_000)
             .unwrap();
         assert_eq!(
             PlaybackSessionController::resolve_item_resume_position(&store, &ctrl, &item),
@@ -446,8 +438,8 @@ mod tests {
 
     #[test]
     fn stream_url_resolution() {
-        let jf_item = TvItem {
-            id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890".into(),
+        let library_item = TvItem {
+            id: "video-guid-0001".into(),
             title: "Movie".into(),
             overview: None,
             year: None,
@@ -474,20 +466,16 @@ mod tests {
             height: None,
             community_rating: None,
         };
-        let (url, method) = PlaybackSessionController::resolve_stream_url(
-            &jf_item,
-            Some("http://jf.local:8096"),
+        let err = PlaybackSessionController::resolve_stream_url(
+            &library_item,
+            Some("http://server.local:8090"),
             None,
             Some("my-token"),
         )
-        .unwrap();
-        assert_eq!(
-            url,
-            "http://jf.local:8096/Videos/a1b2c3d4-e5f6-7890-abcd-ef1234567890/stream?static=true&api_key=my-token"
-        );
-        assert_eq!(method, PlayMethod::DirectPlay);
+        .unwrap_err();
+        assert!(err.contains("playback descriptor"));
 
-        let mut tg_item = jf_item.clone();
+        let mut tg_item = library_item.clone();
         tg_item.provider_video_id = Some("101".into());
         let (url, method) = PlaybackSessionController::resolve_stream_url(
             &tg_item,

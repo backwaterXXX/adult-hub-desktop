@@ -550,7 +550,7 @@ impl PhashCoordinator {
                         map.insert(
                             status_key(resolver_scope, video_id),
                             PhashUiStatus {
-                                message: "Jellyfin authorization was rejected".into(),
+                                message: "Adult Hub authorization was rejected".into(),
                                 terminal: false,
                             },
                         );
@@ -779,7 +779,7 @@ impl PhashCoordinator {
                                 status_key(resolver_scope, video_id),
                             PhashUiStatus {
                                 message: format!(
-                                    "Jellyfin authorization was rejected (HTTP {code}); sign in again"
+                                    "Adult Hub authorization was rejected (HTTP {code}); sign in again"
                                 ),
                                 terminal: false,
                             },
@@ -883,7 +883,7 @@ mod tests {
 
         // Invalid format
         item.provider_video_id = Some("invalid_video_id".into());
-        item.id = "some-jellyfin-uuid".into();
+        item.id = "some-library-uuid".into();
         assert_eq!(adult_hub_video_id(&item), None);
     }
 

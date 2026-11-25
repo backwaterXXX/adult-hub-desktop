@@ -1,7 +1,7 @@
 use crate::MainWindow;
 use crate::catalog::{filter_catalog_items, tv_item_to_card, tv_item_to_card_for_server};
 use crate::context::AppContext;
-use adult_hub_client::{GetItemsQuery, JellyfinClient, TvItem};
+use adult_hub_client::TvItem;
 use slint::{ComponentHandle, Model};
 use std::rc::Rc;
 
@@ -15,61 +15,6 @@ fn profile_cards(items: &[TvItem], server_url: Option<&str>) -> Vec<crate::Video
             )
         })
         .collect()
-}
-
-const PROFILE_PAGE_SIZE: usize = 200;
-
-/// Page a Jellyfin item query until the server runs out of rows.
-///
-/// Profile queries used to ask for exactly one page, so a studio or performer
-/// with more titles than the page size silently showed a partial filmography
-/// that never grew when the user scrolled to the end.
-fn fetch_profile_items(
-    jellyfin: &JellyfinClient,
-    session: &adult_hub_storage::Session,
-    query: &GetItemsQuery<'_>,
-) -> Result<Vec<TvItem>, String> {
-    let mut items = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    let mut start_index = query.start_index;
-    loop {
-        let page = match jellyfin.get_items(
-            &session.server_url,
-            &session.user_id,
-            &session.access_token,
-            &GetItemsQuery {
-                start_index,
-                limit: PROFILE_PAGE_SIZE,
-                ..query.clone()
-            },
-        ) {
-            Ok(page) => page,
-            Err(error) => {
-                if items.is_empty() {
-                    return Err(error.to_string());
-                }
-                // Earlier pages are still useful; the list is simply incomplete.
-                break;
-            }
-        };
-        let page_len = page.items.len();
-        let total_rows = page.total_record_count;
-        let mut added = 0usize;
-        for item in page.items {
-            if seen.insert(item.id.clone()) {
-                items.push(item);
-                added += 1;
-            }
-        }
-        start_index += PROFILE_PAGE_SIZE;
-        if page_len < PROFILE_PAGE_SIZE || added == 0 {
-            break;
-        }
-        if total_rows > 0 && start_index >= total_rows {
-            break;
-        }
-    }
-    Ok(items)
 }
 
 fn fetch_adult_hub_profile_items(
@@ -197,8 +142,6 @@ fn load_performer_profile_data(ui: &MainWindow, ctx: &AppContext, p_key: String)
     let weak = ui.as_weak();
     let local_store = ctx.local_store.clone();
     let credential_store = ctx.credential_store.clone();
-    let jellyfin = ctx.jellyfin.clone();
-    let resolver = ctx.resolver.clone();
     let cached_catalog = ctx.cached_catalog.clone();
     let home_catalog = ctx.home_catalog.clone();
     let performer_catalog = ctx.performer_catalog.clone();
@@ -236,7 +179,6 @@ fn load_performer_profile_data(ui: &MainWindow, ctx: &AppContext, p_key: String)
     let session = credential_store.get().ok().flatten();
     let server_url = session.as_ref().map(|s| s.server_url.clone());
     let token = session.as_ref().map(|s| s.access_token.clone());
-    let is_adult_hub_api = local_store.is_adult_hub_api_enabled().unwrap_or(false);
 
     std::thread::spawn(move || {
         let mut person_image_bytes = None;
@@ -244,7 +186,7 @@ fn load_performer_profile_data(ui: &MainWindow, ctx: &AppContext, p_key: String)
         let mut person_overview = None;
         let mut bio_info = None;
 
-        let remote_result = if is_adult_hub_api {
+        let remote_result = {
             if let Some(session) = session.as_ref() {
                 match adult_hub_client::AdultHubClient::new(&session.server_url) {
                     Ok(client) => {
@@ -286,68 +228,6 @@ fn load_performer_profile_data(ui: &MainWindow, ctx: &AppContext, p_key: String)
                     }
                     Err(e) => Err(e.to_string()),
                 }
-            } else {
-                Ok(Vec::new())
-            }
-        } else {
-            let p_name = if p_key.starts_with("name:") {
-                p_key.trim_start_matches("name:").trim().to_string()
-            } else {
-                p_key.clone()
-            };
-
-            // 2. Query dedicated Jellyfin Person endpoint: GET /Persons/{name}?userId={userId}
-            if let Some(session) = session.as_ref() {
-                if let Ok(details) = jellyfin.get_person(
-                    &session.server_url,
-                    &session.user_id,
-                    &session.access_token,
-                    &p_name,
-                ) {
-                    person_overview = details.overview;
-                    person_child_count = details.child_count;
-                    if let Some(tag) = details.primary_image_tag.as_deref() {
-                        let image_url = JellyfinClient::image_url(
-                            &session.server_url,
-                            &details.id,
-                            "Primary",
-                            crate::thumbnails::person_thumbnail_max_width(),
-                            Some(tag),
-                        );
-                        person_image_bytes = crate::thumbnails::load_cached_image_bytes(&image_url)
-                            .or_else(|| {
-                                crate::thumbnails::fetch_and_cache_image_bytes(
-                                    &image_url,
-                                    Some(&session.access_token),
-                                )
-                            });
-                    }
-                }
-            }
-
-            // 3. Query resolver for bio, nationality, birth, aliases
-            let res_url = local_store
-                .get_setting("resolver_base_url")
-                .ok()
-                .flatten()
-                .or_else(|| server_url.clone())
-                .unwrap_or_default();
-            bio_info = if !res_url.is_empty() {
-                resolver.get_performer_bio(&res_url, &p_name).ok()
-            } else {
-                None
-            };
-
-            // 4. Query filmography from Jellyfin
-            if let Some(session) = session.as_ref() {
-                let q = GetItemsQuery {
-                    person: Some(&p_name),
-                    limit: PROFILE_PAGE_SIZE,
-                    include_item_types: Some("Movie,Video"),
-                    sort_by: "SortName",
-                    ..Default::default()
-                };
-                fetch_profile_items(&jellyfin, session, &q)
             } else {
                 Ok(Vec::new())
             }
@@ -458,7 +338,6 @@ fn load_studio_profile_data(ui: &MainWindow, ctx: &AppContext, s_name: String) {
     let weak = ui.as_weak();
     let local_store = ctx.local_store.clone();
     let credential_store = ctx.credential_store.clone();
-    let jellyfin = ctx.jellyfin.clone();
     let cached_catalog = ctx.cached_catalog.clone();
     let home_catalog = ctx.home_catalog.clone();
     let studio_catalog = ctx.studio_catalog.clone();
@@ -485,10 +364,9 @@ fn load_studio_profile_data(ui: &MainWindow, ctx: &AppContext, s_name: String) {
     let session = credential_store.get().ok().flatten();
     let server_url = session.as_ref().map(|s| s.server_url.clone());
     let token = session.as_ref().map(|s| s.access_token.clone());
-    let is_adult_hub_api = local_store.is_adult_hub_api_enabled().unwrap_or(false);
 
     std::thread::spawn(move || {
-        let remote_result = if is_adult_hub_api {
+        let remote_result = {
             if let Some(session) = session.as_ref() {
                 match adult_hub_client::AdultHubClient::new(&session.server_url) {
                     Ok(client) => {
@@ -500,17 +378,6 @@ fn load_studio_profile_data(ui: &MainWindow, ctx: &AppContext, s_name: String) {
             } else {
                 Ok(Vec::new())
             }
-        } else if let Some(session) = session.as_ref() {
-            let q = GetItemsQuery {
-                studio: Some(&s_name),
-                limit: PROFILE_PAGE_SIZE,
-                include_item_types: Some("Movie,Video"),
-                sort_by: "SortName",
-                ..Default::default()
-            };
-            fetch_profile_items(&jellyfin, session, &q)
-        } else {
-            Ok(Vec::new())
         };
 
         let is_remote_err = remote_result.is_err();
@@ -690,90 +557,8 @@ pub fn install_stage7_handlers(ui: &MainWindow, ctx: &AppContext) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use adult_hub_storage::Session;
     use std::io::{Read, Write};
     use std::net::TcpListener;
-
-    fn page_json(start: usize, count: usize, total: usize) -> String {
-        let items = (start..start + count)
-            .map(|index| {
-                format!(r#"{{"Id":"film-{index}","Name":"Film {index}","RunTimeTicks":600000000}}"#)
-            })
-            .collect::<Vec<_>>()
-            .join(",");
-        format!(r#"{{"Items":[{items}],"TotalRecordCount":{total}}}"#)
-    }
-
-    /// Regression: a profile used to request a single page, so a studio with
-    /// more titles than the page size showed a truncated filmography that never
-    /// grew when the user scrolled to the end.
-    #[test]
-    fn profile_items_page_through_the_whole_collection() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = std::thread::spawn(move || {
-            let mut served = 0;
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { continue };
-                let mut request = Vec::new();
-                let mut buffer = [0_u8; 1024];
-                while let Ok(count) = stream.read(&mut buffer) {
-                    if count == 0 {
-                        break;
-                    }
-                    request.extend_from_slice(&buffer[..count]);
-                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                        break;
-                    }
-                }
-                let request = String::from_utf8_lossy(&request).into_owned();
-                let start = request
-                    .split("StartIndex=")
-                    .nth(1)
-                    .and_then(|tail| tail.split('&').next())
-                    .and_then(|value| value.parse::<usize>().ok())
-                    .unwrap_or(0);
-                let body = match start {
-                    0 => page_json(0, PROFILE_PAGE_SIZE, 450),
-                    PROFILE_PAGE_SIZE => page_json(PROFILE_PAGE_SIZE, PROFILE_PAGE_SIZE, 450),
-                    _ => page_json(2 * PROFILE_PAGE_SIZE, 50, 450),
-                };
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = stream.write_all(response.as_bytes());
-                let _ = stream.flush();
-                served += 1;
-                if served >= 3 {
-                    break;
-                }
-            }
-        });
-
-        let session = Session {
-            server_url: format!("http://{address}"),
-            user_id: "user-1".into(),
-            username: "tester".into(),
-            access_token: "token".into(),
-            server_name: "Mock".into(),
-            refresh_token: None,
-        };
-        let jellyfin = JellyfinClient::new("test-device");
-        let query = GetItemsQuery {
-            studio: Some("Mock Studio"),
-            limit: PROFILE_PAGE_SIZE,
-            sort_by: "SortName",
-            ..Default::default()
-        };
-
-        let items = fetch_profile_items(&jellyfin, &session, &query).expect("paged query succeeds");
-
-        assert_eq!(items.len(), 450, "every server page is collected");
-        assert_eq!(items.first().map(|item| item.id.as_str()), Some("film-0"));
-        assert_eq!(items.last().map(|item| item.id.as_str()), Some("film-449"));
-        let _ = server.join();
-    }
 
     #[test]
     fn adult_hub_profile_items_page_through_catalog_videos() {

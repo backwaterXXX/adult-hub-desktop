@@ -169,26 +169,26 @@ mod tests {
 
     #[test]
     fn validates_localhost_and_local_network() {
-        match ServiceUrlPolicy::inspect("http://localhost:8096", false) {
+        match ServiceUrlPolicy::inspect("http://localhost:8090", false) {
             ServiceUrlValidation::Valid(url) => {
-                assert_eq!(url.normalized, "http://localhost:8096");
-                assert_eq!(url.origin, "http://localhost:8096");
+                assert_eq!(url.normalized, "http://localhost:8090");
+                assert_eq!(url.origin, "http://localhost:8090");
                 assert!(url.uses_cleartext);
             }
             ServiceUrlValidation::Invalid(reason) => panic!("Expected valid: {reason}"),
         }
 
-        match ServiceUrlPolicy::inspect("http://192.168.1.100:8096/", false) {
+        match ServiceUrlPolicy::inspect("http://192.168.1.100:8090/", false) {
             ServiceUrlValidation::Valid(url) => {
-                assert_eq!(url.normalized, "http://192.168.1.100:8096");
-                assert_eq!(url.origin, "http://192.168.1.100:8096");
+                assert_eq!(url.normalized, "http://192.168.1.100:8090");
+                assert_eq!(url.origin, "http://192.168.1.100:8090");
             }
             ServiceUrlValidation::Invalid(reason) => panic!("Expected valid: {reason}"),
         }
 
-        match ServiceUrlPolicy::inspect("http://server.local:8096", false) {
+        match ServiceUrlPolicy::inspect("http://server.local:8090", false) {
             ServiceUrlValidation::Valid(url) => {
-                assert_eq!(url.normalized, "http://server.local:8096");
+                assert_eq!(url.normalized, "http://server.local:8090");
             }
             ServiceUrlValidation::Invalid(reason) => panic!("Expected valid: {reason}"),
         }
@@ -196,7 +196,7 @@ mod tests {
 
     #[test]
     fn rejects_public_http() {
-        match ServiceUrlPolicy::inspect("http://example.com:8096", false) {
+        match ServiceUrlPolicy::inspect("http://example.com:8090", false) {
             ServiceUrlValidation::Invalid(reason) => {
                 assert!(reason.contains("Unencrypted HTTP is allowed only"));
             }
@@ -206,10 +206,10 @@ mod tests {
 
     #[test]
     fn allows_public_https() {
-        match ServiceUrlPolicy::inspect("https://jellyfin.example.com", false) {
+        match ServiceUrlPolicy::inspect("https://media.example.com", false) {
             ServiceUrlValidation::Valid(url) => {
-                assert_eq!(url.normalized, "https://jellyfin.example.com");
-                assert_eq!(url.origin, "https://jellyfin.example.com:443");
+                assert_eq!(url.normalized, "https://media.example.com");
+                assert_eq!(url.origin, "https://media.example.com:443");
                 assert!(!url.uses_cleartext);
             }
             ServiceUrlValidation::Invalid(reason) => panic!("Expected valid: {reason}"),
@@ -229,29 +229,29 @@ mod tests {
     #[test]
     fn auto_prefixes_scheme_for_bare_hostnames_and_ips() {
         // Public domain defaults to https://
-        match ServiceUrlPolicy::inspect("jellyfin.example", false) {
+        match ServiceUrlPolicy::inspect("media.example", false) {
             ServiceUrlValidation::Valid(url) => {
-                assert_eq!(url.normalized, "https://jellyfin.example");
-                assert_eq!(url.origin, "https://jellyfin.example:443");
+                assert_eq!(url.normalized, "https://media.example");
+                assert_eq!(url.origin, "https://media.example:443");
                 assert!(!url.uses_cleartext);
             }
             ServiceUrlValidation::Invalid(err) => panic!("Expected valid: {err}"),
         }
 
         // Local IP defaults to http://
-        match ServiceUrlPolicy::inspect("192.168.1.111:8096", false) {
+        match ServiceUrlPolicy::inspect("192.168.1.111:8090", false) {
             ServiceUrlValidation::Valid(url) => {
-                assert_eq!(url.normalized, "http://192.168.1.111:8096");
-                assert_eq!(url.origin, "http://192.168.1.111:8096");
+                assert_eq!(url.normalized, "http://192.168.1.111:8090");
+                assert_eq!(url.origin, "http://192.168.1.111:8090");
                 assert!(url.uses_cleartext);
             }
             ServiceUrlValidation::Invalid(err) => panic!("Expected valid: {err}"),
         }
 
         // Localhost defaults to http://
-        match ServiceUrlPolicy::inspect("localhost:8096", false) {
+        match ServiceUrlPolicy::inspect("localhost:8090", false) {
             ServiceUrlValidation::Valid(url) => {
-                assert_eq!(url.normalized, "http://localhost:8096");
+                assert_eq!(url.normalized, "http://localhost:8090");
                 assert!(url.uses_cleartext);
             }
             ServiceUrlValidation::Invalid(err) => panic!("Expected valid: {err}"),

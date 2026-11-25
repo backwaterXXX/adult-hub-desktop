@@ -16,18 +16,6 @@ import { IconButton, PageHeader, StatusBadge } from "common-controls.slint";
 // - Comprehensive keyboard focus support and accessible labels
 // =============================================================================
 
-export struct DiscoveredServerItem {
-    id: string,
-    name: string,
-    url: string,
-}
-
-export struct LibraryOptionData {
-    id: string,
-    name: string,
-    selected: bool,
-}
-
 export struct HomeCategoryOption {
     id: string,
     name: string,
@@ -530,33 +518,24 @@ export component SettingsView inherits Rectangle {
     in property <string> app-version-details: "";
     in property <string> build-id: "";
 
-    // Authentication & Jellyfin Server state
+    // Authentication & Adult Hub Server state
     in property <bool> is-logged-in: false;
     in property <string> logged-in-user: "";
-    in-out property <bool> adult-hub-api-enabled: false;
-    in-out property <string> server-url-input: "http://localhost:8096";
+    in-out property <string> server-url-input: "http://localhost:8090";
     in-out property <string> username-input: "";
     in-out property <string> password-input: "";
-    in-out property <string> quick-connect-code: "";
-    in-out property <bool> quick-connect-active: false;
-    in-out property <bool> quick-connect-expired: false;
-    in-out property <bool> quick-connect-authenticating: false;
-    in property <[DiscoveredServerItem]> discovered-servers: [];
-    in property <bool> is-scanning-servers: false;
-    in property <string> current-library: "All Videos";
-    in property <[LibraryOptionData]> library-options: [];
     in property <[string]> approved-http-origins: [];
 
     // Integrations & Resolver API state
     in-out property <string> resolver-url-input: "";
     in property <string> saved-resolver-url: "";
     in-out property <bool> resolver-url-dirty: false;
-    in property <string> jellyfin-connection-status: "Not checked";
+    in property <string> server-connection-status: "Not checked";
     in property <string> resolver-connection-status: "Not checked";
     in property <string> thumbnail-check-status: "Artwork not checked";
     in property <bool> thumbnail-check-failed: true;
     in property <bool> checking-connections: false;
-    in property <string> jellyfin-connection-state: "not-checked";
+    in property <string> server-connection-state: "not-checked";
     in property <string> resolver-connection-state: "not-checked";
     in property <string> artwork-connection-state: "not-checked";
     in property <string> stream-connection-state: "not-checked";
@@ -590,7 +569,7 @@ export component SettingsView inherits Rectangle {
 
     // The four checks the diagnostics section reports, in display order.
     property <[{ label: string, state: string, detail: string }]> connection-checks: [
-        { label: "Media server", state: root.jellyfin-connection-state, detail: root.jellyfin-connection-status },
+        { label: "Adult Hub server", state: root.server-connection-state, detail: root.server-connection-status },
         { label: "Video service", state: root.resolver-connection-state, detail: root.resolver-connection-status },
         { label: "Stream access", state: root.stream-connection-state, detail: root.stream-check-status },
         { label: "Artwork", state: root.artwork-connection-state, detail: root.thumbnail-check-status },
@@ -659,13 +638,6 @@ export component SettingsView inherits Rectangle {
     callback category-changed(string);
     callback perform-login(string, string, string);
     callback perform-logout();
-    callback toggle-adult-hub-api();
-    callback start-quick-connect();
-    callback cancel-quick-connect();
-    callback scan-servers();
-    callback select-discovered-server(string);
-    callback refresh-library-list();
-    callback select-library(string);
     callback revoke-cleartext-http-origin(string);
 
     callback save-resolver-url(string);
@@ -748,7 +720,7 @@ export component SettingsView inherits Rectangle {
 
                 PageHeader {
                     title: "Settings";
-                    description: "Manage connections, library, and playback preferences.";
+                    description: "Manage connections, catalog, and playback preferences.";
                 }
 
                 // -------------------------------------------------------------
@@ -1014,7 +986,7 @@ export component SettingsView inherits Rectangle {
                                         height: 26px;
 
                                         Text {
-                                            text: root.adult-hub-api-enabled ? "Adult Hub Server (API Preview)" : "Jellyfin Server";
+                                            text: "Adult Hub Server";
                                             color: HubTheme.text-primary;
                                             font-size: HubTheme.card-title-size;
                                             font-weight: 700;
@@ -1029,46 +1001,13 @@ export component SettingsView inherits Rectangle {
                                         Rectangle { horizontal-stretch: 1; }
                                     }
 
-                                    HorizontalLayout {
-                                        spacing: 12px;
-                                        alignment: center;
-
-                                        VerticalLayout {
-                                            horizontal-stretch: 1;
-                                            spacing: 2px;
-
-                                            Text {
-                                                text: "Adult Hub Direct API (Opt-in)";
-                                                color: HubTheme.text-primary;
-                                                font-size: 13px;
-                                                font-weight: 600;
-                                            }
-
-                                            Text {
-                                                text: "Connect to the native Adult Hub Server API. Keep disabled for legacy Jellyfin fallback.";
-                                                color: HubTheme.text-secondary;
-                                                font-size: 11px;
-                                                wrap: word-wrap;
-                                            }
-                                        }
-
-                                        SettingsToggle {
-                                            checked: root.adult-hub-api-enabled;
-                                            disabled: root.is-logged-in;
-                                            accessible-name: "Adult Hub Direct API";
-                                            toggled => { root.toggle-adult-hub-api(); }
-                                        }
-                                    }
-
                                 if !root.is-logged-in : VerticalLayout {
                                     spacing: 12px;
 
                                     VerticalLayout {
                                         spacing: 6px;
                                         Text {
-                                            text: root.quick-connect-active
-                                                ? "Server Address (locked during Quick Connect):"
-                                                : "Server Address (HTTP LAN or HTTPS):";
+                                            text: "Server Address (HTTP LAN or HTTPS):";
                                             color: HubTheme.text-secondary;
                                             font-size: HubTheme.metadata-size;
                                             font-weight: 600;
@@ -1076,89 +1015,8 @@ export component SettingsView inherits Rectangle {
 
                                         SettingsTextInput {
                                             text <=> root.server-url-input;
-                                            placeholder: "http://192.168.1.100:8096 or https://...";
+                                            placeholder: "https://adult-hub.example:8443 or http://192.168.1.100:8090";
                                             accessible-name: "Server Address";
-                                            enabled: !root.quick-connect-active;
-                                        }
-                                    }
-
-                                    // Local LAN Server Discovery
-                                    if !root.adult-hub-api-enabled : VerticalLayout {
-                                        spacing: 8px;
-
-                                        HorizontalLayout {
-                                            alignment: space-between;
-
-                                            Text {
-                                                text: "Discovered Local Servers:";
-                                                color: HubTheme.text-primary;
-                                                font-size: HubTheme.metadata-size;
-                                                font-weight: 600;
-                                                vertical-alignment: center;
-                                            }
-
-                                            SettingsButton {
-                                                text: root.is-scanning-servers ? "Scanning..." : "Scan LAN";
-                                                disabled: root.quick-connect-active || root.is-scanning-servers;
-                                                custom-height: 40px;
-                                                clicked => { root.scan-servers(); }
-                                            }
-                                        }
-
-                                        if root.discovered-servers.length > 0 : HorizontalLayout {
-                                            spacing: 8px;
-                                            for server in root.discovered-servers : Rectangle {
-                                                height: 38px;
-                                                border-radius: HubTheme.control-radius;
-                                                background: server-touch.has-hover ? HubTheme.surface-hover : HubTheme.navigation-background;
-                                                border-width: 1px;
-                                                border-color: server-touch.has-hover ? HubTheme.accent-outline : #F3F4F622;
-
-                                                server-touch := TouchArea {
-                                                    enabled: !root.quick-connect-active;
-                                                    clicked => {
-                                                        root.server-url-input = server.url;
-                                                        root.select-discovered-server(server.url);
-                                                    }
-                                                }
-
-                                                HorizontalLayout {
-                                                    padding-left: 12px;
-                                                    padding-right: 12px;
-                                                    spacing: 8px;
-                                                    alignment: center;
-
-                                                    Rectangle {
-                                                        width: 8px;
-                                                        height: 8px;
-                                                        border-radius: 4px;
-                                                        background: HubTheme.success;
-                                                    }
-
-                                                    Text {
-                                                        text: server.name;
-                                                        color: HubTheme.text-primary;
-                                                        font-size: 12px;
-                                                        font-weight: 600;
-                                                        vertical-alignment: center;
-                                                    }
-
-                                                    Text {
-                                                        text: "(" + server.url + ")";
-                                                        color: HubTheme.text-muted;
-                                                        font-size: 11px;
-                                                        vertical-alignment: center;
-                                                    }
-                                                }
-                                            }
-                                        }
-
-                                        if root.discovered-servers.length == 0 : Text {
-                                            text: root.is-scanning-servers
-                                                ? "Scanning local network for Jellyfin servers..."
-                                                : "No local servers discovered. Enter address manually or click Scan LAN.";
-                                            color: HubTheme.text-muted;
-                                            font-size: HubTheme.metadata-size;
                                         }
                                     }
 
@@ -1212,7 +1070,7 @@ export component SettingsView inherits Rectangle {
                                         }
                                     }
 
-                                    // Action buttons: Sign in / Quick connect
+                                    // Action button: Sign in
                                     HorizontalLayout {
                                         spacing: 12px;
                                         padding-top: 4px;
@@ -1228,112 +1086,6 @@ export component SettingsView inherits Rectangle {
                                                     root.username-input,
                                                     root.password-input
                                                 );
-                                            }
-                                        }
-
-                                        if !root.adult-hub-api-enabled : SettingsButton {
-                                            text: root.quick-connect-active
-                                                ? (root.quick-connect-authenticating ? "Signing in…" : (root.quick-connect-code == "" ? "Connecting…" : "Waiting…"))
-                                                : "Quick Connect";
-                                            disabled: root.quick-connect-active && !root.quick-connect-expired;
-                                            custom-height: 44px;
-                                            horizontal-stretch: 1;
-                                            clicked => { root.start-quick-connect(); }
-                                        }
-                                    }
-
-                                    // Quick Connect PIN banner
-                                    if !root.adult-hub-api-enabled && (root.quick-connect-active || root.quick-connect-expired) : Rectangle {
-                                        border-radius: HubTheme.control-radius;
-                                        background: HubTheme.surface;
-                                        border-width: 1px;
-                                        border-color: #BE185D77;
-
-                                        VerticalLayout {
-                                            padding: 16px;
-                                            spacing: 10px;
-
-                                            HorizontalLayout {
-                                                alignment: center;
-
-                                                Text {
-                                                    text: "Quick Connect";
-                                                    color: HubTheme.focus-ring;
-                                                    font-size: 12px;
-                                                    font-weight: 600;
-                                                    horizontal-stretch: 1;
-                                                }
-
-                                                Text {
-                                                    text: root.quick-connect-expired
-                                                        ? "Code expired"
-                                                        : (root.quick-connect-authenticating
-                                                            ? "Signing in"
-                                                            : (root.quick-connect-code == "" ? "Connecting to Jellyfin" : "Waiting for authorization"));
-                                                    color: root.quick-connect-expired ? HubTheme.error : HubTheme.text-muted;
-                                                    font-size: 11px;
-                                                    font-weight: 700;
-                                                }
-                                            }
-
-                                            if root.quick-connect-code != "" : HorizontalLayout {
-                                                alignment: center;
-                                                spacing: 18px;
-
-                                                Text {
-                                                    text: root.quick-connect-code;
-                                                    color: HubTheme.text-primary;
-                                                    font-size: 32px;
-                                                    font-family: "Consolas";
-                                                    font-weight: 800;
-                                                    letter-spacing: 6px;
-                                                    vertical-alignment: center;
-                                                }
-
-                                                Text {
-                                                    text: root.quick-connect-authenticating
-                                                        ? "Authorization confirmed. Signing in to Jellyfin…"
-                                                        : "On another device, open Jellyfin → Settings → Quick Connect and enter this code.";
-                                                    color: HubTheme.text-secondary;
-                                                    font-size: 12px;
-                                                    wrap: word-wrap;
-                                                    vertical-alignment: center;
-                                                    horizontal-stretch: 1;
-                                                }
-
-                                                SettingsButton {
-                                                    text: "Cancel";
-                                                    custom-height: 40px;
-                                                    clicked => { root.cancel-quick-connect(); }
-                                                }
-                                            }
-
-                                            if root.quick-connect-code == "" : HorizontalLayout {
-                                                alignment: center;
-                                                spacing: 12px;
-
-                                                Text {
-                                                    text: root.quick-connect-expired
-                                                        ? "This code expired. Get a new code to continue."
-                                                        : "Requesting a secure authorization code…";
-                                                    color: HubTheme.text-secondary;
-                                                    font-size: 12px;
-                                                    horizontal-stretch: 1;
-                                                    vertical-alignment: center;
-                                                }
-
-                                                if root.quick-connect-active : SettingsButton {
-                                                    text: "Cancel";
-                                                    custom-height: 40px;
-                                                    clicked => { root.cancel-quick-connect(); }
-                                                }
-
-                                                if root.quick-connect-expired : SettingsButton {
-                                                    text: "Get New Code";
-                                                    primary: true;
-                                                    custom-height: 40px;
-                                                    clicked => { root.start-quick-connect(); }
-                                                }
                                             }
                                         }
                                     }
@@ -1392,75 +1144,6 @@ export component SettingsView inherits Rectangle {
                                         }
                                     }
 
-                                    if !root.adult-hub-api-enabled : HorizontalLayout {
-                                        spacing: 12px;
-
-                                        Text {
-                                            text: "Active Library: " + root.current-library;
-                                            color: HubTheme.text-primary;
-                                            font-size: 13px;
-                                            font-weight: 600;
-                                            vertical-alignment: center;
-                                            horizontal-stretch: 1;
-                                        }
-
-                                        SettingsButton {
-                                            text: "Refresh Libraries";
-                                            custom-height: 36px;
-                                            clicked => { root.refresh-library-list(); }
-                                        }
-                                    }
-
-                                    if root.adult-hub-api-enabled : HorizontalLayout {
-                                        spacing: 12px;
-
-                                        Text {
-                                            text: "Active Catalog: Canonical Direct Play API";
-                                            color: HubTheme.text-primary;
-                                            font-size: 13px;
-                                            font-weight: 600;
-                                            vertical-alignment: center;
-                                            horizontal-stretch: 1;
-                                        }
-                                    }
-
-                                    if !root.adult-hub-api-enabled && root.library-options.length > 0 : VerticalLayout {
-                                        spacing: 6px;
-                                        for library in root.library-options : Rectangle {
-                                            height: 40px;
-                                            border-radius: HubTheme.control-radius;
-                                            background: library.selected ? #BE185D22 : (library-touch.has-hover ? HubTheme.surface-hover : HubTheme.navigation-background);
-                                            border-width: 1px;
-                                            border-color: library.selected ? HubTheme.accent-outline : #F3F4F614;
-
-                                            library-touch := TouchArea {
-                                                clicked => { root.select-library(library.id); }
-                                            }
-
-                                            HorizontalLayout {
-                                                padding-left: 14px;
-                                                padding-right: 14px;
-                                                alignment: center;
-
-                                                Text {
-                                                    text: library.name;
-                                                    color: library.selected ? HubTheme.text-primary : HubTheme.text-secondary;
-                                                    font-size: 13px;
-                                                    font-weight: library.selected ? 700 : 500;
-                                                    vertical-alignment: center;
-                                                    horizontal-stretch: 1;
-                                                }
-
-                                                if library.selected : Image {
-                                                    source: @image-url("../../../assets/icons/radio-selected.svg");
-                                                    width: 18px;
-                                                    height: 18px;
-                                                    colorize: HubTheme.accent;
-                                                    vertical-alignment: center;
-                                                }
-                                            }
-                                        }
-                                    }
                                 }
                             }
                         }
@@ -2072,7 +1755,7 @@ export component SettingsView inherits Rectangle {
                                                 wrap: word-wrap;
                                             }
                                             Text {
-                                                text: "• Media server: " + (root.saved-resolver-url != "" ? root.saved-resolver-url : root.jellyfin-connection-status);
+                                                text: "• Adult Hub server: " + root.server-connection-status;
                                                 color: HubTheme.text-secondary;
                                                 font-size: 11px;
                                                 wrap: word-wrap;
@@ -2122,7 +1805,7 @@ export component SettingsView inherits Rectangle {
                                 Rectangle { height: 18px; }
 
                                 if root.home-category-options.length == 0 : Text {
-                                    text: root.is-logged-in ? "No genres found in this library." : "Connect to Jellyfin to load genres.";
+                                    text: root.is-logged-in ? "No genres found in this catalog." : "Sign in to Adult Hub to load genres.";
                                     color: HubTheme.text-muted;
                                     font-size: HubTheme.metadata-size;
                                 }

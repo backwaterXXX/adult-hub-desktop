@@ -551,7 +551,7 @@ pub fn install_polling(ui: &MainWindow, ctx: &AppContext, frame_pending: Arc<Ato
         if tick % 100 == 0 && !idle {
             let pos_ms = (player.position().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
             let dur_ms = (player.duration().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
-            rep.tick_periodic(pos_ms, paused);
+            rep.tick_periodic();
             if let Some(item) = cur_item.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
                 sctrl.checkpoint_progress(item, pos_ms, dur_ms, false);
                 rep.report_api_progress(&item.id, pos_ms, dur_ms, false);
@@ -578,7 +578,6 @@ fn handle_event(
     let headers = &ctx.headers;
     let credential_store = &ctx.credential_store;
     let local_store = &ctx.local_store;
-    let jellyfin = &ctx.jellyfin;
     let phash_coord = &ctx.phash_coord;
     let pending_resume = &ctx.pending_resume_position;
     match event {
@@ -641,11 +640,6 @@ fn handle_event(
             ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
             ui.set_playing(!player.is_paused());
 
-            let pos_ms = if let Some(target) = resume_target {
-                (target * 1000.0) as u64
-            } else {
-                (player.position().unwrap_or(0.0) * 1000.0).max(0.0) as u64
-            };
             let current_item = current_item
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -657,13 +651,6 @@ fn handle_event(
                     .unwrap_or(name)
                     .into(),
             );
-            let report_to_jellyfin = current_item
-                .as_ref()
-                .is_some_and(|item| uuid::Uuid::parse_str(&item.id).is_ok());
-            if report_to_jellyfin {
-                reporter.report_start(pos_ms, !player.is_paused());
-            }
-
             let dur_ms = (player.duration().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
             if dur_ms > 0 {
                 if let Some(item) = current_item.as_ref() {
@@ -673,9 +660,7 @@ fn handle_event(
                         .flatten()
                         .map(|v| v == "true" || v == "1")
                         .unwrap_or(false);
-                    if phash_enabled
-                        && (uuid::Uuid::parse_str(&item.id).is_ok() || item.is_telegram())
-                    {
+                    if phash_enabled && (item.source_provider.is_some() || item.is_telegram()) {
                         phash_coord.enqueue_generation(item, Some(dur_ms));
                     }
                 }
@@ -724,7 +709,6 @@ fn handle_event(
                             headers,
                             credential_store,
                             local_store,
-                            jellyfin,
                             reporter,
                             session_ctrl,
                             current_item,
@@ -809,7 +793,6 @@ fn handle_event(
                     session_ctrl.checkpoint_progress(item, pos_ms, dur_ms, is_completed);
                     reporter.report_api_progress(&item.id, pos_ms, dur_ms, is_completed);
                 }
-                reporter.stop_session(pos_ms);
 
                 // User requirement:
                 // - Do NOT display an end screen, card, or countdown dialog asking for confirmation.

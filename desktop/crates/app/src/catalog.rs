@@ -1,5 +1,5 @@
-use crate::{DiscoveredServerItem, MainWindow, VideoCardData, VideoCardRowData};
-use adult_hub_client::{JellyfinClient, TvItem, TvPersonRole};
+use crate::{MainWindow, VideoCardData, VideoCardRowData};
+use adult_hub_client::{TvItem, TvPersonRole};
 use adult_hub_storage::LocalStore;
 use slint::Model;
 use std::collections::HashMap;
@@ -927,11 +927,6 @@ pub fn retry_home_thumbnail_async(
     });
 }
 
-pub fn set_discovered_servers(ui: &MainWindow, items: Vec<DiscoveredServerItem>) {
-    let model = Rc::new(slint::VecModel::from(items));
-    ui.set_discovered_servers(model.into());
-}
-
 fn titlecase(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut capitalize_next = true;
@@ -1158,7 +1153,7 @@ pub fn tv_item_to_card(item: &TvItem) -> VideoCardData {
     {
         "local".to_string()
     } else {
-        "jellyfin".to_string()
+        "adult_hub".to_string()
     };
     // Video progress must be computed from actual playback position & duration:
     // Do NOT let the watched/played flag automatically force 100% completed if the item
@@ -1244,7 +1239,7 @@ pub fn tv_item_to_card(item: &TvItem) -> VideoCardData {
             let mut parts = Vec::new();
             if let Some(provider) = item.source_provider.as_deref() {
                 let trimmed = provider.trim();
-                if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("jellyfin") {
+                if !trimmed.is_empty() {
                     parts.push(trimmed.to_string());
                 }
             }
@@ -1280,7 +1275,11 @@ pub fn tv_item_to_card(item: &TvItem) -> VideoCardData {
 
 pub fn tv_item_to_card_for_server(item: &TvItem, server_url: &str) -> VideoCardData {
     let mut card = tv_item_to_card(item);
-    let (image_url, fallback_image_url, alternate_image_url) = if item.source_provider.is_some()
+    let (image_url, fallback_image_url, alternate_image_url): (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = if item.source_provider.is_some()
         || item.primary_image_tag.as_deref().is_some_and(|t| {
             let trimmed = t.trim();
             !trimmed.starts_with("//")
@@ -1325,61 +1324,7 @@ pub fn tv_item_to_card_for_server(item: &TvItem, server_url: &str) -> VideoCardD
             None,
         )
     } else {
-        let is_performer = item.genres.iter().any(|tag| tag == "__adult_hub_performer");
-        // Actor portraits use one shared width everywhere (catalog shelf,
-        // profile hero, video cast) so every screen hits the same cache key.
-        let image_width = if is_performer {
-            crate::thumbnails::person_thumbnail_max_width()
-        } else {
-            crate::thumbnails::thumbnail_max_width()
-        };
-        // Match Android's Jellyfin choice: use Thumb when present, then Backdrop,
-        // then Primary. Keep the other image types as desktop fallbacks.
-        let preferred = if item
-            .thumb_image_tag
-            .as_deref()
-            .is_some_and(|tag| !tag.trim().is_empty())
-        {
-            "Thumb"
-        } else if item
-            .backdrop_image_tag
-            .as_deref()
-            .is_some_and(|tag| !tag.trim().is_empty())
-        {
-            "Backdrop"
-        } else {
-            "Primary"
-        };
-        let order = match preferred {
-            "Thumb" => ["Thumb", "Primary", "Backdrop"],
-            "Backdrop" => ["Backdrop", "Primary", "Thumb"],
-            _ => ["Primary", "Thumb", "Backdrop"],
-        };
-        // Only request image types the server actually tagged. Tag-less URLs
-        // are guaranteed 404s and would stall the bounded thumbnail queue.
-        let urls: Vec<String> = order
-            .into_iter()
-            .filter_map(|image_type| {
-                let tag = match image_type {
-                    "Thumb" => item.thumb_image_tag.as_deref(),
-                    "Backdrop" => item.backdrop_image_tag.as_deref(),
-                    _ => item.primary_image_tag.as_deref(),
-                }
-                .filter(|tag| !tag.trim().is_empty())?;
-                Some(JellyfinClient::image_url(
-                    server_url,
-                    &item.id,
-                    image_type,
-                    image_width,
-                    Some(tag),
-                ))
-            })
-            .collect();
-        (
-            urls.first().cloned(),
-            urls.get(1).cloned(),
-            urls.get(2).cloned(),
-        )
+        (None, None, None)
     };
 
     if let Some(url) = image_url {
@@ -1594,8 +1539,8 @@ fn fetch_card_thumbnail_inner(request: &ThumbnailRequest, token: Option<&str>) -
                 transient: false,
             };
         }
-        // Keep a decoded image as a last resort, but let later Jellyfin image
-        // types replace blank/near-black placeholders when they are available.
+        // Keep a decoded image as a last resort, but let later image types
+        // replace blank/near-black placeholders when they are available.
         last_resort.get_or_insert(fetched);
     }
     let transient = last_resort.is_none() && transient;
@@ -1930,7 +1875,7 @@ pub fn aggregate_studio_items(items: Vec<TvItem>) -> Vec<TvItem> {
             .source_provider
             .as_deref()
             .map(|p| p.trim().to_lowercase())
-            .unwrap_or_else(|| "jellyfin".to_string());
+            .unwrap_or_else(|| "adult_hub".to_string());
         let norm_key = format!("{provider_key}:{title_clean}");
 
         if let Some(&existing_idx) = title_to_index.get(&norm_key) {

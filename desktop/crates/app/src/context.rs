@@ -1,7 +1,7 @@
 use crate::phash::PhashCoordinator;
 use crate::reporter::PlaybackReporter;
 use crate::session::PlaybackSessionController;
-use adult_hub_client::{JellyfinClient, ResolverClient, TvItem};
+use adult_hub_client::{ResolverClient, TvItem};
 use adult_hub_player::Player;
 use adult_hub_storage::{CredentialStore, LocalStore};
 use std::sync::atomic::AtomicBool;
@@ -47,7 +47,6 @@ pub struct AppContext {
     pub headers: Vec<String>,
     pub local_store: Arc<LocalStore>,
     pub credential_store: Arc<CredentialStore>,
-    pub jellyfin: Arc<JellyfinClient>,
     pub resolver: Arc<ResolverClient>,
     pub reporter: Arc<PlaybackReporter>,
     pub session_ctrl: Arc<PlaybackSessionController>,

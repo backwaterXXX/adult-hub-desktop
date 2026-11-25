@@ -1,29 +1,46 @@
 use crate::catalog::{
-    FetchedThumbnail, ThumbnailRequest, append_catalog_page, card_index_by_request,
-    fetch_thumbnail_batch, filter_catalog_items, no_thumbnail_state,
-    refresh_catalog_thumbnails_async, sample_catalog_tv_items, set_catalog, set_discovered_servers,
-    tv_item_to_card, tv_item_to_card_for_server,
+    append_catalog_page, filter_catalog_items, refresh_catalog_thumbnails_async,
+    sample_catalog_tv_items, set_catalog, tv_item_to_card, tv_item_to_card_for_server,
 };
 use crate::context::AppContext;
 use crate::playback::show_error;
-use crate::{
-    DiscoveredServerItem, HomeCategoryOption, HomeCategoryShelfData, MainWindow, VideoCardData,
-};
+use crate::{HomeCategoryOption, HomeCategoryShelfData, MainWindow, VideoCardData};
 use adult_hub_client::{
-    GetItemsQuery, JellyfinClient, JellyfinError, ResolverClient, ServiceUrlPolicy,
-    ServiceUrlValidation, TvItem, TvItemsPage, discover_servers,
+    AdultHubClient, CatalogTaxonomyQuery, CatalogVideosQuery, ServiceUrlPolicy,
+    ServiceUrlValidation, TvItem, TvItemsPage,
 };
 use adult_hub_storage::{LocalStore, Session};
 use slint::{ComponentHandle, Model};
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const CATALOG_PAGE_SIZE: usize = 50;
-const MAX_RESUME_SEARCH_SERVER_ITEMS: usize = 100;
+const CHANNEL_SEARCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
+#[derive(Debug)]
+enum CatalogError {
+    Unauthorized,
+    Api(String),
+}
+
+impl CatalogError {
+    fn is_unauthorized(&self) -> bool {
+        matches!(self, Self::Unauthorized)
+    }
+}
+
+impl std::fmt::Display for CatalogError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unauthorized => write!(f, "Session expired"),
+            Self::Api(message) => write!(f, "{message}"),
+        }
+    }
+}
 
 /// Every piece of catalog-search state that must change together when the user
 /// leaves a search (the central "Clear search" action). The edited field text,
@@ -256,170 +273,6 @@ pub fn restore_saved_home_data(
     true
 }
 
-fn update_home_thumbnail_model(
-    items: slint::ModelRc<VideoCardData>,
-    requests: &[ThumbnailRequest],
-    start: usize,
-    end: usize,
-    thumbnails: &[(usize, FetchedThumbnail)],
-) {
-    for request_index in start..end {
-        let Some(request) = requests.get(request_index) else {
-            continue;
-        };
-        let Some(index) = card_index_by_request(&items, request) else {
-            continue;
-        };
-        let Some(mut card) = items.row_data(index) else {
-            continue;
-        };
-        if let Some((_, thumbnail)) = thumbnails
-            .iter()
-            .find(|(offset, _)| *offset == request_index)
-        {
-            if let Some(image) = crate::thumbnails::image_from_bytes(&thumbnail.bytes) {
-                card.thumbnail = image;
-                card.has_thumbnail = true;
-                card.thumbnail_state = "ready".into();
-            } else {
-                card.thumbnail_state = "failed".into();
-            }
-        } else {
-            let has_source = !request.primary_url.is_empty()
-                || !request.fallback_url.is_empty()
-                || !request.alternate_url.is_empty();
-            card.thumbnail_state = no_thumbnail_state(has_source).into();
-        }
-        items.set_row_data(index, card);
-    }
-}
-
-fn update_home_shelf_thumbnails(
-    ui: &MainWindow,
-    shelf_index: usize,
-    requests: &[ThumbnailRequest],
-    start: usize,
-    end: usize,
-    thumbnails: &[(usize, FetchedThumbnail)],
-) {
-    let items = match shelf_index {
-        0 => ui.get_home_resume_items(),
-        1 => ui.get_home_history_items(),
-        2 => ui.get_home_latest_items(),
-        3 => ui.get_home_random_items(),
-        _ => ui.get_home_performer_items(),
-    };
-    update_home_thumbnail_model(items, requests, start, end, thumbnails);
-}
-
-fn update_home_category_thumbnails(
-    ui: &MainWindow,
-    category_name: &str,
-    requests: &[ThumbnailRequest],
-    start: usize,
-    end: usize,
-    thumbnails: &[(usize, FetchedThumbnail)],
-) {
-    let categories = ui.get_home_category_shelves();
-    for index in 0..categories.row_count() {
-        let Some(category) = categories.row_data(index) else {
-            continue;
-        };
-        if category.name != category_name {
-            continue;
-        }
-        update_home_thumbnail_model(category.items, requests, start, end, thumbnails);
-        break;
-    }
-}
-
-fn refresh_home_thumbnails_async(
-    ui: slint::Weak<MainWindow>,
-    shelves: Vec<Vec<VideoCardData>>,
-    category_shelves: Vec<(String, Vec<VideoCardData>, String)>,
-    token: String,
-    generation: Arc<AtomicU64>,
-    request_id: u64,
-) {
-    let shelves = shelves
-        .iter()
-        .map(|shelf| shelf.iter().map(ThumbnailRequest::from).collect::<Vec<_>>())
-        .collect::<Vec<_>>();
-    let category_shelves = category_shelves
-        .iter()
-        .map(|(name, cards, error)| {
-            (
-                name.clone(),
-                cards.iter().map(ThumbnailRequest::from).collect::<Vec<_>>(),
-                error.clone(),
-            )
-        })
-        .collect::<Vec<_>>();
-    std::thread::spawn(move || {
-        for (shelf_index, shelf) in shelves.iter().enumerate() {
-            for start in (0..shelf.len()).step_by(crate::catalog::THUMBNAIL_BATCH_SIZE) {
-                if generation.load(Ordering::SeqCst) != request_id {
-                    return;
-                }
-                let end = (start + crate::catalog::THUMBNAIL_BATCH_SIZE).min(shelf.len());
-                let thumbnails = fetch_thumbnail_batch(&shelf[start..end], Some(&token))
-                    .into_iter()
-                    .map(|(offset, thumbnail)| (start + offset, thumbnail))
-                    .collect::<Vec<_>>();
-                let generation = generation.clone();
-                let ui = ui.clone();
-                let requests = shelf.clone();
-                let _ = slint::invoke_from_event_loop(move || {
-                    if generation.load(Ordering::SeqCst) != request_id {
-                        return;
-                    }
-                    if let Some(ui) = ui.upgrade() {
-                        update_home_shelf_thumbnails(
-                            &ui,
-                            shelf_index,
-                            &requests,
-                            start,
-                            end,
-                            &thumbnails,
-                        );
-                    }
-                });
-            }
-        }
-        for (category_name, shelf, _) in &category_shelves {
-            for start in (0..shelf.len()).step_by(crate::catalog::THUMBNAIL_BATCH_SIZE) {
-                if generation.load(Ordering::SeqCst) != request_id {
-                    return;
-                }
-                let end = (start + crate::catalog::THUMBNAIL_BATCH_SIZE).min(shelf.len());
-                let thumbnails = fetch_thumbnail_batch(&shelf[start..end], Some(&token))
-                    .into_iter()
-                    .map(|(offset, thumbnail)| (start + offset, thumbnail))
-                    .collect::<Vec<_>>();
-                let generation = generation.clone();
-                let ui = ui.clone();
-                let category_name = category_name.clone();
-                let requests = shelf.clone();
-                let _ = slint::invoke_from_event_loop(move || {
-                    if generation.load(Ordering::SeqCst) != request_id {
-                        return;
-                    }
-                    if let Some(ui) = ui.upgrade() {
-                        update_home_category_thumbnails(
-                            &ui,
-                            &category_name,
-                            &requests,
-                            start,
-                            end,
-                            &thumbnails,
-                        );
-                    }
-                });
-            }
-        }
-    });
-}
-
 fn set_home_category_options(ui: &MainWindow, categories: &[TvItem], selected: &[String]) {
     let options = categories
         .iter()
@@ -574,6 +427,7 @@ impl Default for CatalogFilters {
 }
 
 impl CatalogFilters {
+    #[cfg(test)]
     fn sort_by(&self) -> &'static str {
         match self.sort {
             1 => "SortName",
@@ -1001,105 +855,6 @@ fn item_matches_query(item: &TvItem, query: &str) -> bool {
             .is_some_and(|overview| overview.to_lowercase().contains(query))
 }
 
-fn get_resume_search_catalog_page(
-    jellyfin: &JellyfinClient,
-    session: &Session,
-    local_store: &LocalStore,
-    query: &str,
-    start_index: usize,
-    filters: CatalogFilters,
-) -> std::result::Result<CatalogPage, JellyfinError> {
-    let mut items = Vec::new();
-    let mut server_start = 0;
-    loop {
-        let remaining = MAX_RESUME_SEARCH_SERVER_ITEMS.saturating_sub(server_start);
-        if remaining == 0 {
-            break;
-        }
-        let page = jellyfin.get_resume_items_page(
-            &session.server_url,
-            &session.user_id,
-            &session.access_token,
-            server_start,
-            remaining.min(CATALOG_PAGE_SIZE),
-        )?;
-        let fetched = page.items.len();
-        let server_total = page.total_record_count;
-        items.extend(page.items);
-        server_start = server_start.saturating_add(fetched);
-        if fetched == 0
-            || server_start >= server_total
-            || server_start >= MAX_RESUME_SEARCH_SERVER_ITEMS
-        {
-            break;
-        }
-    }
-
-    if let Ok(records) = local_store.get_all_telegram_progress(50) {
-        for record in records.into_iter().filter(|record| !record.is_played) {
-            let item_id = format!("telegram:{}", record.provider_video_id);
-            if items.iter().any(|item| {
-                item.id == item_id
-                    || item.provider_video_id.as_deref() == Some(record.provider_video_id.as_str())
-            }) {
-                continue;
-            }
-            items.push(TvItem {
-                id: item_id,
-                title: if record.title.is_empty() {
-                    format!("Telegram {}", record.provider_video_id)
-                } else {
-                    record.title
-                },
-                runtime_ticks: Some((record.duration_ms * 10_000) as i64),
-                genres: vec!["Telegram".into()],
-                primary_image_tag: record.thumbnail_url,
-                playback_position_ticks: (record.position_ms * 10_000) as i64,
-                played_percentage: (record.duration_ms > 0)
-                    .then_some(record.position_ms as f64 / record.duration_ms as f64 * 100.0),
-                provider_video_id: Some(record.provider_video_id),
-                container: Some("mp4".into()),
-                ..Default::default()
-            });
-        }
-    }
-
-    let query = query.trim().to_lowercase();
-    items.retain(|item| item_matches_query(item, &query) && filters.accepts(item));
-    match filters.sort {
-        1 => items.sort_by_key(|item| item.title.to_lowercase()),
-        2 => items.sort_by_key(|item| item.runtime_ticks.unwrap_or_default()),
-        3 => items.sort_by(|a, b| {
-            a.community_rating
-                .unwrap_or_default()
-                .total_cmp(&b.community_rating.unwrap_or_default())
-        }),
-        _ => {}
-    }
-    if filters.sort != 0 && filters.descending {
-        items.reverse();
-    }
-
-    // Resume searches inspect at most the first 100 server items (two pages),
-    // plus local Telegram progress, to keep each scan bounded. Counts and
-    // has_more describe only this candidate set; matches after the cap are not
-    // searched.
-    let total_count = items.len();
-    let page_items = items
-        .into_iter()
-        .skip(start_index)
-        .take(CATALOG_PAGE_SIZE)
-        .collect::<Vec<_>>();
-    let next_start = start_index + page_items.len();
-    Ok(CatalogPage {
-        items: page_items,
-        next_start,
-        total_count,
-        has_more: next_start < total_count,
-        supplemental_total: 0,
-    })
-}
-
 fn get_adult_hub_catalog_page(
     session: &Session,
     local_store: &LocalStore,
@@ -1107,7 +862,7 @@ fn get_adult_hub_catalog_page(
     query: &str,
     start_index: usize,
     filters: CatalogFilters,
-) -> std::result::Result<CatalogPage, JellyfinError> {
+) -> std::result::Result<CatalogPage, CatalogError> {
     if category == "Watch History" {
         let query = query.trim().to_lowercase();
         let mut history = local_store
@@ -1142,7 +897,7 @@ fn get_adult_hub_catalog_page(
     }
 
     let client = adult_hub_client::AdultHubClient::new(&session.server_url)
-        .map_err(|e| JellyfinError::Api(format!("Failed to initialize Adult Hub client: {e}")))?
+        .map_err(|e| CatalogError::Api(format!("Failed to initialize Adult Hub client: {e}")))?
         .with_token(&session.access_token);
 
     if category == "Categories" {
@@ -1155,9 +910,9 @@ fn get_adult_hub_catalog_page(
             })
             .map_err(|err| {
                 if err.is_unauthorized() {
-                    JellyfinError::Unauthorized(401)
+                    CatalogError::Unauthorized
                 } else {
-                    JellyfinError::Api(err.to_string())
+                    CatalogError::Api(err.to_string())
                 }
             })?;
 
@@ -1189,9 +944,9 @@ fn get_adult_hub_catalog_page(
             })
             .map_err(|err| {
                 if err.is_unauthorized() {
-                    JellyfinError::Unauthorized(401)
+                    CatalogError::Unauthorized
                 } else {
-                    JellyfinError::Api(err.to_string())
+                    CatalogError::Api(err.to_string())
                 }
             })?;
 
@@ -1229,9 +984,9 @@ fn get_adult_hub_catalog_page(
             })
             .map_err(|err| {
                 if err.is_unauthorized() {
-                    JellyfinError::Unauthorized(401)
+                    CatalogError::Unauthorized
                 } else {
-                    JellyfinError::Api(err.to_string())
+                    CatalogError::Api(err.to_string())
                 }
             })?;
 
@@ -1280,9 +1035,9 @@ fn get_adult_hub_catalog_page(
             )
             .map_err(|err| {
                 if err.is_unauthorized() {
-                    JellyfinError::Unauthorized(401)
+                    CatalogError::Unauthorized
                 } else {
-                    JellyfinError::Api(err.to_string())
+                    CatalogError::Api(err.to_string())
                 }
             })?;
 
@@ -1318,9 +1073,9 @@ fn get_adult_hub_catalog_page(
 
     let resp = client.get_videos(&req).map_err(|err| {
         if err.is_unauthorized() {
-            JellyfinError::Unauthorized(401)
+            CatalogError::Unauthorized
         } else {
-            JellyfinError::Api(err.to_string())
+            CatalogError::Api(err.to_string())
         }
     })?;
 
@@ -1339,393 +1094,14 @@ fn get_adult_hub_catalog_page(
 }
 
 fn get_catalog_page(
-    jellyfin: &JellyfinClient,
-    resolver: &ResolverClient,
     session: &Session,
     local_store: &LocalStore,
     category: &str,
     query: &str,
-    drilldown: bool,
     start_index: usize,
     filters: CatalogFilters,
-) -> std::result::Result<CatalogPage, JellyfinError> {
-    match local_store.is_adult_hub_api_enabled() {
-        Ok(true) => {
-            return get_adult_hub_catalog_page(
-                session,
-                local_store,
-                category,
-                query,
-                start_index,
-                filters,
-            );
-        }
-        Err(e) => {
-            return Err(JellyfinError::Api(format!(
-                "Failed to read server API mode setting: {e}"
-            )));
-        }
-        Ok(false) => {}
-    }
-    if category == "Watch History" {
-        let query = query.trim().to_lowercase();
-        let mut history = local_store
-            .get_watch_history(100)
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|json| serde_json::from_str::<TvItem>(&json).ok())
-            .filter(|item| item_matches_query(item, &query) && filters.accepts(item))
-            .collect::<Vec<_>>();
-        if filters.sort == 1 {
-            history.sort_by_key(|a| a.title.to_lowercase());
-        } else if filters.sort == 2 {
-            history.sort_by_key(|item| item.runtime_ticks.unwrap_or(0));
-        }
-        if !filters.descending && filters.sort != 0 {
-            history.reverse();
-        }
-        let total_count = history.len();
-        let items = history
-            .into_iter()
-            .skip(start_index)
-            .take(CATALOG_PAGE_SIZE)
-            .collect::<Vec<_>>();
-        let next_start = start_index + items.len();
-        return Ok(CatalogPage {
-            items,
-            next_start,
-            total_count,
-            has_more: next_start < total_count,
-            supplemental_total: 0,
-        });
-    }
-
-    if matches!(category, "Resume" | "Continue Watching") && !query.trim().is_empty() {
-        return get_resume_search_catalog_page(
-            jellyfin,
-            session,
-            local_store,
-            query,
-            start_index,
-            filters,
-        );
-    }
-
-    let mut supplemental_count = 0;
-    let mut supplemental_total = 0;
-    let selected_library_id = local_store
-        .get_setting("selected_library_id")
-        .ok()
-        .flatten();
-    let performer_query = query.trim();
-    let performer_letter = filters.performer_letter.trim();
-    let mut page = if category == "Performers"
-        && (!performer_query.is_empty() || !performer_letter.is_empty())
-    {
-        jellyfin.get_items(
-            &session.server_url,
-            &session.user_id,
-            &session.access_token,
-            &GetItemsQuery {
-                parent_id: None,
-                start_index,
-                limit: CATALOG_PAGE_SIZE,
-                sort_by: "SortName",
-                search_term: (!performer_query.is_empty()).then_some(performer_query),
-                name_starts_with: (!performer_letter.is_empty()).then_some(performer_letter),
-                include_item_types: Some("Person"),
-                person_types: Some("Actor"),
-                image_types: filters.performer_photo_only.then_some("Primary"),
-                ..Default::default()
-            },
-        )?
-    } else if category == "Studios" && !query.trim().is_empty() {
-        jellyfin.get_items(
-            &session.server_url,
-            &session.user_id,
-            &session.access_token,
-            &GetItemsQuery {
-                parent_id: None,
-                start_index,
-                limit: CATALOG_PAGE_SIZE,
-                sort_by: filters.sort_by(),
-                sort_descending: filters.descending,
-                search_term: Some(query.trim()),
-                include_item_types: Some("Studio"),
-                ..Default::default()
-            },
-        )?
-    } else if category == "Categories" && !query.trim().is_empty() {
-        jellyfin.get_items(
-            &session.server_url,
-            &session.user_id,
-            &session.access_token,
-            &GetItemsQuery {
-                parent_id: None,
-                start_index,
-                limit: CATALOG_PAGE_SIZE,
-                sort_by: "SortName",
-                sort_descending: false,
-                search_term: Some(query.trim()),
-                include_item_types: Some("Genre"),
-                ..Default::default()
-            },
-        )?
-    } else if category == "Favorites" && !query.trim().is_empty() {
-        let mut fav_query =
-            search_movie_query(query, start_index, &filters, selected_library_id.as_deref());
-        fav_query.is_favorite = Some(true);
-        jellyfin.get_items(
-            &session.server_url,
-            &session.user_id,
-            &session.access_token,
-            &fav_query,
-        )?
-    } else if category == "Latest" && drilldown && !query.trim().is_empty() {
-        let cat_query =
-            search_movie_query(query, start_index, &filters, selected_library_id.as_deref());
-        jellyfin.get_items(
-            &session.server_url,
-            &session.user_id,
-            &session.access_token,
-            &cat_query,
-        )?
-    } else if !query.trim().is_empty() {
-        let movie_query =
-            search_movie_query(query, start_index, &filters, selected_library_id.as_deref());
-        let resolver_base_url = resolver_base_url_for(local_store, session);
-
-        let movie_result = jellyfin.get_items(
-            &session.server_url,
-            &session.user_id,
-            &session.access_token,
-            &movie_query,
-        );
-        let supplements = if start_index == 0 {
-            fetch_search_supplements(jellyfin, resolver, session, query, &resolver_base_url)
-        } else {
-            SearchSupplements::default()
-        };
-
-        let mut successful_sources = 0;
-        let mut movie_page = match movie_result {
-            Ok(page) => {
-                successful_sources += 1;
-                page
-            }
-            Err(_) => {
-                crate::diagnostics::GLOBAL_LOG.w(
-                    "Search",
-                    "Jellyfin movie search failed; preserving results from other sources",
-                );
-                TvItemsPage {
-                    items: Vec::new(),
-                    total_record_count: 0,
-                    start_index,
-                }
-            }
-        };
-        successful_sources += supplements.people.is_some() as usize
-            + supplements.studios.is_some() as usize
-            + supplements.tags.is_some() as usize
-            + supplements.channels.is_some() as usize;
-        if successful_sources == 0 {
-            return Err(JellyfinError::Api("All search sources failed".into()));
-        }
-
-        let added = merge_search_supplements(&mut movie_page, supplements, local_store);
-        supplemental_count += added;
-        supplemental_total += added;
-        movie_page
-    } else {
-        match category {
-            "Resume" | "Continue Watching" => jellyfin.get_resume_items_page(
-                &session.server_url,
-                &session.user_id,
-                &session.access_token,
-                start_index,
-                CATALOG_PAGE_SIZE,
-            )?,
-            "Latest" | "Favorites" => jellyfin.get_items(
-                &session.server_url,
-                &session.user_id,
-                &session.access_token,
-                &GetItemsQuery {
-                    parent_id: selected_library_id.as_deref(),
-                    start_index,
-                    limit: CATALOG_PAGE_SIZE,
-                    sort_by: filters.sort_by(),
-                    sort_descending: filters.descending,
-                    is_favorite: (category == "Favorites" || filters.favorites_only)
-                        .then_some(true),
-                    is_unplayed: filters.unwatched,
-                    genre: (!filters.genre.is_empty()).then_some(filters.genre.as_str()),
-                    studio: (!filters.studio.is_empty()).then_some(filters.studio.as_str()),
-                    person: (!filters.performer.is_empty()).then_some(filters.performer.as_str()),
-                    ..Default::default()
-                },
-            )?,
-            "Performers" | "Studios" | "Categories" => {
-                // Studios expose a sort control, so the request must honour it
-                // instead of always asking the server for SortName.
-                let (sort_by, sort_descending) = if category == "Studios" {
-                    (filters.sort_by(), filters.descending)
-                } else {
-                    ("SortName", false)
-                };
-                jellyfin.get_items(
-                    &session.server_url,
-                    &session.user_id,
-                    &session.access_token,
-                    &GetItemsQuery {
-                        parent_id: None,
-                        start_index,
-                        limit: CATALOG_PAGE_SIZE,
-                        sort_by,
-                        sort_descending,
-                        include_item_types: Some(match category {
-                            "Performers" => "Person",
-                            "Studios" => "Studio",
-                            _ => "Genre",
-                        }),
-                        person_types: (category == "Performers").then_some("Actor"),
-                        image_types: (category == "Performers" && filters.performer_photo_only)
-                            .then_some("Primary"),
-                        ..Default::default()
-                    },
-                )?
-            }
-            _ => TvItemsPage {
-                items: Vec::new(),
-                total_record_count: 0,
-                start_index,
-            },
-        }
-    };
-
-    let server_count = page.items.len().saturating_sub(supplemental_count);
-    let server_total_count = page.total_record_count.saturating_sub(supplemental_total);
-    let mut total_count = server_total_count + supplemental_total;
-    if (category == "Resume" || category == "Continue Watching") && query.is_empty() {
-        if let Ok(records) = local_store.get_all_telegram_progress(50) {
-            let pending_records = records
-                .into_iter()
-                .filter(|record| !record.is_played)
-                .collect::<Vec<_>>();
-            total_count += pending_records.len();
-            if start_index == 0 {
-                for record in pending_records {
-                    if page.items.iter().any(|item| {
-                        item.id == format!("telegram:{}", record.provider_video_id)
-                            || item.provider_video_id.as_deref()
-                                == Some(record.provider_video_id.as_str())
-                    }) {
-                        continue;
-                    }
-                    let title = if record.title.is_empty() {
-                        format!("Telegram {}", record.provider_video_id)
-                    } else {
-                        record.title.clone()
-                    };
-                    page.items.push(TvItem {
-                        id: format!("telegram:{}", record.provider_video_id),
-                        title,
-                        runtime_ticks: Some((record.duration_ms * 10_000) as i64),
-                        genres: vec!["Telegram".into()],
-                        primary_image_tag: record.thumbnail_url,
-                        playback_position_ticks: (record.position_ms * 10_000) as i64,
-                        played_percentage: (record.duration_ms > 0).then_some(
-                            record.position_ms as f64 / record.duration_ms as f64 * 100.0,
-                        ),
-                        provider_video_id: Some(record.provider_video_id),
-                        container: Some("mp4".into()),
-                        ..Default::default()
-                    });
-                }
-            }
-        }
-    }
-    if matches!(category, "Performers" | "Studios" | "Categories") {
-        let kind_marker = match category {
-            "Performers" => "__adult_hub_performer",
-            "Studios" => "__adult_hub_studio",
-            _ => "__adult_hub_genre",
-        };
-        for item in &mut page.items {
-            if !item.genres.iter().any(|g| g == kind_marker) {
-                item.genres.push(kind_marker.into());
-            }
-        }
-    } else {
-        page.items.retain(|item| {
-            item.genres.iter().any(|tag| {
-                tag == "__adult_hub_performer"
-                    || tag == "__adult_hub_studio"
-                    || tag == "__adult_hub_genre"
-                    || tag == "__adult_hub_channel_search"
-            }) || filters.accepts(item)
-        });
-    }
-
-    let next_start = start_index + server_count;
-    let has_more = next_start < server_total_count;
-    Ok(CatalogPage {
-        items: page.items,
-        next_start,
-        total_count,
-        has_more,
-        supplemental_total,
-    })
-}
-
-// Search runs in two stages: the movie page renders as soon as the fast
-// Jellyfin query lands, and the slower performer/studio/tag/channel hits are
-// appended afterwards. The field list omits server-side expensive extras
-// (ChildCount, Path, IsPlaceHolder) that catalog cards never read.
-const SEARCH_MOVIE_FIELDS: &str =
-    "ProviderIds,Overview,Genres,Studios,People,MediaSources,CommunityRating,Tags";
-const SEARCH_SUPPLEMENT_FIELDS: &str = "ProviderIds,Overview,ChildCount";
-const CHANNEL_SEARCH_TIMEOUT: Duration = Duration::from_secs(8);
-
-fn search_movie_query<'a>(
-    query: &'a str,
-    start_index: usize,
-    filters: &'a CatalogFilters,
-    parent_id: Option<&'a str>,
-) -> GetItemsQuery<'a> {
-    GetItemsQuery {
-        parent_id,
-        start_index,
-        limit: CATALOG_PAGE_SIZE,
-        sort_by: filters.sort_by(),
-        sort_descending: filters.descending,
-        is_unplayed: filters.unwatched,
-        is_favorite: filters.favorites_only.then_some(true),
-        genre: (!filters.genre.is_empty()).then_some(filters.genre.as_str()),
-        studio: (!filters.studio.is_empty()).then_some(filters.studio.as_str()),
-        person: (!filters.performer.is_empty()).then_some(filters.performer.as_str()),
-        search_term: Some(query),
-        fields: Some(SEARCH_MOVIE_FIELDS),
-        ..Default::default()
-    }
-}
-
-fn search_supplement_query<'a>(
-    query: &'a str,
-    include_item_types: &'a str,
-    person_types: Option<&'a str>,
-) -> GetItemsQuery<'a> {
-    GetItemsQuery {
-        parent_id: None,
-        start_index: 0,
-        limit: 30,
-        sort_by: "SortName",
-        search_term: Some(query),
-        include_item_types: Some(include_item_types),
-        person_types,
-        fields: Some(SEARCH_SUPPLEMENT_FIELDS),
-        ..Default::default()
-    }
+) -> std::result::Result<CatalogPage, CatalogError> {
+    get_adult_hub_catalog_page(session, local_store, category, query, start_index, filters)
 }
 
 fn resolver_base_url_for(local_store: &LocalStore, session: &Session) -> String {
@@ -1777,78 +1153,73 @@ impl SearchSupplements {
     }
 }
 
-fn fetch_search_supplements(
-    jellyfin: &JellyfinClient,
-    resolver: &ResolverClient,
-    session: &Session,
-    query: &str,
-    resolver_base_url: &str,
-) -> SearchSupplements {
-    let people_query = search_supplement_query(query, "Person", Some("Actor"));
-    let studio_query = search_supplement_query(query, "Studio", None);
-    let tag_query = search_supplement_query(query, "Genre", None);
+fn fetch_search_supplements(client: &AdultHubClient, query: &str) -> SearchSupplements {
+    let taxonomy_query = CatalogTaxonomyQuery {
+        offset: Some(0),
+        limit: Some(30),
+        q: Some(query),
+    };
     std::thread::scope(|scope| {
         let people_task = scope.spawn(|| {
-            jellyfin
-                .get_items(
-                    &session.server_url,
-                    &session.user_id,
-                    &session.access_token,
-                    &people_query,
-                )
+            client
+                .get_performers(&adult_hub_client::CatalogPerformersQuery {
+                    offset: Some(0),
+                    limit: Some(30),
+                    q: Some(query),
+                    letter: None,
+                    photo_only: None,
+                    sort: Some("name"),
+                    direction: None,
+                })
+                .map(|response| TvItemsPage {
+                    items: response.items.into_iter().map(TvItem::from).collect(),
+                    total_record_count: response.total_count as usize,
+                    start_index: 0,
+                })
                 .map_err(|_| {
                     crate::diagnostics::GLOBAL_LOG.w(
                         "Search",
-                        "Jellyfin performer search failed; preserving results from other sources",
+                        "Adult Hub performer search failed; preserving results from other sources",
                     );
                 })
                 .ok()
         });
         let studio_task = scope.spawn(|| {
-            jellyfin
-                .get_items(
-                    &session.server_url,
-                    &session.user_id,
-                    &session.access_token,
-                    &studio_query,
-                )
-                .map(|mut page| {
-                    page.items = crate::catalog::aggregate_studio_items(page.items);
-                    page.total_record_count = page.items.len();
-                    page
+            client
+                .get_studios(&taxonomy_query)
+                .map(|response| TvItemsPage {
+                    items: response
+                        .items
+                        .into_iter()
+                        .map(|item| item.to_studio_tv_item())
+                        .collect(),
+                    total_record_count: response.total_count as usize,
+                    start_index: 0,
                 })
                 .map_err(|_| {
                     crate::diagnostics::GLOBAL_LOG.w(
                         "Search",
-                        "Jellyfin studio search failed; preserving results from other sources",
+                        "Adult Hub studio search failed; preserving results from other sources",
                     );
                 })
                 .ok()
         });
         let tag_task = scope.spawn(|| {
-            jellyfin
-                .get_items(
-                    &session.server_url,
-                    &session.user_id,
-                    &session.access_token,
-                    &tag_query,
-                )
-                .map_err(|_| {
-                    crate::diagnostics::GLOBAL_LOG.w(
-                        "Search",
-                        "Jellyfin tag search failed; preserving results from other sources",
-                    );
+            client
+                .get_categories(&taxonomy_query)
+                .map(|response| TvItemsPage {
+                    items: response
+                        .items
+                        .into_iter()
+                        .map(|item| item.to_category_tv_item())
+                        .collect(),
+                    total_record_count: response.total_count as usize,
+                    start_index: 0,
                 })
-                .ok()
-        });
-        let channel_task = scope.spawn(|| {
-            resolver
-                .search_with_timeout(resolver_base_url, query, "telegram", CHANNEL_SEARCH_TIMEOUT)
-                .map(|videos| videos.into_iter().map(TvItem::from).collect::<Vec<_>>())
                 .map_err(|_| {
                     crate::diagnostics::GLOBAL_LOG.w(
                         "Search",
-                        "Resolver channel search failed; preserving results from other sources",
+                        "Adult Hub category search failed; preserving results from other sources",
                     );
                 })
                 .ok()
@@ -1857,7 +1228,7 @@ fn fetch_search_supplements(
             people: people_task.join().ok().flatten(),
             studios: studio_task.join().ok().flatten(),
             tags: tag_task.join().ok().flatten(),
-            channels: channel_task.join().ok().flatten(),
+            channels: None,
         }
     })
 }
@@ -1926,34 +1297,46 @@ fn merge_search_supplements(
     added
 }
 
-/// Stage A of catalog search: the movies-only page, restricted to the selected
-/// library and without the supplemental fan-out.
+/// Stage A of catalog search: the videos-only page without the supplemental
+/// fan-out.
 fn get_search_movies_page_at(
-    jellyfin: &JellyfinClient,
-    session: &Session,
-    local_store: &LocalStore,
+    client: &AdultHubClient,
     query: &str,
     filters: &CatalogFilters,
     start_index: usize,
-) -> std::result::Result<CatalogPage, JellyfinError> {
-    let parent_id = local_store
-        .get_setting("selected_library_id")
-        .ok()
-        .flatten();
-    let page = jellyfin.get_items(
-        &session.server_url,
-        &session.user_id,
-        &session.access_token,
-        &search_movie_query(query, start_index, filters, parent_id.as_deref()),
-    )?;
-    // Jellyfin cannot filter items by provider id (`AnyProviderIdEquals` is
-    // an Emby parameter the server ignores), so a `telegram:<id>` reference
-    // is resolved by the resolver search above instead of a server lookup.
-    let server_count = page.items.len();
-    let total_count = page.total_record_count;
-    let items = page
+) -> std::result::Result<CatalogPage, CatalogError> {
+    let sort = match filters.sort {
+        1 => "title",
+        2 => "duration",
+        _ => "latest",
+    };
+    let direction = if filters.descending { "desc" } else { "asc" };
+    let response = client
+        .get_videos(&CatalogVideosQuery {
+            offset: Some(start_index as u64),
+            limit: Some(CATALOG_PAGE_SIZE as u64),
+            sort: Some(sort),
+            direction: Some(direction),
+            q: Some(query),
+            category: (!filters.genre.is_empty()).then_some(filters.genre.as_str()),
+            studio: (!filters.studio.is_empty()).then_some(filters.studio.as_str()),
+            performer: (!filters.performer.is_empty()).then_some(filters.performer.as_str()),
+            is_favorite: filters.favorites_only.then_some(true),
+            ..Default::default()
+        })
+        .map_err(|err| {
+            if err.is_unauthorized() {
+                CatalogError::Unauthorized
+            } else {
+                CatalogError::Api(err.to_string())
+            }
+        })?;
+    let total_count = response.total_count as usize;
+    let server_count = response.items.len();
+    let items = response
         .items
         .into_iter()
+        .map(TvItem::from)
         .filter(|item| filters.accepts(item))
         .collect::<Vec<_>>();
     let next_start = start_index + server_count;
@@ -1961,73 +1344,25 @@ fn get_search_movies_page_at(
         items,
         next_start,
         total_count,
-        has_more: next_start < total_count,
+        has_more: response.has_more,
         supplemental_total: 0,
     })
 }
 
-fn get_search_movies_page_with_empty_fetch(
-    jellyfin: &JellyfinClient,
-    session: &Session,
-    local_store: &LocalStore,
-    query: &str,
-    filters: &CatalogFilters,
-) -> std::result::Result<CatalogPage, JellyfinError> {
-    let mut page = get_search_movies_page_at(jellyfin, session, local_store, query, filters, 0)?;
-    for _ in 0..3 {
-        if !filter_catalog_items(page.items.clone(), local_store).is_empty() || !page.has_more {
-            break;
-        }
-        let previous_start = page.next_start;
-        let next_page = get_search_movies_page_at(
-            jellyfin,
-            session,
-            local_store,
-            query,
-            filters,
-            previous_start,
-        )?;
-        if next_page.next_start <= previous_start {
-            page.has_more = false;
-            break;
-        }
-        let mut seen = page
-            .items
-            .iter()
-            .map(|item| item.id.clone())
-            .collect::<std::collections::HashSet<_>>();
-        page.items.extend(
-            next_page
-                .items
-                .into_iter()
-                .filter(|item| seen.insert(item.id.clone())),
-        );
-        page.next_start = next_page.next_start;
-        page.has_more = next_page.has_more;
-    }
-    Ok(page)
-}
-
 fn get_catalog_page_with_empty_page_fetch(
-    jellyfin: &JellyfinClient,
-    resolver: &ResolverClient,
     session: &Session,
     local_store: &LocalStore,
     category: &str,
     query: &str,
-    drilldown: bool,
     start_index: usize,
     filters: CatalogFilters,
     performer_photo_only: bool,
-) -> std::result::Result<CatalogPage, JellyfinError> {
+) -> std::result::Result<CatalogPage, CatalogError> {
     let mut page = get_catalog_page(
-        jellyfin,
-        resolver,
         session,
         local_store,
         category,
         query,
-        drilldown,
         start_index,
         filters.clone(),
     )?;
@@ -2051,13 +1386,10 @@ fn get_catalog_page_with_empty_page_fetch(
 
         let previous_start = page.next_start;
         let next_page = get_catalog_page(
-            jellyfin,
-            resolver,
             session,
             local_store,
             category,
             query,
-            drilldown,
             previous_start,
             filters.clone(),
         )?;
@@ -2248,14 +1580,12 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
     let player = ctx.player.clone();
     let local_store = ctx.local_store.clone();
     let credential_store = ctx.credential_store.clone();
-    let jellyfin = ctx.jellyfin.clone();
     let resolver = ctx.resolver.clone();
     let reporter = ctx.reporter.clone();
     let session_ctrl = ctx.session_ctrl.clone();
     let current_item = ctx.current_playing_item.clone();
     let cached_catalog = ctx.cached_catalog.clone();
     let phash_coord = ctx.phash_coord.clone();
-    let qc_generation = Arc::new(AtomicU64::new(0));
     refresh_recent_searches_for_context(ui, &local_store);
 
     // 1. Screen switching
@@ -2266,7 +1596,6 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
         let reporter = reporter.clone();
         let session_ctrl = session_ctrl.clone();
         let current_item = current_item.clone();
-        let qc_generation = qc_generation.clone();
         let ctx_switch = ctx.clone();
         ui.on_switch_screen(move |screen| {
             let Some(ui) = weak.upgrade() else { return };
@@ -2279,16 +1608,6 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             }
             if matches!(current_screen.as_str(), "home" | "browse" | "channels") {
                 ui.set_last_content_screen(current_screen);
-            }
-            if ui.get_active_screen() == "settings"
-                && screen != "settings"
-                && ui.get_quick_connect_active()
-            {
-                qc_generation.fetch_add(1, Ordering::SeqCst);
-                ui.set_quick_connect_active(false);
-                ui.set_quick_connect_expired(false);
-                ui.set_quick_connect_authenticating(false);
-                ui.set_quick_connect_code("".into());
             }
             if ui.get_active_screen() == "player" && screen != "player" {
                 crate::playback::stop_active_playback_for_navigation(
@@ -2336,7 +1655,6 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 }
             } else if is_settings {
                 ui.invoke_refresh_home_categories();
-                ui.invoke_refresh_library_list();
             }
         });
     }
@@ -2377,12 +1695,10 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
     // 2. Perform Login
     {
         let weak = ui.as_weak();
-        let jellyfin = jellyfin.clone();
         let local_store = local_store.clone();
         let credential_store = credential_store.clone();
         let reporter = reporter.clone();
         let phash_coord = phash_coord.clone();
-        let qc_generation = qc_generation.clone();
         ui.on_perform_login(move |server_url, username, password| {
             let Some(ui) = weak.upgrade() else { return };
             let server_url = server_url.trim().to_string();
@@ -2404,127 +1720,37 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     ) {
                         return;
                     }
-                    if ui.get_quick_connect_active() || ui.get_quick_connect_expired() {
-                        qc_generation.fetch_add(1, Ordering::SeqCst);
-                        ui.set_quick_connect_active(false);
-                        ui.set_quick_connect_expired(false);
-                        ui.set_quick_connect_authenticating(false);
-                        ui.set_quick_connect_code("".into());
-                    }
                     let normalized = service_url.normalized;
                     let weak = weak.clone();
-                    let jellyfin = jellyfin.clone();
-                    let local_store = local_store.clone();
                     let credential_store = credential_store.clone();
                     let reporter = reporter.clone();
                     let phash_coord = phash_coord.clone();
                     ui.set_status("Connecting to server...".into());
                     ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
-
-                    let is_adult_hub_api = match local_store.is_adult_hub_api_enabled() {
-                        Ok(enabled) => enabled,
-                        Err(e) => {
-                            let msg = format!("Failed to read server API mode setting: {e}");
-                            show_error(&ui, &msg);
-                            ui.set_login_modal_message(msg.clone().into());
-                            ui.set_toast_message(msg.into());
-                            ui.set_toast_type("error".into());
-                            ui.set_toast_action_text("".into());
-                            ui.set_toast_visible(true);
-                            return;
-                        }
-                    };
                     std::thread::spawn(move || {
-                        if is_adult_hub_api {
-                            match adult_hub_client::AdultHubClient::new(&normalized)
-                                .and_then(|client| client.login(&username, &password))
-                            {
-                                Ok(auth) => {
-                                    let session = Session {
-                                        server_url: normalized.clone(),
-                                        user_id: auth.user.id.clone(),
-                                        username: auth.user.username.clone(),
-                                        access_token: auth.access_token.clone(),
-                                        server_name: "Adult Hub".into(),
-                                        refresh_token: Some(auth.refresh_token.clone()),
-                                    };
-                                    let session_save = credential_store.save(session.clone());
-                                    reporter.set_auth(
-                                        Some(session.server_url.clone()),
-                                        Some(session.access_token.clone()),
-                                    );
-                                    crate::thumbnails::set_jellyfin_base_url("");
-                                    crate::thumbnails::set_resolver_base_url(&session.server_url);
-                                    crate::thumbnails::set_resolver_auth_token(Some(&session.access_token));
-                                    phash_coord.update_auth(&session.server_url, Some(&session.access_token));
-                                    slint::invoke_from_event_loop(move || {
-                                        let Some(ui) = weak.upgrade() else { return };
-                                        ui.set_is_logged_in(true);
-                                        ui.set_login_modal_visible(false);
-                                        ui.set_login_modal_message("".into());
-                                        ui.set_logged_in_user(session.username.into());
-                                        ui.set_server_url_input(session.server_url.into());
-                                        ui.invoke_filter_category("Latest".into());
-                                        ui.set_active_screen("home".into());
-                                        ui.invoke_refresh_home();
-                                        let warning = session_save.err().map(|_| {
-                                            "Could not save this session securely. You can use it until the app closes, then sign in again.".to_owned()
-                                        });
-                                        if let Some(message) = warning {
-                                            ui.set_status(message.clone().into());
-                                            ui.set_status_color(slint::Color::from_rgb_u8(255, 190, 90));
-                                            ui.set_toast_message(message.into());
-                                            ui.set_toast_type("warning".into());
-                                        } else {
-                                            ui.set_status("Logged in successfully".into());
-                                            ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
-                                            ui.set_toast_message("Connected to Adult Hub successfully!".into());
-                                            ui.set_toast_type("success".into());
-                                        }
-                                        ui.set_toast_action_text("".into());
-                                        ui.set_toast_visible(true);
-                                    })
-                                    .ok();
-                                }
-                                Err(error) => {
-                                    slint::invoke_from_event_loop(move || {
-                                        let Some(ui) = weak.upgrade() else { return };
-                                        show_error(&ui, format!("Login failed: {error}"));
-                                        ui.set_login_modal_message(
-                                            format!("Login failed: {error}").into(),
-                                        );
-                                        ui.set_toast_message(format!("Login failed: {error}").into());
-                                        ui.set_toast_type("error".into());
-                                        ui.set_toast_action_text("".into());
-                                        ui.set_toast_visible(true);
-                                    })
-                                    .ok();
-                                }
-                            }
-                            return;
-                        }
-
-                        let public_info = jellyfin.get_public_system_info(&normalized).ok();
-                        match jellyfin.authenticate_by_name(&normalized, &username, &password) {
+                        match AdultHubClient::new(&normalized)
+                            .and_then(|client| client.login(&username, &password))
+                        {
                             Ok(auth) => {
                                 let session = Session {
                                     server_url: normalized.clone(),
-                                    user_id: auth.user_id.clone(),
-                                    username: auth.username.clone(),
+                                    user_id: auth.user.id.clone(),
+                                    username: auth.user.username.clone(),
                                     access_token: auth.access_token.clone(),
-                                    server_name: public_info
-                                        .map(|p| p.name)
-                                        .unwrap_or_else(|| "Jellyfin".into()),
-                                    refresh_token: None,
+                                    server_name: "Adult Hub".into(),
+                                    refresh_token: Some(auth.refresh_token.clone()),
                                 };
                                 let session_save = credential_store.save(session.clone());
                                 reporter.set_auth(
                                     Some(session.server_url.clone()),
                                     Some(session.access_token.clone()),
                                 );
-                                let eff_res_url = resolver_base_url_for(&local_store, &session);
-                                crate::thumbnails::set_jellyfin_base_url(&session.server_url);
-                                phash_coord.update_auth(&eff_res_url, Some(&session.access_token));
+                                crate::thumbnails::set_resolver_base_url(&session.server_url);
+                                crate::thumbnails::set_resolver_auth_token(Some(&session.access_token));
+                                phash_coord.update_auth(
+                                    &session.server_url,
+                                    Some(&session.access_token),
+                                );
                                 slint::invoke_from_event_loop(move || {
                                     let Some(ui) = weak.upgrade() else { return };
                                     ui.set_is_logged_in(true);
@@ -2534,7 +1760,6 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                                     ui.set_server_url_input(session.server_url.into());
                                     ui.invoke_filter_category("Latest".into());
                                     ui.set_active_screen("home".into());
-                                    ui.invoke_refresh_library_list();
                                     ui.invoke_refresh_home();
                                     let warning = session_save.err().map(|_| {
                                         "Could not save this session securely. You can use it until the app closes, then sign in again.".to_owned()
@@ -2547,7 +1772,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                                     } else {
                                         ui.set_status("Logged in successfully".into());
                                         ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
-                                        ui.set_toast_message("Connected to Jellyfin successfully!".into());
+                                        ui.set_toast_message("Connected to Adult Hub successfully!".into());
                                         ui.set_toast_type("success".into());
                                     }
                                     ui.set_toast_action_text("".into());
@@ -2594,7 +1819,6 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             let _ = credential_store.clear();
             reporter.set_auth(None, None);
             crate::thumbnails::set_resolver_auth_token(None);
-            crate::thumbnails::set_jellyfin_base_url("");
             phash_coord.update_auth("", None);
             home_catalog
                 .lock()
@@ -2619,316 +1843,10 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
         });
     }
 
-    // 4. Quick Connect
-    {
-        let weak = ui.as_weak();
-        let jellyfin = jellyfin.clone();
-        let local_store = local_store.clone();
-        let credential_store = credential_store.clone();
-        let reporter = reporter.clone();
-        let qc_generation = qc_generation.clone();
-        let phash_coord = phash_coord.clone();
-        ui.on_start_quick_connect(move || {
-            let Some(ui) = weak.upgrade() else { return };
-            if ui.get_quick_connect_active() {
-                return;
-            }
-            let server_url = ui.get_server_url_input().trim().to_string();
-            if server_url.is_empty() {
-                show_error(&ui, "Server address cannot be empty");
-                return;
-            }
-            let normalized = match ServiceUrlPolicy::inspect(&server_url, false) {
-                ServiceUrlValidation::Valid(service_url) => {
-                    if !super::request_cleartext_consent(
-                        &ui,
-                        &local_store,
-                        &service_url.normalized,
-                        "quick-connect",
-                    ) {
-                        return;
-                    }
-                    service_url.normalized
-                }
-                ServiceUrlValidation::Invalid(err) => {
-                    show_error(&ui, err);
-                    return;
-                }
-            };
-
-            let generation = qc_generation.fetch_add(1, Ordering::SeqCst) + 1;
-            ui.set_quick_connect_active(true);
-            ui.set_quick_connect_expired(false);
-            ui.set_quick_connect_authenticating(false);
-            ui.set_quick_connect_code("".into());
-            let qc_generation = qc_generation.clone();
-            let weak = weak.clone();
-            let jellyfin = jellyfin.clone();
-            let local_store = local_store.clone();
-            let credential_store = credential_store.clone();
-            let reporter = reporter.clone();
-            let phash_coord = phash_coord.clone();
-
-            ui.set_status("Requesting Quick Connect code...".into());
-            ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
-
-            std::thread::spawn(move || {
-                let init = match jellyfin.quick_connect_initiate(&normalized) {
-                    Ok(init) => init,
-                    Err(err) => {
-                        let w = weak.clone();
-                        slint::invoke_from_event_loop(move || {
-                            if qc_generation.load(Ordering::SeqCst) == generation
-                                && let Some(ui) = w.upgrade()
-                            {
-                                ui.set_quick_connect_active(false);
-                                ui.set_quick_connect_authenticating(false);
-                                show_error(&ui, format!("Quick Connect failed: {err}"));
-                            }
-                        })
-                        .ok();
-                        return;
-                    }
-                };
-
-                let code = init.code.clone();
-                let secret = init.secret.clone();
-                let w = weak.clone();
-                let generation_counter = qc_generation.clone();
-                slint::invoke_from_event_loop(move || {
-                    if generation_counter.load(Ordering::SeqCst) == generation
-                        && let Some(ui) = w.upgrade()
-                    {
-                        ui.set_quick_connect_code(code.into());
-                        ui.set_status("Waiting for Quick Connect authorization…".into());
-                    }
-                })
-                .ok();
-
-                for _ in 0..60 {
-                    std::thread::sleep(Duration::from_secs(2));
-                    if qc_generation.load(Ordering::SeqCst) != generation {
-                        return;
-                    }
-                    if let Ok(status) = jellyfin.quick_connect_poll(&normalized, &secret) {
-                        if status.authenticated {
-                            if qc_generation.load(Ordering::SeqCst) != generation {
-                                return;
-                            }
-                            let w = weak.clone();
-                            let generation_counter = qc_generation.clone();
-                            slint::invoke_from_event_loop(move || {
-                                if generation_counter.load(Ordering::SeqCst) == generation
-                                    && let Some(ui) = w.upgrade()
-                                {
-                                    ui.set_quick_connect_authenticating(true);
-                                    ui.set_status("Quick Connect authorized. Signing in…".into());
-                                    ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
-                                }
-                            })
-                            .ok();
-                            match jellyfin.quick_connect_authenticate(&normalized, &secret) {
-                                Ok(auth) => {
-                                    if qc_generation.load(Ordering::SeqCst) != generation {
-                                        return;
-                                    }
-                                    let public_info =
-                                        jellyfin.get_public_system_info(&normalized).ok();
-                                    let session = Session {
-                                        server_url: normalized.clone(),
-                                        user_id: auth.user_id.clone(),
-                                        username: auth.username.clone(),
-                                        access_token: auth.access_token.clone(),
-                                        server_name: public_info
-                                            .map(|p| p.name)
-                                            .unwrap_or_else(|| "Jellyfin".into()),
-                                        refresh_token: None,
-                                    };
-                                    let _ = credential_store.save(session.clone());
-                                    reporter.set_auth(
-                                        Some(session.server_url.clone()),
-                                        Some(session.access_token.clone()),
-                                    );
-                                    let eff_res_url = resolver_base_url_for(&local_store, &session);
-                                    phash_coord
-                                        .update_auth(&eff_res_url, Some(&session.access_token));
-
-                                    let w = weak.clone();
-                                    let generation_counter = qc_generation.clone();
-                                    slint::invoke_from_event_loop(move || {
-                                        if generation_counter.load(Ordering::SeqCst) == generation
-                                            && let Some(ui) = w.upgrade()
-                                        {
-                                            ui.set_quick_connect_active(false);
-                                            ui.set_quick_connect_expired(false);
-                                            ui.set_quick_connect_authenticating(false);
-                                            ui.set_quick_connect_code("".into());
-                                            ui.set_is_logged_in(true);
-                                            ui.set_login_modal_visible(false);
-                                            ui.set_login_modal_message("".into());
-                                            ui.set_logged_in_user(session.username.into());
-                                            ui.invoke_filter_category("Latest".into());
-                                            ui.set_active_screen("home".into());
-                                            ui.invoke_refresh_library_list();
-                                            ui.invoke_refresh_home();
-                                            ui.set_status("Quick Connect authenticated!".into());
-                                            ui.set_status_color(slint::Color::from_rgb_u8(
-                                                140, 200, 160,
-                                            ));
-                                            ui.set_toast_message(
-                                                "Quick Connect authenticated!".into(),
-                                            );
-                                            ui.set_toast_type("success".into());
-                                            ui.set_toast_action_text("".into());
-                                            ui.set_toast_visible(true);
-                                        }
-                                    })
-                                    .ok();
-                                    return;
-                                }
-                                Err(e) => {
-                                    let w = weak.clone();
-                                    let generation_counter = qc_generation.clone();
-                                    slint::invoke_from_event_loop(move || {
-                                        if generation_counter.load(Ordering::SeqCst) == generation
-                                            && let Some(ui) = w.upgrade()
-                                        {
-                                            ui.set_quick_connect_active(false);
-                                            ui.set_quick_connect_authenticating(false);
-                                            ui.set_quick_connect_code("".into());
-                                            show_error(
-                                                &ui,
-                                                format!("Quick Connect auth error: {e}"),
-                                            );
-                                            ui.set_toast_message(
-                                                format!("Quick Connect error: {e}").into(),
-                                            );
-                                            ui.set_toast_type("error".into());
-                                            ui.set_toast_action_text("".into());
-                                            ui.set_toast_visible(true);
-                                        }
-                                    })
-                                    .ok();
-                                    return;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                let w = weak.clone();
-                let generation_counter = qc_generation.clone();
-                slint::invoke_from_event_loop(move || {
-                    if generation_counter.load(Ordering::SeqCst) == generation
-                        && let Some(ui) = w.upgrade()
-                    {
-                        ui.set_quick_connect_active(false);
-                        ui.set_quick_connect_expired(true);
-                        ui.set_quick_connect_authenticating(false);
-                        ui.set_quick_connect_code("".into());
-                        show_error(&ui, "Quick Connect code expired");
-                    }
-                })
-                .ok();
-            });
-        });
-    }
-
-    {
-        let weak = ui.as_weak();
-        let qc_generation = qc_generation.clone();
-        ui.on_cancel_quick_connect(move || {
-            let Some(ui) = weak.upgrade() else { return };
-            qc_generation.fetch_add(1, Ordering::SeqCst);
-            ui.set_quick_connect_active(false);
-            ui.set_quick_connect_expired(false);
-            ui.set_quick_connect_authenticating(false);
-            ui.set_quick_connect_code("".into());
-            ui.set_status("Quick Connect cancelled".into());
-            ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
-        });
-    }
-
-    // 4b. Discovered Servers
-    {
-        let weak = ui.as_weak();
-        let jellyfin = jellyfin.clone();
-        let local_store = local_store.clone();
-        ui.on_select_discovered_server(move |server_url| {
-            let Some(ui) = weak.upgrade() else { return };
-            ui.set_server_url_input(server_url.clone());
-            let server_url = server_url.trim().to_string();
-            if !super::request_cleartext_consent(&ui, &local_store, &server_url, "discover-server")
-            {
-                return;
-            }
-            let weak = weak.clone();
-            let jellyfin = jellyfin.clone();
-            std::thread::spawn(move || {
-                if let Ok(info) = jellyfin.get_public_system_info(&server_url) {
-                    slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = weak.upgrade() {
-                            ui.set_status(
-                                format!("Selected server: {} ({})", info.name, info.url).into(),
-                            );
-                            ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
-                        }
-                    })
-                    .ok();
-                }
-            });
-        });
-    }
-
-    let is_scanning = Arc::new(AtomicBool::new(false));
-    {
-        let weak = ui.as_weak();
-        let is_scanning = is_scanning.clone();
-        ui.on_scan_servers(move || {
-            let Some(ui) = weak.upgrade() else { return };
-            if is_scanning.swap(true, Ordering::SeqCst) {
-                return;
-            }
-            ui.set_is_scanning_servers(true);
-            ui.set_status("Scanning local network for Jellyfin servers...".into());
-            ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
-
-            let weak = weak.clone();
-            let is_scanning = is_scanning.clone();
-            std::thread::spawn(move || {
-                let servers = discover_servers(Duration::from_millis(2000));
-                is_scanning.store(false, Ordering::SeqCst);
-                slint::invoke_from_event_loop(move || {
-                    let Some(ui) = weak.upgrade() else { return };
-                    ui.set_is_scanning_servers(false);
-                    let count = servers.len();
-                    let items = servers
-                        .iter()
-                        .map(|s| DiscoveredServerItem {
-                            id: s.id.clone().into(),
-                            name: s.name.clone().into(),
-                            url: s.url.clone().into(),
-                        })
-                        .collect::<Vec<_>>();
-                    set_discovered_servers(&ui, items);
-                    if count > 0 {
-                        ui.set_status(format!("Discovered {count} server(s) on network").into());
-                        ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
-                    } else {
-                        ui.set_status("No local Jellyfin servers found on network".into());
-                        ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
-                    }
-                })
-                .ok();
-            });
-        });
-    }
-
     // 5. Search Catalog
     let catalog_generation = Arc::new(AtomicU64::new(0));
     let search_debounce_generation = Arc::new(AtomicU64::new(0));
     let performer_search_generation = Arc::new(AtomicU64::new(0));
-    let home_generation = Arc::new(AtomicU64::new(0));
     let catalog_paging = Arc::new(Mutex::new(CatalogPageState::default()));
     let catalog_views = Rc::new(RefCell::new(std::collections::HashMap::<
         String,
@@ -2941,11 +1859,9 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
     let catalog_filter_options = Arc::new(Mutex::new(Vec::<CatalogFilterChoice>::new()));
     {
         let weak = ui.as_weak();
-        let jellyfin = jellyfin.clone();
         let credential_store = credential_store.clone();
         let local_store = local_store.clone();
         let home_catalog = ctx.home_catalog.clone();
-        let home_generation = home_generation.clone();
         let weak_for_toggle = weak.clone();
         ui.on_toggle_home_random_filter(move || {
             let Some(ui) = weak_for_toggle.upgrade() else {
@@ -2955,7 +1871,6 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             ui.invoke_refresh_home();
         });
         let weak_for_categories = weak.clone();
-        let jellyfin_for_categories = jellyfin.clone();
         let credential_store_for_categories = credential_store.clone();
         let local_store_for_categories = local_store.clone();
         ui.on_refresh_home_categories(move || {
@@ -2967,25 +1882,24 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 return;
             };
             let weak = weak_for_categories.clone();
-            let jellyfin = jellyfin_for_categories.clone();
             let local_store = local_store_for_categories.clone();
             std::thread::spawn(move || {
-                let categories_result = jellyfin.get_items(
-                    &session.server_url,
-                    &session.user_id,
-                    &session.access_token,
-                    &GetItemsQuery {
-                        parent_id: None,
-                        limit: 200,
-                        sort_by: "SortName",
-                        sort_descending: false,
-                        include_item_types: Some("Genre"),
-                        ..Default::default()
-                    },
-                );
-                let categories = categories_result
-                    .as_ref()
-                    .map(|page| page.items.clone())
+                let categories = AdultHubClient::new(&session.server_url)
+                    .map(|client| client.with_token(&session.access_token))
+                    .and_then(|client| {
+                        client.get_categories(&CatalogTaxonomyQuery {
+                            offset: Some(0),
+                            limit: Some(200),
+                            q: None,
+                        })
+                    })
+                    .map(|response| {
+                        response
+                            .items
+                            .into_iter()
+                            .map(|item| item.to_category_tv_item())
+                            .collect::<Vec<_>>()
+                    })
                     .unwrap_or_default();
                 let selected = resolve_home_category_ids(&categories, &local_store);
                 slint::invoke_from_event_loop(move || {
@@ -3026,7 +1940,6 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             let Some(ui) = weak.upgrade() else { return };
             catalog_views_for_home.borrow_mut().clear();
             let _ = local_store.remove_setting("home_shelves_cache_v1");
-            let request_id = home_generation.fetch_add(1, Ordering::SeqCst) + 1;
             ui.set_home_is_loading(true);
             ui.set_home_error_message(String::new().into());
             ui.set_home_resume_error(String::new().into());
@@ -3034,12 +1947,9 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             ui.set_home_random_error(String::new().into());
             ui.set_home_performer_error(String::new().into());
             let weak = weak.clone();
-            let jellyfin = jellyfin.clone();
             let credential_store = credential_store.clone();
             let local_store = local_store.clone();
             let home_catalog = home_catalog.clone();
-            let home_generation = home_generation.clone();
-            let random_unwatched = ui.get_home_random_unwatched_only();
 
             std::thread::spawn(move || {
                 let Some(session) = credential_store.get().ok().flatten() else {
@@ -3069,14 +1979,33 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     return;
                 };
 
-                let is_adult_hub = match local_store.is_adult_hub_api_enabled() {
-                    Ok(enabled) => enabled,
-                    Err(e) => {
-                        let msg = format!("Failed to read server API mode setting: {e}");
+                let client_res = adult_hub_client::AdultHubClient::new(&session.server_url)
+                    .map(|c| c.with_token(&session.access_token));
+
+                let client = match client_res {
+                    Ok(c) => c,
+                    Err(err) => {
+                        let is_unauth = err.is_unauthorized();
+                        let msg = format!("Failed to initialize Adult Hub client: {err}");
                         slint::invoke_from_event_loop(move || {
                             if let Some(ui) = weak.upgrade() {
                                 ui.set_home_is_loading(false);
-                                ui.set_home_error_message(msg.into());
+                                ui.set_home_error_message(msg.clone().into());
+                                ui.set_home_latest_error(msg.into());
+                                if is_unauth {
+                                    ui.set_is_logged_in(false);
+                                    ui.set_login_modal_visible(true);
+                                    ui.set_login_modal_message(
+                                        "Session expired (401 Unauthorized). Please sign in again."
+                                            .into(),
+                                    );
+                                    ui.set_toast_message(
+                                        "Session expired. Please reconnect.".into(),
+                                    );
+                                    ui.set_toast_type("warning".into());
+                                    ui.set_toast_action_text("Sign In".into());
+                                    ui.set_toast_visible(true);
+                                }
                             }
                         })
                         .ok();
@@ -3084,265 +2013,45 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     }
                 };
 
-                if is_adult_hub {
-                    let client_res = adult_hub_client::AdultHubClient::new(&session.server_url)
-                        .map(|c| c.with_token(&session.access_token));
+                let latest_res = client.get_catalog_videos(&adult_hub_client::CatalogVideosQuery {
+                    offset: Some(0),
+                    limit: Some(16),
+                    sort: Some("latest"),
+                    ..Default::default()
+                });
 
-                    let client = match client_res {
-                        Ok(c) => c,
-                        Err(err) => {
-                            let is_unauth = err.is_unauthorized();
-                            let msg = format!("Failed to initialize Adult Hub client: {err}");
-                            slint::invoke_from_event_loop(move || {
-                                if let Some(ui) = weak.upgrade() {
-                                    ui.set_home_is_loading(false);
-                                    ui.set_home_error_message(msg.clone().into());
-                                    ui.set_home_latest_error(msg.into());
-                                    if is_unauth {
-                                        ui.set_is_logged_in(false);
-                                        ui.set_login_modal_visible(true);
-                                        ui.set_login_modal_message(
-                                            "Session expired (401 Unauthorized). Please sign in again."
-                                                .into(),
-                                        );
-                                        ui.set_toast_message("Session expired. Please reconnect.".into());
-                                        ui.set_toast_type("warning".into());
-                                        ui.set_toast_action_text("Sign In".into());
-                                        ui.set_toast_visible(true);
-                                    }
+                let latest_items = match latest_res {
+                    Ok(resp) => resp.items.into_iter().map(TvItem::from).collect::<Vec<_>>(),
+                    Err(err) => {
+                        let is_unauth = err.is_unauthorized();
+                        let msg = format!("Failed to load latest videos: {err}");
+                        slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = weak.upgrade() {
+                                ui.set_home_is_loading(false);
+                                ui.set_home_error_message(msg.clone().into());
+                                ui.set_home_latest_error(msg.into());
+                                if is_unauth {
+                                    ui.set_is_logged_in(false);
+                                    ui.set_login_modal_visible(true);
+                                    ui.set_login_modal_message(
+                                        "Session expired (401 Unauthorized). Please sign in again."
+                                            .into(),
+                                    );
+                                    ui.set_toast_message(
+                                        "Session expired. Please reconnect.".into(),
+                                    );
+                                    ui.set_toast_type("warning".into());
+                                    ui.set_toast_action_text("Sign In".into());
+                                    ui.set_toast_visible(true);
                                 }
-                            })
-                            .ok();
-                            return;
-                        }
-                    };
-
-                    let latest_res = client.get_catalog_videos(&adult_hub_client::CatalogVideosQuery {
-                        offset: Some(0),
-                        limit: Some(16),
-                        sort: Some("latest"),
-                        ..Default::default()
-                    });
-
-                    let latest_items = match latest_res {
-                        Ok(resp) => resp.items.into_iter().map(TvItem::from).collect::<Vec<_>>(),
-                        Err(err) => {
-                            let is_unauth = err.is_unauthorized();
-                            let msg = format!("Failed to load latest videos: {err}");
-                            slint::invoke_from_event_loop(move || {
-                                if let Some(ui) = weak.upgrade() {
-                                    ui.set_home_is_loading(false);
-                                    ui.set_home_error_message(msg.clone().into());
-                                    ui.set_home_latest_error(msg.into());
-                                    if is_unauth {
-                                        ui.set_is_logged_in(false);
-                                        ui.set_login_modal_visible(true);
-                                        ui.set_login_modal_message(
-                                            "Session expired (401 Unauthorized). Please sign in again."
-                                                .into(),
-                                        );
-                                        ui.set_toast_message("Session expired. Please reconnect.".into());
-                                        ui.set_toast_type("warning".into());
-                                        ui.set_toast_action_text("Sign In".into());
-                                        ui.set_toast_visible(true);
-                                    }
-                                }
-                            })
-                            .ok();
-                            return;
-                        }
-                    };
-
-                    let mut resume = Vec::new();
-                    if let Ok(records) = local_store.get_all_telegram_progress(50) {
-                        for record in records.into_iter().filter(|record| {
-                            !record.is_played
-                                && record.position_ms > 15_000
-                                && (record.duration_ms == 0
-                                    || record.position_ms < record.duration_ms * 9 / 10)
-                        }) {
-                            let provider_id = record.provider_video_id.clone();
-                            resume.push(TvItem {
-                                id: format!("telegram:{provider_id}"),
-                                title: if record.title.is_empty() {
-                                    format!("Telegram {provider_id}")
-                                } else {
-                                    record.title
-                                },
-                                runtime_ticks: Some((record.duration_ms.saturating_mul(10_000)) as i64),
-                                playback_position_ticks: (record.position_ms.saturating_mul(10_000))
-                                    as i64,
-                                played_percentage: (record.duration_ms > 0).then_some(
-                                    record.position_ms as f64 / record.duration_ms as f64 * 100.0,
-                                ),
-                                primary_image_tag: record.thumbnail_url,
-                                source_provider: Some("telegram".into()),
-                                ..Default::default()
-                            });
-                        }
+                            }
+                        })
+                        .ok();
+                        return;
                     }
+                };
 
-                    let history = local_store
-                        .get_watch_history(16)
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter_map(|json| serde_json::from_str::<TvItem>(&json).ok())
-                        .collect::<Vec<_>>();
-
-                    let mut all_home_items = Vec::new();
-                    all_home_items.extend(resume.clone());
-                    all_home_items.extend(history.clone());
-                    all_home_items.extend(latest_items.clone());
-
-                    *home_catalog
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = all_home_items;
-
-                    slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = weak.upgrade() {
-                            let resume_cards = resume.iter().map(tv_item_to_card).collect::<Vec<_>>();
-                            let history_cards = history.iter().map(tv_item_to_card).collect::<Vec<_>>();
-                            let latest_cards = latest_items.iter().map(tv_item_to_card).collect::<Vec<_>>();
-                            let empty_cards: Vec<VideoCardData> = Vec::new();
-
-                            ui.set_home_is_loading(false);
-                            ui.set_home_error_message(String::new().into());
-                            ui.set_home_resume_error(String::new().into());
-                            ui.set_home_latest_error(String::new().into());
-                            ui.set_home_random_error(String::new().into());
-                            ui.set_home_performer_error(String::new().into());
-                            set_home_shelves(
-                                &ui,
-                                &[
-                                    resume_cards,
-                                    history_cards,
-                                    latest_cards,
-                                    empty_cards.clone(),
-                                    empty_cards,
-                                ],
-                            );
-                            set_home_category_options(&ui, &[], &[]);
-                            ui.set_home_category_shelves(
-                                Rc::new(slint::VecModel::from(Vec::new())).into(),
-                            );
-                        }
-                    })
-                    .ok();
-                    return;
-                }
-
-                let parent_id = local_store
-                    .get_setting("selected_library_id")
-                    .ok()
-                    .flatten();
-                let token = session.access_token.clone();
-                let categories_result = jellyfin.get_items(
-                    &session.server_url,
-                    &session.user_id,
-                    &token,
-                    &GetItemsQuery {
-                        parent_id: None,
-                        limit: 200,
-                        sort_by: "SortName",
-                        sort_descending: false,
-                        include_item_types: Some("Genre"),
-                        ..Default::default()
-                    },
-                );
-                let categories = categories_result
-                    .as_ref()
-                    .map(|page| page.items.clone())
-                    .unwrap_or_default();
-                let categories_error = categories_result
-                    .as_ref()
-                    .err()
-                    .map(|error| format!("Couldn't load library categories: {error}"))
-                    .unwrap_or_default();
-                let selected_categories = resolve_home_category_ids(&categories, &local_store);
-                let mut history = local_store
-                    .get_watch_history(16)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter_map(|json| serde_json::from_str::<TvItem>(&json).ok())
-                    .collect::<Vec<_>>();
-                let (resume_result, latest_result, random_result, performer_result) =
-                    std::thread::scope(|scope| {
-                        let server_url = session.server_url.as_str();
-                        let user_id = session.user_id.as_str();
-                        let token_ref = token.as_str();
-                        let parent_id = parent_id.as_deref();
-                        let jellyfin_ref = jellyfin.as_ref();
-                        let resume = scope.spawn(move || {
-                            jellyfin_ref.get_resume_items(server_url, user_id, token_ref, 16)
-                        });
-                        let latest = scope.spawn(move || {
-                            jellyfin_ref
-                                .get_latest_items(server_url, user_id, token_ref, parent_id, 16)
-                        });
-                        let random = scope.spawn(move || {
-                            jellyfin_ref
-                                .get_items(
-                                    server_url,
-                                    user_id,
-                                    token_ref,
-                                    &GetItemsQuery {
-                                        parent_id,
-                                        limit: 16,
-                                        sort_by: "Random",
-                                        is_unplayed: random_unwatched,
-                                        ..Default::default()
-                                    },
-                                )
-                                .map(|page| page.items)
-                        });
-                        let performers = scope.spawn(move || {
-                            jellyfin_ref
-                                .get_items(
-                                    server_url,
-                                    user_id,
-                                    token_ref,
-                                    &GetItemsQuery {
-                                        parent_id,
-                                        limit: 100,
-                                        sort_by: "Random",
-                                        include_item_types: Some("Person"),
-                                        person_types: Some("Actor"),
-                                        ..Default::default()
-                                    },
-                                )
-                                .map(|page| page.items)
-                        });
-                        (
-                            resume.join().unwrap_or_else(|_| Ok(Vec::new())),
-                            latest.join().unwrap_or_else(|_| Ok(Vec::new())),
-                            random.join().unwrap_or_else(|_| Ok(Vec::new())),
-                            performers.join().unwrap_or_else(|_| Ok(Vec::new())),
-                        )
-                    });
-                let resume_error = resume_result
-                    .as_ref()
-                    .err()
-                    .map(|error| format!("Couldn't load Continue Watching: {error}"))
-                    .unwrap_or_default();
-                let latest_error = latest_result
-                    .as_ref()
-                    .err()
-                    .map(|error| format!("Couldn't load Recently Added: {error}"))
-                    .unwrap_or_default();
-                let random_error = random_result
-                    .as_ref()
-                    .err()
-                    .map(|error| format!("Couldn't load Random Picks: {error}"))
-                    .unwrap_or_default();
-                let performer_error = performer_result
-                    .as_ref()
-                    .err()
-                    .map(|error| format!("Couldn't load Performers: {error}"))
-                    .unwrap_or_default();
-                let mut resume = resume_result.unwrap_or_default();
-                let mut latest = latest_result.unwrap_or_default();
-                let mut random = random_result.unwrap_or_default();
-                let mut performers = performer_result.unwrap_or_default();
+                let mut resume = Vec::new();
                 if let Ok(records) = local_store.get_all_telegram_progress(50) {
                     for record in records.into_iter().filter(|record| {
                         !record.is_played
@@ -3365,226 +2074,55 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                                 record.position_ms as f64 / record.duration_ms as f64 * 100.0,
                             ),
                             primary_image_tag: record.thumbnail_url,
-                            provider_video_id: Some(provider_id),
+                            source_provider: Some("telegram".into()),
                             ..Default::default()
                         });
                     }
                 }
-                resume.retain(|item| {
-                    item.progress_fraction() > 0.0 && item.progress_fraction() < 0.90
-                });
-                performers.retain(|person| {
-                    person
-                        .primary_image_tag
-                        .as_ref()
-                        .is_some_and(|tag| !tag.is_empty())
-                });
-                performers.truncate(16);
-                for performer in &mut performers {
-                    performer.genres.push("__adult_hub_performer".into());
-                }
-                let mut category_shelves = Vec::new();
-                let mut category_items = Vec::new();
-                for category in categories
-                    .iter()
-                    .filter(|category| selected_categories.iter().any(|id| id == &category.id))
-                {
-                    let category_result = jellyfin.get_items(
-                        &session.server_url,
-                        &session.user_id,
-                        &token,
-                        &GetItemsQuery {
-                            parent_id: parent_id.as_deref(),
-                            limit: 16,
-                            sort_by: "DateCreated",
-                            sort_descending: true,
-                            genre: Some(&category.title),
-                            ..Default::default()
-                        },
-                    );
-                    let category_error = category_result
-                        .as_ref()
-                        .err()
-                        .map(|error| format!("Couldn't load {}: {error}", category.title))
-                        .unwrap_or_default();
-                    let items = category_result
-                        .map(|page| filter_catalog_items(page.items, &local_store))
-                        .unwrap_or_default();
-                    category_items.extend(items.iter().cloned());
-                    category_shelves.push((
-                        category.title.clone(),
-                        items.into_iter().take(4).collect::<Vec<_>>(),
-                        category_error,
-                    ));
-                }
-                for item in resume
-                    .iter_mut()
-                    .chain(history.iter_mut())
-                    .chain(latest.iter_mut())
-                    .chain(random.iter_mut())
-                {
-                    if item.is_telegram() {
-                        if let Some(progress) = local_store
-                            .get_telegram_progress(
-                                item.provider_video_id.as_deref().unwrap_or(&item.id),
-                            )
-                            .ok()
-                            .flatten()
-                        {
-                            if progress.duration_ms > 0 {
-                                item.runtime_ticks =
-                                    Some((progress.duration_ms.saturating_mul(10_000)) as i64);
-                            }
-                            item.playback_position_ticks =
-                                (progress.position_ms.saturating_mul(10_000)) as i64;
-                            item.played_percentage = (progress.duration_ms > 0).then_some(
-                                progress.position_ms as f64 / progress.duration_ms as f64 * 100.0,
-                            );
-                            item.is_played = progress.is_played;
-                        }
-                    } else if let Ok(Some((pos_ms, dur_ms))) =
-                        local_store.get_progress("local", &item.id)
-                    {
-                        if dur_ms > 0 {
-                            item.runtime_ticks = Some((dur_ms.saturating_mul(10_000)) as i64);
-                        }
-                        item.playback_position_ticks = (pos_ms.saturating_mul(10_000)) as i64;
-                        item.played_percentage =
-                            (dur_ms > 0).then_some(pos_ms as f64 / dur_ms as f64 * 100.0);
-                        if dur_ms > 0 && pos_ms >= dur_ms * 9 / 10 {
-                            item.is_played = true;
-                        }
-                    }
-                }
-                // Truly completed videos should not be proposed in Continue Watching / Resume
-                resume.retain(|item| {
-                    let fraction = item.progress_fraction();
-                    (0.01..0.90).contains(&fraction) && !item.is_played
-                });
-                resume = filter_catalog_items(resume, &local_store);
-                history = filter_catalog_items(history, &local_store);
-                latest = filter_catalog_items(latest, &local_store);
-                random = filter_catalog_items(random, &local_store);
-                performers = filter_catalog_items(performers, &local_store);
 
-                let mut all_items = Vec::new();
-                for shelf in [&resume, &history, &latest, &random, &performers] {
-                    for item in shelf {
-                        if !all_items
-                            .iter()
-                            .any(|existing: &TvItem| existing.id == item.id)
-                        {
-                            all_items.push(item.clone());
-                        }
-                    }
-                }
-                for item in category_items {
-                    if !all_items.iter().any(|existing| existing.id == item.id) {
-                        all_items.push(item);
-                    }
-                }
-                let shelves = [
-                    resume.into_iter().take(4).collect::<Vec<_>>(),
-                    history.into_iter().take(4).collect::<Vec<_>>(),
-                    latest.into_iter().take(4).collect::<Vec<_>>(),
-                    random.into_iter().take(4).collect::<Vec<_>>(),
-                    performers.into_iter().take(12).collect::<Vec<_>>(),
-                ];
-                let overall_error = if !categories_error.is_empty() {
-                    categories_error.clone()
-                } else if !resume_error.is_empty() {
-                    resume_error.clone()
-                } else if !latest_error.is_empty() {
-                    latest_error.clone()
-                } else if !random_error.is_empty() {
-                    random_error.clone()
-                } else if !performer_error.is_empty() {
-                    performer_error.clone()
-                } else {
-                    String::new()
-                };
+                let history = local_store
+                    .get_watch_history(16)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|json| serde_json::from_str::<TvItem>(&json).ok())
+                    .collect::<Vec<_>>();
 
-                let has_any_items = shelves.iter().any(|s| !s.is_empty())
-                    || category_shelves.iter().any(|(_, s, _)| !s.is_empty());
-
-                if overall_error.is_empty() && has_any_items {
-                    let home_cache = PersistedHomeCache {
-                        all_items: all_items.clone(),
-                        shelves: shelves.to_vec(),
-                        category_shelves: category_shelves.clone(),
-                    };
-                    if let Ok(json) = serde_json::to_string(&home_cache) {
-                        let _ = local_store.set_setting("home_shelves_cache_v1", &json);
-                    }
-                }
+                let mut all_home_items = Vec::new();
+                all_home_items.extend(resume.clone());
+                all_home_items.extend(history.clone());
+                all_home_items.extend(latest_items.clone());
 
                 *home_catalog
                     .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = all_items;
-                let categories_for_ui = categories.clone();
-                let selected_categories_for_ui = selected_categories.clone();
-                let server_url = session.server_url.clone();
-                let has_overall_error = !overall_error.is_empty();
-                slint::invoke_from_event_loop(move || {
-                    if home_generation.load(Ordering::SeqCst) != request_id {
-                        return;
-                    }
-                    if let Some(ui) = weak.upgrade() {
-                        ui.set_home_is_loading(false);
-                        ui.set_home_error_message(overall_error.into());
-                        ui.set_home_resume_error(resume_error.into());
-                        ui.set_home_latest_error(latest_error.into());
-                        ui.set_home_random_error(random_error.into());
-                        ui.set_home_performer_error(performer_error.into());
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = all_home_items;
 
-                        // If background refresh failed with an error and returned no items,
-                        // keep any already displayed items instead of overwriting with empty
-                        if !has_any_items && has_overall_error && ui.get_has_home_content() {
-                            return;
-                        }
-                        let shelves = shelves
-                            .iter()
-                            .map(|items| {
-                                items
-                                    .iter()
-                                    .map(|item| tv_item_to_card_for_server(item, &server_url))
-                                    .collect::<Vec<_>>()
-                            })
-                            .collect::<Vec<_>>();
-                        set_home_shelves(&ui, &shelves);
-                        set_home_category_options(
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        let resume_cards = resume.iter().map(tv_item_to_card).collect::<Vec<_>>();
+                        let history_cards = history.iter().map(tv_item_to_card).collect::<Vec<_>>();
+                        let latest_cards =
+                            latest_items.iter().map(tv_item_to_card).collect::<Vec<_>>();
+                        let empty_cards: Vec<VideoCardData> = Vec::new();
+
+                        ui.set_home_is_loading(false);
+                        ui.set_home_error_message(String::new().into());
+                        ui.set_home_resume_error(String::new().into());
+                        ui.set_home_latest_error(String::new().into());
+                        ui.set_home_random_error(String::new().into());
+                        ui.set_home_performer_error(String::new().into());
+                        set_home_shelves(
                             &ui,
-                            &categories_for_ui,
-                            &selected_categories_for_ui,
+                            &[
+                                resume_cards,
+                                history_cards,
+                                latest_cards,
+                                empty_cards.clone(),
+                                empty_cards,
+                            ],
                         );
-                        let category_shelves = category_shelves
-                            .into_iter()
-                            .map(|(name, items, error_message)| {
-                                let cards = items
-                                    .iter()
-                                    .map(|item| tv_item_to_card_for_server(item, &server_url))
-                                    .collect::<Vec<_>>();
-                                (name, cards, error_message)
-                            })
-                            .collect::<Vec<_>>();
-                        let ui_category_shelves = category_shelves
-                            .iter()
-                            .map(|(name, items, error_message)| HomeCategoryShelfData {
-                                name: name.clone().into(),
-                                items: Rc::new(slint::VecModel::from(items.clone())).into(),
-                                error_message: error_message.clone().into(),
-                            })
-                            .collect::<Vec<_>>();
+                        set_home_category_options(&ui, &[], &[]);
                         ui.set_home_category_shelves(
-                            Rc::new(slint::VecModel::from(ui_category_shelves)).into(),
-                        );
-                        refresh_home_thumbnails_async(
-                            ui.as_weak(),
-                            shelves,
-                            category_shelves,
-                            token,
-                            home_generation.clone(),
-                            request_id,
+                            Rc::new(slint::VecModel::from(Vec::new())).into(),
                         );
                     }
                 })
@@ -3627,9 +2165,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
     }
     {
         let weak = ui.as_weak();
-        let jellyfin = jellyfin.clone();
         let credential_store = credential_store.clone();
-        let local_store = local_store.clone();
         let catalog_filters = catalog_filters.clone();
         let catalog_filter_options = catalog_filter_options.clone();
         ui.on_open_catalog_filter_picker(move |kind| {
@@ -3668,38 +2204,59 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 Rc::new(slint::VecModel::from(Vec::<HomeCategoryOption>::new())).into(),
             );
 
-            let parent_id = local_store
-                .get_setting("selected_library_id")
-                .ok()
-                .flatten();
             let weak = weak.clone();
-            let jellyfin = jellyfin.clone();
             let catalog_filter_options = catalog_filter_options.clone();
             let kind_for_worker = kind.clone();
             std::thread::spawn(move || {
-                let result = jellyfin.get_items(
-                    &session.server_url,
-                    &session.user_id,
-                    &session.access_token,
-                    &GetItemsQuery {
-                        parent_id: parent_id.as_deref(),
-                        limit: 500,
-                        sort_by: "SortName",
-                        sort_descending: false,
-                        include_item_types: Some(match kind_for_worker.as_str() {
-                            "genre" => "Genre",
-                            "studio" => "Studio",
-                            _ => "Person",
-                        }),
-                        person_types: (kind_for_worker == "performer").then_some("Actor"),
-                        ..Default::default()
-                    },
-                );
+                let result = match AdultHubClient::new(&session.server_url) {
+                    Ok(client) => {
+                        let client = client.with_token(&session.access_token);
+                        let taxonomy_query = CatalogTaxonomyQuery {
+                            offset: Some(0),
+                            limit: Some(500),
+                            q: None,
+                        };
+                        match kind_for_worker.as_str() {
+                            "genre" => client.get_categories(&taxonomy_query).map(|response| {
+                                response
+                                    .items
+                                    .into_iter()
+                                    .map(|item| item.to_category_tv_item())
+                                    .collect::<Vec<_>>()
+                            }),
+                            "studio" => client.get_studios(&taxonomy_query).map(|response| {
+                                response
+                                    .items
+                                    .into_iter()
+                                    .map(|item| item.to_studio_tv_item())
+                                    .collect::<Vec<_>>()
+                            }),
+                            _ => client
+                                .get_performers(&adult_hub_client::CatalogPerformersQuery {
+                                    offset: Some(0),
+                                    limit: Some(500),
+                                    q: None,
+                                    letter: None,
+                                    photo_only: None,
+                                    sort: Some("name"),
+                                    direction: None,
+                                })
+                                .map(|response| {
+                                    response
+                                        .items
+                                        .into_iter()
+                                        .map(TvItem::from)
+                                        .collect::<Vec<_>>()
+                                }),
+                        }
+                        .map_err(|error| error.to_string())
+                    }
+                    Err(error) => Err(error.to_string()),
+                };
                 let (options, error) = match result {
-                    Ok(page) => {
+                    Ok(items) => {
                         let mut seen = std::collections::HashSet::new();
-                        let options = page
-                            .items
+                        let options = items
                             .into_iter()
                             .filter(|item| !item.title.trim().is_empty())
                             .filter(|item| seen.insert(item.title.to_lowercase()))
@@ -3713,7 +2270,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     }
                     Err(error) => (
                         Vec::new(),
-                        format!("Couldn't load choices from Jellyfin: {error}"),
+                        format!("Couldn't load choices from Adult Hub: {error}"),
                     ),
                 };
                 slint::invoke_from_event_loop(move || {
@@ -3796,7 +2353,6 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
     }
     {
         let weak = ui.as_weak();
-        let jellyfin = jellyfin.clone();
         let credential_store = credential_store.clone();
         let local_store = local_store.clone();
         let cached_catalog = cached_catalog.clone();
@@ -3809,83 +2365,92 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 return;
             }
             let Some(session) = credential_store.get().ok().flatten() else {
-                ui.set_status("Sign in to pick a random library title".into());
+                ui.set_status("Sign in to pick a random catalog title".into());
                 return;
             };
 
             let filters = get_category_filters(&catalog_filters, &category);
             let request_id = catalog_generation.load(Ordering::SeqCst);
-            let parent_id = local_store
-                .get_setting("selected_library_id")
-                .ok()
-                .flatten();
             ui.set_catalog_surprise_loading(true);
             ui.set_status("Finding a random title…".into());
 
             let weak = weak.clone();
-            let jellyfin = jellyfin.clone();
             let local_store = local_store.clone();
             let cached_catalog = cached_catalog.clone();
             let catalog_generation = catalog_generation.clone();
             let category = category.clone();
             let requested_category = category.clone();
             std::thread::spawn(move || {
-                let result = jellyfin.get_items(
-                    &session.server_url,
-                    &session.user_id,
-                    &session.access_token,
-                    &GetItemsQuery {
-                        parent_id: parent_id.as_deref(),
-                        limit: 50,
-                        sort_by: "Random",
-                        is_favorite: (category == "Favorites" || filters.favorites_only)
-                            .then_some(true),
-                        is_unplayed: filters.unwatched,
-                        is_hd: filters.hd_only.then_some(true),
-                        genre: (!filters.genre.is_empty()).then_some(filters.genre.as_str()),
-                        studio: (!filters.studio.is_empty()).then_some(filters.studio.as_str()),
-                        person: (!filters.performer.is_empty())
-                            .then_some(filters.performer.as_str()),
-                        ..Default::default()
-                    },
-                );
+                let result = AdultHubClient::new(&session.server_url)
+                    .map(|client| client.with_token(&session.access_token))
+                    .and_then(|client| {
+                        client.get_videos(&CatalogVideosQuery {
+                            offset: Some(0),
+                            limit: Some(50),
+                            sort: Some("latest"),
+                            is_favorite: (category == "Favorites" || filters.favorites_only)
+                                .then_some(true),
+                            category: (!filters.genre.is_empty()).then_some(filters.genre.as_str()),
+                            studio: (!filters.studio.is_empty()).then_some(filters.studio.as_str()),
+                            performer: (!filters.performer.is_empty())
+                                .then_some(filters.performer.as_str()),
+                            ..Default::default()
+                        })
+                    });
                 let network_error = result.as_ref().err().map(ToString::to_string);
-                let target = result
+                let mut candidates = result
                     .ok()
-                    .map(|page| filter_catalog_items(page.items, &local_store))
+                    .map(|response| {
+                        response
+                            .items
+                            .into_iter()
+                            .map(TvItem::from)
+                            .collect::<Vec<_>>()
+                    })
+                    .map(|items| filter_catalog_items(items, &local_store))
                     .unwrap_or_default()
                     .into_iter()
-                    .find(|item| {
+                    .filter(|item| {
                         (category != "Favorites" || item.is_favorite) && filters.accepts(item)
                     })
-                    .or_else(|| {
-                        let mut fallback = filter_catalog_items(
-                            cached_catalog
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .clone(),
-                            &local_store,
-                        )
-                        .into_iter()
-                        .filter(|item| {
-                            !item.genres.iter().any(|tag| {
-                                tag == "__adult_hub_performer"
-                                    || tag == "__adult_hub_channel_search"
-                            }) && (category != "Favorites" || item.is_favorite)
-                                && filters.accepts(item)
-                        })
-                        .collect::<Vec<_>>();
-                        if fallback.is_empty() {
-                            None
-                        } else {
-                            let index = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_nanos() as usize
-                                % fallback.len();
-                            Some(fallback.swap_remove(index))
-                        }
-                    });
+                    .collect::<Vec<_>>();
+                let target = if candidates.is_empty() {
+                    None
+                } else {
+                    let index = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos() as usize
+                        % candidates.len();
+                    Some(candidates.swap_remove(index))
+                }
+                .or_else(|| {
+                    let mut fallback = filter_catalog_items(
+                        cached_catalog
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .clone(),
+                        &local_store,
+                    )
+                    .into_iter()
+                    .filter(|item| {
+                        !item.genres.iter().any(|tag| {
+                            tag == "__adult_hub_performer" || tag == "__adult_hub_channel_search"
+                        }) && (category != "Favorites" || item.is_favorite)
+                            && filters.accepts(item)
+                    })
+                    .collect::<Vec<_>>();
+                    if fallback.is_empty() {
+                        None
+                    } else {
+                        let index = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_nanos() as usize
+                            % fallback.len();
+                        Some(fallback.swap_remove(index))
+                    }
+                });
 
                 slint::invoke_from_event_loop(move || {
                     let Some(ui) = weak.upgrade() else { return };
@@ -4000,7 +2565,6 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
     }
     {
         let weak = ui.as_weak();
-        let jellyfin = jellyfin.clone();
         let resolver = resolver.clone();
         let credential_store = credential_store.clone();
         let local_store = local_store.clone();
@@ -4123,7 +2687,6 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             let search_context = active_search_context(&ui);
             let debounce_id = search_debounce_generation.fetch_add(1, Ordering::SeqCst) + 1;
             let weak = weak.clone();
-            let jellyfin = jellyfin.clone();
             let resolver = resolver.clone();
             let credential_store = credential_store.clone();
             let local_store = local_store.clone();
@@ -4210,23 +2773,29 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                             if !catalog_generation_is_current(&catalog_generation, request_id) {
                                 return;
                             }
-                            *catalog_paging.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = CatalogPageState {
-                                category: "Latest".into(),
-                                is_search: !query.is_empty(),
-                                query,
-                                drilldown: false,
-                                library_id: local_store
-                                    .get_setting("selected_library_id")
-                                    .ok()
-                                    .flatten()
-                                    .unwrap_or_default(),
-                                next_start,
-                                has_more,
-                                loading_more: false,
-                                filters,
-                                supplemental_total,
-                            };
-                            *cached_catalog.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = filtered.clone();
+                            *catalog_paging
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                CatalogPageState {
+                                    category: "Latest".into(),
+                                    is_search: !query.is_empty(),
+                                    query,
+                                    drilldown: false,
+                                    library_id: local_store
+                                        .get_setting("selected_library_id")
+                                        .ok()
+                                        .flatten()
+                                        .unwrap_or_default(),
+                                    next_start,
+                                    has_more,
+                                    loading_more: false,
+                                    filters,
+                                    supplemental_total,
+                                };
+                            *cached_catalog
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                filtered.clone();
                             let cards = filtered
                                 .iter()
                                 .map(|item| {
@@ -4302,7 +2871,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                         SearchTypeTotals::default(),
                         false,
                         0,
-                        "Connect Jellyfin before searching your library.".into(),
+                        "Sign in to Adult Hub before searching the catalog.".into(),
                         false,
                         false,
                         String::new(),
@@ -4319,10 +2888,19 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     let resolver = resolver.clone();
                     let resolver_url = resolver_url.clone();
                     let q = query_str.clone();
-                    let clean_term = q.trim().strip_prefix("telegram:").unwrap_or(q.trim()).to_string();
+                    let clean_term = q
+                        .trim()
+                        .strip_prefix("telegram:")
+                        .unwrap_or(q.trim())
+                        .to_string();
                     std::thread::spawn(move || {
                         resolver
-                            .search_with_timeout(&resolver_url, &clean_term, "telegram", CHANNEL_SEARCH_TIMEOUT)
+                            .search_with_timeout(
+                                &resolver_url,
+                                &clean_term,
+                                "telegram",
+                                CHANNEL_SEARCH_TIMEOUT,
+                            )
                             .map(|videos| videos.into_iter().map(TvItem::from).collect::<Vec<_>>())
                             .map_err(|e| {
                                 crate::diagnostics::GLOBAL_LOG.w(
@@ -4334,82 +2912,30 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     })
                 };
 
-                // Stage A: Query Jellyfin concurrently (Movies, People, Studios, Tags)
-                let (stage_a_res, people_opt, studio_opt, tag_opt) = std::thread::scope(|scope| {
-                    let movie_task = scope.spawn(|| {
-                        get_search_movies_page_with_empty_fetch(
-                            &jellyfin,
-                            &session,
-                            &local_store,
-                            &query_str,
-                            &filters,
-                        )
-                    });
-                    let people_task = scope.spawn(|| {
-                        let people_query =
-                            search_supplement_query(&query_str, "Person", Some("Actor"));
-                        jellyfin
-                            .get_items(
-                                &session.server_url,
-                                &session.user_id,
-                                &session.access_token,
-                                &people_query,
-                            )
-                            .map_err(|_| {
-                                crate::diagnostics::GLOBAL_LOG.w(
-                                    "Search",
-                                    "Jellyfin performer search failed; preserving results from other sources",
-                                );
-                            })
-                            .ok()
-                    });
-                    let studio_task = scope.spawn(|| {
-                        let studio_query = search_supplement_query(&query_str, "Studio", None);
-                        jellyfin
-                            .get_items(
-                                &session.server_url,
-                                &session.user_id,
-                                &session.access_token,
-                                &studio_query,
-                            )
-                            .map(|mut page| {
-                                page.items = crate::catalog::aggregate_studio_items(page.items);
-                                page.total_record_count = page.items.len();
-                                page
-                            })
-                            .map_err(|_| {
-                                crate::diagnostics::GLOBAL_LOG.w(
-                                    "Search",
-                                    "Jellyfin studio search failed; preserving results from other sources",
-                                );
-                            })
-                            .ok()
-                    });
-                    let tag_task = scope.spawn(|| {
-                        let tag_query = search_supplement_query(&query_str, "Genre", None);
-                        jellyfin
-                            .get_items(
-                                &session.server_url,
-                                &session.user_id,
-                                &session.access_token,
-                                &tag_query,
-                            )
-                            .map_err(|_| {
-                                crate::diagnostics::GLOBAL_LOG.w(
-                                    "Search",
-                                    "Jellyfin tag search failed; preserving results from other sources",
-                                );
-                            })
-                            .ok()
-                    });
-
-                    (
-                        movie_task.join().unwrap_or_else(|_| Err(JellyfinError::Api("search worker panicked".into()))),
-                        people_task.join().unwrap_or_default(),
-                        studio_task.join().unwrap_or_default(),
-                        tag_task.join().unwrap_or_default(),
-                    )
-                });
+                // Stage A: query the catalog videos and taxonomy sources.
+                let client = match AdultHubClient::new(&session.server_url) {
+                    Ok(client) => client.with_token(&session.access_token),
+                    Err(error) => {
+                        publish(
+                            Vec::new(),
+                            0,
+                            SearchTypeTotals::default(),
+                            false,
+                            0,
+                            format!("Could not initialize Adult Hub client: {error}"),
+                            false,
+                            false,
+                            String::new(),
+                            false,
+                        );
+                        return;
+                    }
+                };
+                let stage_a_res = get_search_movies_page_at(&client, &query_str, &filters, 0);
+                let supplements = fetch_search_supplements(&client, &query_str);
+                let people_opt = supplements.people;
+                let studio_opt = supplements.studios;
+                let tag_opt = supplements.tags;
 
                 if search_debounce_generation.load(Ordering::SeqCst) != debounce_id {
                     return;
@@ -4420,9 +2946,9 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     Err(error) => {
                         let is_unauth = error.is_unauthorized();
                         let message: String = if is_unauth {
-                            "Your Jellyfin session expired. Sign in again and retry."
+                            "Your Adult Hub session expired. Sign in again and retry."
                         } else {
-                            "Could not reach Jellyfin. Check the connection and retry."
+                            "Could not reach Adult Hub. Check the connection and retry."
                         }
                         .into();
                         if is_unauth {
@@ -4483,11 +3009,12 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 );
 
                 // Stage B: Wait for channel videos from Resolver
-                let channel_res = channel_handle
-                    .join()
-                    .unwrap_or(Err(adult_hub_client::ResolverError::Api(
-                        "Thread panicked".into(),
-                    )));
+                let channel_res =
+                    channel_handle
+                        .join()
+                        .unwrap_or(Err(adult_hub_client::ResolverError::Api(
+                            "Thread panicked".into(),
+                        )));
                 if search_debounce_generation.load(Ordering::SeqCst) != debounce_id {
                     return;
                 }
@@ -4661,8 +3188,6 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
     // 6. Filter Category
     let filter_category = {
         let weak = ui.as_weak();
-        let jellyfin = jellyfin.clone();
-        let resolver = resolver.clone();
         let credential_store = credential_store.clone();
         let local_store = local_store.clone();
         let cached_catalog = cached_catalog.clone();
@@ -4792,8 +3317,6 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             ui.set_status(loading_msg.into());
             ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
             let weak = weak.clone();
-            let jellyfin = jellyfin.clone();
-            let resolver = resolver.clone();
             let credential_store = credential_store.clone();
             let local_store = local_store.clone();
             let cached_catalog = cached_catalog.clone();
@@ -4812,13 +3335,10 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                         image_auth =
                             Some((session.server_url.clone(), session.access_token.clone()));
                         match get_catalog_page_with_empty_page_fetch(
-                            &jellyfin,
-                            &resolver,
                             &session,
                             &local_store,
                             &cat,
                             &query,
-                            drilldown,
                             0,
                             filters.clone(),
                             performers_photo_only,
@@ -5008,7 +3528,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
         });
     }
 
-    // Keep performer name searches responsive while avoiding a Jellyfin
+    // Keep performer name searches responsive while avoiding a server
     // request for every keystroke. The list is filtered locally immediately;
     // this callback fetches server matches after typing pauses.
     {
@@ -5053,8 +3573,6 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
     // Load additional pages for the currently visible catalog/search result.
     {
         let weak = ui.as_weak();
-        let jellyfin = jellyfin.clone();
-        let resolver = resolver.clone();
         let credential_store = credential_store.clone();
         let local_store = local_store.clone();
         let cached_catalog = cached_catalog.clone();
@@ -5096,8 +3614,6 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             ui.set_is_loading_more(true);
             let request_id = catalog_generation.load(Ordering::SeqCst);
             let weak = weak.clone();
-            let jellyfin = jellyfin.clone();
-            let resolver = resolver.clone();
             let credential_store = credential_store.clone();
             let local_store = local_store.clone();
             let cached_catalog = cached_catalog.clone();
@@ -5110,16 +3626,13 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     .get()
                     .ok()
                     .flatten()
-                    .ok_or_else(|| JellyfinError::Api("Sign in to load more items".into()))
+                    .ok_or_else(|| CatalogError::Api("Sign in to load more items".into()))
                     .and_then(|session| {
                         get_catalog_page_with_empty_page_fetch(
-                            &jellyfin,
-                            &resolver,
                             &session,
                             &local_store,
                             &requested_page.category,
                             &requested_page.query,
-                            requested_page.drilldown,
                             requested_page.next_start,
                             requested_page.filters.clone(),
                             performer_photo_only,
@@ -5798,10 +4311,6 @@ mod tests {
             catalog_view_key(&page_global),
             "Search within a category must have a distinct view key from global search"
         );
-
-        let query = search_movie_query("blonde", 0, &page_genre.filters, None);
-        assert_eq!(query.genre, Some("Anal"));
-        assert_eq!(query.search_term, Some("blonde"));
     }
 
     fn telegram_item() -> TvItem {
@@ -5837,7 +4346,7 @@ mod tests {
 
     #[test]
     fn item_matches_query_matches_overview() {
-        let mut item = TvItem::new("jellyfin-guid-42", "Untitled");
+        let mut item = TvItem::new("library-guid-42", "Untitled");
         item.overview = Some("Recorded in Warsaw".into());
         assert!(item_matches_query(&item, "warsaw"));
     }

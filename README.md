@@ -2,19 +2,19 @@
 
 > A modern, privacy-focused desktop client for the Adult Hub ecosystem.
 
-Adult Hub Desktop connects to a Jellyfin server you configure and brings library browsing, performer and studio details, Resolver channels, downloads, and video playback together in one Windows or Linux app.
+Adult Hub Desktop connects to an Adult Hub server you configure and brings catalog browsing, performer and studio details, Resolver channels, downloads, and video playback together in one Windows or Linux app.
 
-The [Adult Hub ecosystem](https://github.com/backwaterXXX/adult-hub) also provides separate Android TV and mobile apps. The desktop, TV, and mobile clients can connect to the same Jellyfin server and Resolver, so your media library and channel setup stay in the same ecosystem. Desktop has its own interface, built for a keyboard, mouse, or HTPC setup.
+The [Adult Hub ecosystem](https://github.com/backwaterXXX/adult-hub) also provides separate Android TV and mobile apps. The desktop, TV, and mobile clients can connect to the same Adult Hub server and Resolver, so your catalog and channel setup stay in the same ecosystem. Desktop has its own interface, built for a keyboard, mouse, or HTPC setup.
 
-For a server on another network, use a secure HTTPS reverse proxy that you control. The app is a client and does not include or host the Jellyfin server, Resolver, or a reverse proxy.
+For a server on another network, use a secure HTTPS reverse proxy that you control. The app is a client and does not include or host the Adult Hub server, Resolver, or a reverse proxy.
 
 ## How It Works
 
-1. Connect the app to your Jellyfin server with Quick Connect or your account credentials.
+1. Connect the app to your Adult Hub server with your account credentials.
 2. Browse your libraries, search titles, and explore performers, studios, and channels.
 3. Play a video in the built-in libmpv player or add it to the download queue.
 
-The app is a client. You provide the Jellyfin server and, when needed, a separate Resolver service.
+The app is a client. You provide the Adult Hub server and, when needed, a separate Resolver service.
 
 ## Highlights & Features
 
@@ -22,7 +22,7 @@ The app is a client. You provide the Jellyfin server and, when needed, a separat
 
 - **Full library browsing**: Browse movies, categories, performers, and studios, with search and filters.
 - **Detailed profiles**: Explore performer and studio pages and related titles.
-- **Watch progress and history**: Resume playback from Jellyfin progress and keep a local playback history.
+- **Watch progress and history**: Resume playback from server progress and keep a local playback history.
 - **Download queue**: Queue downloads, pause or resume them, and review completed items.
 
 ### 📡 Resolver Channels
@@ -49,7 +49,7 @@ The app is a client. You provide the Jellyfin server and, when needed, a separat
 
 ### 🔒 Privacy by Design
 
-- Connect only to the Jellyfin and Resolver addresses you configure; use HTTPS for remote servers.
+- Connect only to the Adult Hub and Resolver addresses you configure; use HTTPS for remote servers.
 - Credentials stay on your device and use the operating system's protected credential store when available.
 - Export diagnostics only when requested; sensitive values are redacted.
 
@@ -81,21 +81,21 @@ chmod +x Adult_Hub_Desktop-x86_64.AppImage
 
 ## Quick Start
 
-### 1. Connect to Jellyfin
+### 1. Connect to Adult Hub
 
-Enter your Jellyfin server URL, then sign in with Quick Connect or your username and password. Use HTTPS for servers reached over the internet. HTTP is intended for local network connections and requires in-app consent.
+Enter your Adult Hub server URL, then sign in with your username and password. Use HTTPS for servers reached over the internet. HTTP is intended for local network connections and requires in-app consent.
 
-### 2. Browse your library
+### 2. Browse the catalog
 
-Choose a library to browse. Use search and filters to find titles, performers, studios, or categories.
+Use search and filters to find titles, performers, studios, or categories.
 
 ### 3. Configure Resolver if needed
 
-The Resolver URL follows the Jellyfin server by default. If your Resolver is hosted separately, set its address in **Settings → Integrations & Resolver**.
+The Resolver URL follows the Adult Hub server by default. If your Resolver is hosted separately, set its address in **Settings → Integrations & Resolver**.
 
 ## Privacy and Account Data
 
-The app connects to the Jellyfin and Resolver addresses you configure and checks GitHub Releases for updates. It does not bundle a Jellyfin or Resolver server. Credentials and account settings are stored locally; the app uses Windows Credential Manager or Linux Secret Service for protected storage when available.
+The app connects to the Adult Hub and Resolver addresses you configure and checks GitHub Releases for updates. It does not bundle an Adult Hub or Resolver server. Credentials and account settings are stored locally; the app uses Windows Credential Manager or Linux Secret Service for protected storage when available.
 
 Use **Settings → Privacy** for the panic exit and related privacy controls. Diagnostics are exported only when you request an export, and sensitive values are redacted.
 
@@ -108,7 +108,7 @@ The executable loads the adjacent `libmpv-2.dll` for video playback. Keep both f
 </details>
 
 <details>
-<summary><strong>Can I connect to a local Jellyfin server over HTTP?</strong></summary>
+<summary><strong>Can I connect to a local Adult Hub server over HTTP?</strong></summary>
 <br>
 Yes. The app supports HTTP for local network addresses after you approve the in-app consent prompt. Use HTTPS for public or remote servers.
 </details>
@@ -147,7 +147,7 @@ Packaging scripts are available in `scripts/`:
 | Crate | Purpose |
 |---|---|
 | `adult-hub-app` | Desktop application, UI, and update flow |
-| `adult-hub-client` | Jellyfin and Resolver API clients |
+| `adult-hub-client` | Adult Hub and Resolver API clients |
 | `adult-hub-player` | libmpv playback integration |
 | `adult-hub-storage` | Local database, settings, and account storage |
 

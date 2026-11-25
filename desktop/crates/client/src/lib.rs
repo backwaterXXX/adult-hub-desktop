@@ -1,8 +1,6 @@
-//! Jellyfin and Resolver client library.
+//! Adult Hub and Resolver client library.
 
 pub mod adult_hub;
-pub mod discovery;
-pub mod jellyfin;
 pub mod models;
 pub mod policy;
 pub mod resolver;
@@ -10,8 +8,6 @@ pub mod resolver;
 pub const CLIENT_NAME: &str = "Adult Hub Desktop";
 
 pub use adult_hub::*;
-pub use discovery::discover_servers;
-pub use jellyfin::{GetItemsQuery, JellyfinClient, JellyfinError};
 pub use models::*;
 pub use policy::{ServiceUrl, ServiceUrlPolicy, ServiceUrlValidation};
 pub use resolver::{ResolverClient, ResolverError};

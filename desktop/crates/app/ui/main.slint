@@ -4,8 +4,8 @@ import { DashboardShelf, PerformerCard, StudioCard, CategoryCard, VideoCardGrid 
 import { Toast } from "Toast.slint";
 import { HubTheme, KeyboardState } from "theme.slint";
 import { Button, IconButton, FilterIconButton, LoadingState, PageHeader, AccentSpinner, SectionHeader } from "common-controls.slint";
-import { SettingsView, DiscoveredServerItem, HomeCategoryOption, LibraryOptionData } from "SettingsView.slint";
-export { DiscoveredServerItem, HomeCategoryOption, LibraryOptionData }
+import { SettingsView, HomeCategoryOption } from "SettingsView.slint";
+export { HomeCategoryOption }
 export { VideoCardData, VideoCardRowData }
 
 export struct HomeCategoryShelfData {
@@ -1816,7 +1816,7 @@ component HomeDashboardActions inherits HorizontalLayout {
     }
 
     TvSecondaryButton {
-        text: "Refresh Library";
+        text: "Refresh Catalog";
         custom-height: 38px;
         clicked => { root.refresh-library(); }
     }
@@ -2574,8 +2574,7 @@ export component MainWindow inherits Window {
         // Navigation restore sets the category before reapplying its saved query.
         root.search-applied-query = "";
     }
-    in-out property <string> current-library: "All Videos";
-    in-out property <[LibraryOptionData]> library-options: [];
+    in-out property <string> current-library: "Catalog";
     in-out property <string> catalog-sort-label: "Date added";
     in-out property <string> catalog-duration-label: "Any length";
     in-out property <bool> catalog-sort-descending: true;
@@ -2621,21 +2620,16 @@ export component MainWindow inherits Window {
     in-out property <string> home-performer-error: "";
 
     // Auth & Settings state
-    in-out property <bool> adult-hub-api-enabled: false;
-    in-out property <string> server-url-input: "http://localhost:8096";
+    in-out property <string> server-url-input: "http://localhost:8090";
     in-out property <string> username-input: "";
     in-out property <string> password-input: "";
-    in-out property <string> quick-connect-code: "";
-    in-out property <bool> quick-connect-active: false;
-    in-out property <bool> quick-connect-expired: false;
-    in-out property <bool> quick-connect-authenticating: false;
     in-out property <string> logged-in-user: "";
     in-out property <bool> is-logged-in: false;
     in-out property <bool> cleartext-consent-visible: false;
     in-out property <string> cleartext-consent-url: "";
     in-out property <string> cleartext-consent-action: "";
     in-out property <[string]> approved-http-origins: [];
-    in-out property <string> jellyfin-connection-status: "Not checked";
+    in-out property <string> server-connection-status: "Not checked";
     in-out property <string> resolver-connection-status: "Not checked";
     in-out property <string> thumbnail-check-status: "Artwork not checked";
     in-out property <bool> thumbnail-check-failed: true;
@@ -2643,7 +2637,7 @@ export component MainWindow inherits Window {
     // Connection diagnostics: one machine-readable state per check (not-checked,
     // checking, connected, partial, error, not-configured) next to the human
     // explanation, so a surface can never imply a check that did not succeed.
-    in-out property <string> jellyfin-connection-state: "not-checked";
+    in-out property <string> server-connection-state: "not-checked";
     in-out property <string> resolver-connection-state: "not-checked";
     in-out property <string> artwork-connection-state: "not-checked";
     in-out property <string> stream-connection-state: "not-checked";
@@ -2698,9 +2692,6 @@ export component MainWindow inherits Window {
     // Catalog & Auth Callbacks
     callback perform-login(string, string, string);
     callback perform-logout();
-    callback toggle-adult-hub-api();
-    callback start-quick-connect();
-    callback cancel-quick-connect();
     callback accept-cleartext-http-consent();
     callback dismiss-cleartext-http-consent();
     callback revoke-cleartext-http-origin(string);
@@ -2751,7 +2742,6 @@ export component MainWindow inherits Window {
     in-out property <[string]> excluded-tags-list: [];
     in-out property <[string]> hidden-channels-list: [];
     in-out property <string> new-tag-input: "";
-    in-out property <[string]> available-libraries: [];
 
     // Stage 4 Callbacks
     callback save-resolver-url(string);
@@ -2773,15 +2763,6 @@ export component MainWindow inherits Window {
     callback import-config();
     callback export-diagnostics();
     callback open-logs-folder();
-    callback switch-library();
-    callback refresh-library-list();
-    callback select-library(string);
-
-    // Local Server Discovery
-    in-out property <[DiscoveredServerItem]> discovered-servers: [];
-    in-out property <bool> is-scanning-servers: false;
-    callback scan-servers();
-    callback select-discovered-server(string);
 
     // Stage 5 Update State & Callbacks
     in-out property <bool> auto-update-enabled: true;
@@ -3659,7 +3640,7 @@ export component MainWindow inherits Window {
 
                     HomeDashboardHeader {
                         width: home-content.content-width;
-                        library-name: root.current-library != "" ? root.current-library : "All Videos";
+                        library-name: root.current-library != "" ? root.current-library : "Catalog";
                         surprise => { root.play-random(); }
                         refresh-library => { root.refresh-home(); }
                     }
@@ -3700,7 +3681,7 @@ export component MainWindow inherits Window {
                             }
 
                             Text {
-                                text: "Connect a Jellyfin server to browse your library and resume watching.";
+                                text: "Sign in to Adult Hub to browse the catalog and resume watching.";
                                 color: HubTheme.text-secondary;
                                 font-size: 13px;
                                 horizontal-alignment: left;
@@ -3712,7 +3693,7 @@ export component MainWindow inherits Window {
                                 spacing: 9px;
                                 alignment: start;
                                 TvPrimaryButton {
-                                    text: "Connect Jellyfin";
+                                    text: "Sign In";
                                     clicked => { root.switch-screen("settings"); }
                                 }
                                 TvSecondaryButton {
@@ -3815,7 +3796,7 @@ export component MainWindow inherits Window {
                                 padding-top: 4px;
 
                                 TvSecondaryButton {
-                                    text: "Refresh Library";
+                                    text: "Refresh Catalog";
                                     custom-height: 36px;
                                     clicked => { root.refresh-home(); }
                                 }
@@ -4084,7 +4065,7 @@ export component MainWindow inherits Window {
                         }
 
                         Text {
-                            text: "Connect Jellyfin to browse your library.";
+                            text: "Sign In to browse your library.";
                             color: #b8b3bd;
                             font-size: 12px;
                             vertical-alignment: center;
@@ -4447,7 +4428,7 @@ export component MainWindow inherits Window {
                             }
                         }
                         Text {
-                            text: "Type a name or choose from Jellyfin";
+                            text: "Type a name or choose from the catalog";
                             color: #777777;
                             font-size: 11px;
                             vertical-alignment: center;
@@ -4822,10 +4803,10 @@ export component MainWindow inherits Window {
                                     : (root.active-category == "Favorites"
                                         ? "Click the heart icon on any video to add it to your favorites."
                                         : (root.active-category == "Performers"
-                                            ? (root.is-logged-in ? "No performers found in your library." : "Connect Jellyfin to browse performers.")
+                                            ? (root.is-logged-in ? "No performers found in your library." : "Sign In to browse performers.")
                                             : (root.active-category == "Studios"
-                                                ? (root.is-logged-in ? "No studios found in your library." : "Connect Jellyfin to browse studios.")
-                                                : (root.is-logged-in ? "No items found in this section." : "Connect Jellyfin to browse your library, or open a local video file.")))));
+                                                ? (root.is-logged-in ? "No studios found in your library." : "Sign In to browse studios.")
+                                                : (root.is-logged-in ? "No items found in this section." : "Sign In to browse your library, or open a local video file.")))));
                             color: #95919e;
                             font-size: 13px;
                             horizontal-alignment: center;
@@ -4836,7 +4817,7 @@ export component MainWindow inherits Window {
                             alignment: center;
 
                             TvPrimaryButton {
-                                text: "Connect Jellyfin";
+                                text: "Sign In";
                                 clicked => { root.switch-screen("settings"); }
                             }
 
@@ -7931,28 +7912,19 @@ export component MainWindow inherits Window {
                 build-id: root.build-id;
                 is-logged-in: root.is-logged-in;
                 logged-in-user: root.logged-in-user;
-                adult-hub-api-enabled <=> root.adult-hub-api-enabled;
                 server-url-input <=> root.server-url-input;
                 username-input <=> root.username-input;
                 password-input <=> root.password-input;
-                quick-connect-code <=> root.quick-connect-code;
-                quick-connect-active <=> root.quick-connect-active;
-                quick-connect-expired <=> root.quick-connect-expired;
-                quick-connect-authenticating <=> root.quick-connect-authenticating;
-                discovered-servers: root.discovered-servers;
-                is-scanning-servers: root.is-scanning-servers;
-                current-library: root.current-library;
-                library-options: root.library-options;
                 approved-http-origins: root.approved-http-origins;
                 resolver-url-input <=> root.resolver-url-input;
                 saved-resolver-url: root.saved-resolver-url;
                 resolver-url-dirty <=> root.resolver-url-dirty;
-                jellyfin-connection-status: root.jellyfin-connection-status;
+                server-connection-status: root.server-connection-status;
                 resolver-connection-status: root.resolver-connection-status;
                 thumbnail-check-status: root.thumbnail-check-status;
                 thumbnail-check-failed: root.thumbnail-check-failed;
                 checking-connections: root.checking-connections;
-                jellyfin-connection-state: root.jellyfin-connection-state;
+                server-connection-state: root.server-connection-state;
                 resolver-connection-state: root.resolver-connection-state;
                 artwork-connection-state: root.artwork-connection-state;
                 stream-connection-state: root.stream-connection-state;
@@ -8001,13 +7973,6 @@ export component MainWindow inherits Window {
                 category-changed(section) => { root.settings-section = section; }
                 perform-login(username, password, server-url) => { root.perform-login(username, password, server-url); }
                 perform-logout => { root.perform-logout(); }
-                toggle-adult-hub-api => { root.toggle-adult-hub-api(); }
-                start-quick-connect => { root.start-quick-connect(); }
-                cancel-quick-connect => { root.cancel-quick-connect(); }
-                scan-servers => { root.scan-servers(); }
-                select-discovered-server(url) => { root.select-discovered-server(url); }
-                refresh-library-list => { root.refresh-library-list(); }
-                select-library(id) => { root.select-library(id); }
                 revoke-cleartext-http-origin(origin) => { root.revoke-cleartext-http-origin(origin); }
                 save-resolver-url(url) => { root.save-resolver-url(url); }
                 test-resolver-connection => { root.test-resolver-connection(); }
@@ -9680,7 +9645,7 @@ export component MainWindow inherits Window {
                     }
                     DarkLineEdit {
                         text <=> root.server-url-input;
-                        placeholder-text: "http://localhost:8096";
+                        placeholder-text: "https://adult-hub.example:8443 or http://192.168.1.100:8090";
                     }
 
                     Text {
@@ -9714,17 +9679,6 @@ export component MainWindow inherits Window {
                 HorizontalLayout {
                     spacing: 12px;
                     padding-top: 8px;
-
-                    TvSecondaryButton {
-                        text: "Quick Connect";
-                        horizontal-stretch: 1;
-                        custom-height: 38px;
-                        clicked => {
-                            root.close-login-modal();
-                            root.switch-screen("settings");
-                            root.start-quick-connect();
-                        }
-                    }
 
                     TvPrimaryButton {
                         text: "Sign In";
@@ -9813,7 +9767,7 @@ export component MainWindow inherits Window {
 
                 Text {
                     text: root.catalog-filter-options-loading
-                        ? "Loading options from Jellyfin…"
+                        ? "Loading options from Adult Hub…"
                         : root.catalog-filter-options-message;
                     color: #a9a9b2;
                     font-size: 12px;

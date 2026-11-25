@@ -18,13 +18,10 @@ mod system_info;
 mod thumbnails;
 mod updater;
 
-use adult_hub_client::{
-    JellyfinClient, ResolverClient, ServiceUrlPolicy, ServiceUrlValidation, TvItem,
-    discover_servers,
-};
+use adult_hub_client::{ResolverClient, ServiceUrlPolicy, ServiceUrlValidation, TvItem};
 use adult_hub_player::Player;
 use adult_hub_storage::{CredentialStore, LocalStore, Session, default_db_path};
-use catalog::{sample_catalog_tv_items, set_catalog, set_discovered_servers};
+use catalog::{sample_catalog_tv_items, set_catalog};
 use context::AppContext;
 use options::{Options, initial_media};
 use playback::{load_media, show_error, start_item_playback};
@@ -205,13 +202,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = credential_store.save(legacy_session);
         let _ = local_store.clear_session();
     }
-    let device_id = local_store
-        .get_or_create_device_id()
-        .unwrap_or_else(|_| "desktop-device-default".to_string());
-    thumbnails::set_jellyfin_device_id(&device_id);
-    let jellyfin = Arc::new(JellyfinClient::new(device_id));
     let resolver = Arc::new(ResolverClient::new());
-    let reporter = Arc::new(PlaybackReporter::new(jellyfin.clone()));
+    let reporter = Arc::new(PlaybackReporter::new());
     let session_ctrl = Arc::new(PlaybackSessionController::new(local_store.clone()));
 
     let session_opt = credential_store.get().ok().flatten();
@@ -252,15 +244,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             String::new()
         }
     };
-    let is_adult_hub_api = local_store.is_adult_hub_api_enabled().unwrap_or(false);
     let initial_auth_token = session_opt
         .as_ref()
         .filter(|_| session_origin_approved)
         .map(|s| s.access_token.clone());
     if let Some(session) = session_opt.as_ref().filter(|_| session_origin_approved) {
-        apply_session_thumbnail_urls(session, is_adult_hub_api, &initial_resolver_url);
+        apply_session_thumbnail_urls(session, &initial_resolver_url);
     } else {
-        thumbnails::set_jellyfin_base_url("");
         thumbnails::set_resolver_base_url(&initial_resolver_url);
         thumbnails::set_resolver_auth_token(initial_auth_token.as_deref());
     }
@@ -284,7 +274,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         headers: options.headers.clone(),
         local_store: local_store.clone(),
         credential_store: credential_store.clone(),
-        jellyfin: jellyfin.clone(),
         resolver: resolver.clone(),
         reporter: reporter.clone(),
         session_ctrl: session_ctrl.clone(),
@@ -327,9 +316,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.set_cache_usage_text(format!("Used: {used_str} / Limit: {limit_str}").into());
             ui.set_phash_active(config.phash_on_playback);
             ui.set_low_ram_active(config.low_ram_mode);
-            if let Some(enabled) = config.adult_hub_api_enabled {
-                ui.set_adult_hub_api_enabled(enabled);
-            }
             if let Some(url) = config
                 .resolver_base_url
                 .clone()
@@ -407,7 +393,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // Persist playback position and stop the Jellyfin session when the user
+    // Persist playback position and flush pending progress when the user
     // closes the desktop window with the native title-bar control.
     {
         let weak = ui.as_weak();
@@ -473,29 +459,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     } else {
         set_catalog(&ui, Vec::new());
-    }
-
-    // Background server discovery on startup
-    {
-        let weak = ui.as_weak();
-        std::thread::spawn(move || {
-            let servers = discover_servers(Duration::from_millis(2000));
-            if !servers.is_empty() {
-                slint::invoke_from_event_loop(move || {
-                    let Some(ui) = weak.upgrade() else { return };
-                    let items = servers
-                        .iter()
-                        .map(|s| DiscoveredServerItem {
-                            id: s.id.clone().into(),
-                            name: s.name.clone().into(),
-                            url: s.url.clone().into(),
-                        })
-                        .collect::<Vec<_>>();
-                    set_discovered_servers(&ui, items);
-                })
-                .ok();
-            }
-        });
     }
 
     // Register Toast and Modal Callbacks
@@ -565,8 +528,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ui.get_username_input(),
                     ui.get_password_input(),
                 ),
-                "quick-connect" => ui.invoke_start_quick_connect(),
-                "discover-server" => ui.invoke_select_discovered_server(ui.get_server_url_input()),
                 "resolver-save" => ui.invoke_save_resolver_url(ui.get_resolver_url_input()),
                 "resolver-test" => ui.invoke_test_resolver_connection(),
                 "check-connections" => ui.invoke_check_connections(),
@@ -664,7 +625,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let ui_weak = ui.as_weak();
             let credential_store = credential_store.clone();
             let local_store = local_store.clone();
-            let jellyfin = jellyfin.clone();
             let reporter = reporter.clone();
             let session_ctrl = session_ctrl.clone();
             let current_playing_item = current_playing_item.clone();
@@ -681,7 +641,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &headers,
                         &credential_store,
                         &local_store,
-                        &jellyfin,
                         &reporter,
                         &session_ctrl,
                         &current_playing_item,
@@ -1989,16 +1948,7 @@ fn set_window_icon(ui: &MainWindow) {
         .with_winit_window(|window| window.set_window_icon(Some(icon)));
 }
 
-pub(crate) fn apply_session_thumbnail_urls(
-    session: &Session,
-    is_adult_hub_api: bool,
-    resolver_url: &str,
-) {
-    if is_adult_hub_api {
-        crate::thumbnails::set_jellyfin_base_url("");
-    } else {
-        crate::thumbnails::set_jellyfin_base_url(&session.server_url);
-    }
+pub(crate) fn apply_session_thumbnail_urls(session: &Session, resolver_url: &str) {
     let effective_resolver_url = if resolver_url.is_empty() {
         session.server_url.as_str()
     } else {
@@ -2026,8 +1976,7 @@ fn activate_session(
     } else {
         resolver_url
     };
-    let is_adult_hub_api = local_store.is_adult_hub_api_enabled().unwrap_or(false);
-    apply_session_thumbnail_urls(session, is_adult_hub_api, effective_resolver_url);
+    apply_session_thumbnail_urls(session, effective_resolver_url);
     phash_coord.update_auth(effective_resolver_url, Some(&session.access_token));
     ui.set_is_logged_in(true);
     ui.set_logged_in_user(session.username.clone().into());
@@ -2039,7 +1988,6 @@ fn activate_session(
         home_catalog,
     );
     ui.invoke_filter_category("Latest".into());
-    ui.invoke_refresh_library_list();
     ui.invoke_refresh_home();
 }
 
@@ -2053,7 +2001,7 @@ mod tests {
     use playback::*;
 
     #[test]
-    fn test_apply_session_thumbnail_urls_clears_stale_jellyfin_url_in_api_mode() {
+    fn test_apply_session_thumbnail_urls_configures_resolver_origin_and_token() {
         let session = Session {
             server_url: "https://adulthub.example:8090".into(),
             user_id: "user-1".into(),
@@ -2063,34 +2011,17 @@ mod tests {
             refresh_token: None,
         };
 
-        // Precondition: Jellyfin base URL has stale value from prior session
-        crate::thumbnails::set_jellyfin_base_url("https://stale-jf.example:8096");
+        apply_session_thumbnail_urls(&session, "");
+        assert!(crate::thumbnails::resolve_resolver_thumbnail_url("/img/poster.jpg").is_some());
+
+        apply_session_thumbnail_urls(&session, "https://resolver.example");
         assert_eq!(
-            crate::thumbnails::current_jellyfin_base_url(),
-            "https://stale-jf.example:8096"
+            crate::thumbnails::resolve_resolver_thumbnail_url("/img/poster.jpg"),
+            Some("https://resolver.example/img/poster.jpg".into())
         );
 
-        // Adult Hub API mode: stale Jellyfin base URL MUST be cleared
-        apply_session_thumbnail_urls(&session, true, "");
-        assert_eq!(crate::thumbnails::current_jellyfin_base_url(), "");
-
-        // Jellyfin mode: Jellyfin base URL MUST be preserved/set to session.server_url
-        let jf_session = Session {
-            server_url: "https://jf.example:8096".into(),
-            user_id: "user-2".into(),
-            username: "tester2".into(),
-            access_token: "token-xyz".into(),
-            server_name: "Jellyfin".into(),
-            refresh_token: None,
-        };
-        apply_session_thumbnail_urls(&jf_session, false, "");
-        assert_eq!(
-            crate::thumbnails::current_jellyfin_base_url(),
-            "https://jf.example:8096"
-        );
-
-        // Clean up
-        crate::thumbnails::set_jellyfin_base_url("");
+        crate::thumbnails::set_resolver_auth_token(None);
+        crate::thumbnails::set_resolver_base_url("");
     }
 
     #[test]
@@ -2169,7 +2100,7 @@ mod tests {
     #[test]
     fn tv_item_to_card_mapping() {
         let item = TvItem {
-            id: "jellyfin-123".into(),
+            id: "library-123".into(),
             title: "Adult Scene #1".into(),
             overview: None,
             year: Some(2025),
@@ -2198,11 +2129,11 @@ mod tests {
         };
 
         let card = tv_item_to_card(&item);
-        assert_eq!(card.id, "jellyfin-123");
+        assert_eq!(card.id, "library-123");
         assert_eq!(card.title, "Adult Scene #1");
         assert_eq!(card.year, "2025");
         assert_eq!(card.duration, "3h 20m");
-        assert_eq!(card.provider, "jellyfin");
+        assert_eq!(card.provider, "adult_hub");
         assert_eq!(card.thumbnail_state, "missing");
         assert!(!card.is_played);
         assert!(card.is_favorite);
@@ -2571,9 +2502,8 @@ mod tests {
         let local_store = Arc::new(adult_hub_storage::LocalStore::open_in_memory().unwrap());
         let cred_store = Arc::new(adult_hub_storage::CredentialStore::new());
         let session_ctrl = Arc::new(PlaybackSessionController::new(local_store.clone()));
-        let jellyfin = Arc::new(adult_hub_client::JellyfinClient::new("test-device"));
         let resolver = Arc::new(adult_hub_client::ResolverClient::new());
-        let reporter = Arc::new(crate::reporter::PlaybackReporter::new(jellyfin.clone()));
+        let reporter = Arc::new(crate::reporter::PlaybackReporter::new());
         let phash_coord = crate::phash::PhashCoordinator::new(
             local_store.clone(),
             resolver.clone(),
@@ -2610,7 +2540,6 @@ mod tests {
             headers: Vec::new(),
             local_store,
             credential_store: cred_store,
-            jellyfin,
             resolver,
             reporter,
             session_ctrl,
@@ -2787,7 +2716,7 @@ mod tests {
             .save_progress("local", "vid-2338", 22_000, duration_ms)
             .unwrap();
 
-        // On Home screen, Jellyfin returns 51% completion (7,231,800,000 ticks)
+        // The server reports 51% completion (7,231,800,000 ticks)
         let home_item = TvItem {
             id: "vid-2338".into(),
             title: "Test 23:38 Video".into(),

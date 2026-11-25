@@ -2,7 +2,7 @@ use crate::MainWindow;
 use crate::catalog::{filter_catalog_items, sample_catalog_tv_items};
 use crate::context::AppContext;
 use crate::playback::{pick_media_file, show_error};
-use adult_hub_client::{GetItemsQuery, TvItem};
+use adult_hub_client::TvItem;
 use adult_hub_player::BufferProfile;
 use slint::ComponentHandle;
 use std::cell::Cell;
@@ -64,51 +64,44 @@ pub fn apply_and_persist_buffer_profile(
 pub fn select_random_candidate(ctx: &AppContext, current_id: Option<&str>) -> Option<TvItem> {
     let session = ctx.credential_store.get().ok().flatten();
     let chosen_item: Option<TvItem> = if let Some(session) = &session {
-        let parent_id = ctx
-            .local_store
-            .get_setting("selected_library_id")
-            .ok()
-            .flatten();
-        let page_res = ctx.jellyfin.get_items(
-            &session.server_url,
-            &session.user_id,
-            &session.access_token,
-            &GetItemsQuery {
-                parent_id: parent_id.as_deref(),
-                limit: 50,
-                sort_by: "Random",
-                ..Default::default()
-            },
-        );
-        match page_res {
-            Ok(page) => {
-                let total = page.total_record_count;
-                let items = if total > 50 && fastrand::bool() {
-                    let random_offset = fastrand::usize(0..total.saturating_sub(49));
-                    ctx.jellyfin
-                        .get_items(
-                            &session.server_url,
-                            &session.user_id,
-                            &session.access_token,
-                            &GetItemsQuery {
-                                parent_id: parent_id.as_deref(),
-                                start_index: random_offset,
-                                limit: 50,
-                                sort_by: "Random",
-                                ..Default::default()
-                            },
-                        )
-                        .map(|p| p.items)
-                        .unwrap_or(page.items)
-                } else {
-                    page.items
-                };
-                let filtered = filter_catalog_items(items, &ctx.local_store);
-                ctx.shuffle_engine.select_candidate(&filtered, current_id)
+        match adult_hub_client::AdultHubClient::new(&session.server_url) {
+            Ok(client) => {
+                let client = client.with_token(&session.access_token);
+                let page_res = client.get_videos(&adult_hub_client::CatalogVideosQuery {
+                    offset: Some(0),
+                    limit: Some(50),
+                    ..Default::default()
+                });
+                match page_res {
+                    Ok(page) => {
+                        let total = page.total_count;
+                        let items = if total > 50 && fastrand::bool() {
+                            let random_offset = fastrand::u64(0..total.saturating_sub(49));
+                            client
+                                .get_videos(&adult_hub_client::CatalogVideosQuery {
+                                    offset: Some(random_offset),
+                                    limit: Some(50),
+                                    ..Default::default()
+                                })
+                                .map(|p| p.items)
+                                .unwrap_or(page.items)
+                        } else {
+                            page.items
+                        };
+                        let items = items.into_iter().map(TvItem::from).collect::<Vec<_>>();
+                        let filtered = filter_catalog_items(items, &ctx.local_store);
+                        ctx.shuffle_engine.select_candidate(&filtered, current_id)
+                    }
+                    Err(err) => {
+                        crate::diagnostics::GLOBAL_LOG
+                            .w("Shuffle", &format!("Adult Hub random query failed: {err}"));
+                        None
+                    }
+                }
             }
             Err(err) => {
                 crate::diagnostics::GLOBAL_LOG
-                    .w("Shuffle", &format!("Jellyfin random query failed: {err}"));
+                    .w("Shuffle", &format!("Adult Hub client error: {err}"));
                 None
             }
         }
@@ -162,7 +155,6 @@ pub fn trigger_movie_switch(ui: &MainWindow, ctx: &AppContext, is_random: bool) 
             ctx.session_ctrl
                 .checkpoint_progress(prev, pos_ms, dur_ms, false);
         }
-        ctx.reporter.stop_session(pos_ms);
     }
 
     // 3. Pause active audio/video without stopping mpv pipeline or discarding buffer in background
@@ -288,7 +280,6 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
     let player = ctx.player.clone();
     let autoplay_active = ctx.autoplay_active.clone();
     let hwdec_active = ctx.hwdec_active.clone();
-    let reporter = ctx.reporter.clone();
     let current_item = ctx.current_playing_item.clone();
     let local_store = ctx.local_store.clone();
     let seek_repeat_state = Arc::new(Mutex::new(SeekRepeatState::default()));
@@ -297,7 +288,6 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
     {
         let weak = ui.as_weak();
         let player = player.clone();
-        let reporter = reporter.clone();
         ui.on_toggle_play(move || {
             let Some(ui) = weak.upgrade() else { return };
             if !ui.get_player_media_loaded() {
@@ -322,8 +312,6 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
                     } else {
                         "playing".into()
                     });
-                    let pos_ms = (player.position().unwrap_or(0.0) * 1000.0) as u64;
-                    reporter.report_progress_now(pos_ms, paused);
                 }
                 Err(error) => show_error(&ui, error.to_string()),
             }
@@ -359,7 +347,6 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
     {
         let weak = ui.as_weak();
         let player = player.clone();
-        let reporter = reporter.clone();
         ui.on_seek_to(move |seconds| {
             let Some(ui) = weak.upgrade() else { return };
             if !ui.get_player_media_loaded() {
@@ -368,9 +355,6 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
             let Some(player) = &player else { return };
             if let Err(error) = player.seek_absolute(seconds as f64) {
                 show_error(&ui, error.to_string());
-            } else {
-                let pos_ms = (seconds as f64 * 1000.0) as u64;
-                reporter.report_progress_now(pos_ms, player.is_paused());
             }
         });
     }
@@ -378,7 +362,6 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
     {
         let weak = ui.as_weak();
         let player = player.clone();
-        let reporter = reporter.clone();
         ui.on_seek_relative(move |seconds| {
             let Some(ui) = weak.upgrade() else { return };
             if !ui.get_player_media_loaded() {
@@ -387,9 +370,6 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
             let Some(player) = &player else { return };
             if let Err(error) = player.seek_relative(seconds as f64) {
                 show_error(&ui, error.to_string());
-            } else {
-                let pos_ms = (player.position().unwrap_or(0.0) * 1000.0) as u64;
-                reporter.report_progress_now(pos_ms, player.is_paused());
             }
         });
     }
@@ -397,7 +377,6 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
     {
         let weak = ui.as_weak();
         let player = player.clone();
-        let reporter = reporter.clone();
         let seek_repeat_state = seek_repeat_state.clone();
         let seek_feedback_generation = seek_feedback_generation.clone();
         ui.on_seek_with_acceleration(move |direction| {
@@ -435,8 +414,6 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
                 show_error(&ui, error.to_string());
                 return;
             }
-            let pos_ms = (player.position().unwrap_or(0.0) * 1000.0) as u64;
-            reporter.report_progress_now(pos_ms, player.is_paused());
 
             let feedback = format!("{delta_seconds:+}s");
             ui.set_seek_feedback(feedback.into());

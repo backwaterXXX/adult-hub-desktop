@@ -308,7 +308,7 @@ mod tests {
         let mut picked_ids = Vec::new();
         let mut current_id: Option<String> = None;
 
-        // Simulate 120 user shuffle selections where Jellyfin queries 50-item pages
+        // Simulate 120 user shuffle selections where the server queries 50-item pages
         // with randomized offsets for large collections:
         for _ in 0..120 {
             let total = total_items.len();

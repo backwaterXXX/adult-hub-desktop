@@ -12,36 +12,6 @@ static LOW_RAM_MODE: AtomicBool = AtomicBool::new(false);
 static CACHE_WRITE_LOCK: Mutex<()> = Mutex::new(());
 static RESOLVER_BASE_URL: OnceLock<RwLock<String>> = OnceLock::new();
 static RESOLVER_AUTH_TOKEN: OnceLock<RwLock<Option<String>>> = OnceLock::new();
-static JELLYFIN_BASE_URL: OnceLock<RwLock<String>> = OnceLock::new();
-static JELLYFIN_DEVICE_ID: OnceLock<RwLock<String>> = OnceLock::new();
-
-pub fn set_jellyfin_base_url(base_url: &str) {
-    if let Ok(mut current) = jellyfin_base_url().write() {
-        *current = base_url.trim().trim_end_matches('/').to_string();
-    }
-}
-
-#[cfg(test)]
-pub fn current_jellyfin_base_url() -> String {
-    jellyfin_base_url()
-        .read()
-        .map(|current| current.clone())
-        .unwrap_or_default()
-}
-
-fn jellyfin_base_url() -> &'static RwLock<String> {
-    JELLYFIN_BASE_URL.get_or_init(|| RwLock::new(String::new()))
-}
-
-pub fn set_jellyfin_device_id(device_id: &str) {
-    if let Ok(mut current) = jellyfin_device_id().write() {
-        *current = device_id.to_string();
-    }
-}
-
-fn jellyfin_device_id() -> &'static RwLock<String> {
-    JELLYFIN_DEVICE_ID.get_or_init(|| RwLock::new("adult-hub-desktop".into()))
-}
 
 /// Configure the persistent image cache. A zero limit keeps images in memory
 /// for the current view and does not retain them on disk.
@@ -121,7 +91,7 @@ pub fn clear_cache() {
 }
 
 /// Remove the exact image cache entries used for a card before an explicit
-/// retry. Jellyfin may serve a tagged image URL and an untagged fallback.
+/// retry. The server may serve a tagged image URL and an untagged fallback.
 pub fn invalidate_cached_image(url: &str) {
     let Ok(_guard) = CACHE_WRITE_LOCK.lock() else {
         return;
@@ -160,22 +130,6 @@ pub fn set_low_ram_mode(enabled: bool) {
     LOW_RAM_MODE.store(enabled, Ordering::Relaxed);
 }
 
-pub fn thumbnail_max_width() -> u32 {
-    if LOW_RAM_MODE.load(Ordering::Relaxed) {
-        320
-    } else {
-        480
-    }
-}
-
-pub fn person_thumbnail_max_width() -> u32 {
-    if LOW_RAM_MODE.load(Ordering::Relaxed) {
-        200
-    } else {
-        300
-    }
-}
-
 pub fn set_resolver_base_url(base_url: &str) {
     if let Ok(mut current) = resolver_base_url().write() {
         *current = base_url.trim().trim_end_matches('/').to_string();
@@ -186,9 +140,9 @@ fn resolver_base_url() -> &'static RwLock<String> {
     RESOLVER_BASE_URL.get_or_init(|| RwLock::new(String::new()))
 }
 
-/// Keep the active Jellyfin token available for Resolver image endpoints that
-/// use the same authentication contract as Resolver pHash operations. The
-/// request layer only sends this token to the configured Resolver origin.
+/// Keep the active Adult Hub token available for image endpoints that use the
+/// same authentication contract as Resolver pHash operations. The request layer
+/// only sends this token to the configured Resolver origin.
 pub fn set_resolver_auth_token(token: Option<&str>) {
     if let Ok(mut current) = resolver_auth_token().write() {
         *current = token.filter(|value| !value.is_empty()).map(str::to_owned);
@@ -559,40 +513,7 @@ fn send_image_request(
             .get(current.clone());
         // Keep credentials on the matching configured service origin only. A
         // redirect to a CDN or other host is fetched without auth headers.
-        if current.origin() == original.origin()
-            && is_jellyfin_item_image_url(current.as_str())
-            && let Some(token) = token.filter(|token| !token.is_empty())
-        {
-            let jellyfin_base = jellyfin_base_url()
-                .read()
-                .map(|base| base.clone())
-                .unwrap_or_default();
-            let server_origin_matches = if !jellyfin_base.is_empty() {
-                url::Url::parse(&jellyfin_base).ok().map(|u| u.origin()) == Some(current.origin())
-            } else {
-                false
-            };
-            if server_origin_matches {
-                let device_id = jellyfin_device_id()
-                    .read()
-                    .map(|value| value.clone())
-                    .unwrap_or_else(|_| "adult-hub-desktop".into());
-                let authorization = format!(
-                    "MediaBrowser Client=\"{}\", Device=\"Desktop\", DeviceId=\"{}\", Version=\"{}\", Token=\"{}\"",
-                    adult_hub_client::CLIENT_NAME,
-                    device_id,
-                    env!("CARGO_PKG_VERSION"),
-                    token
-                );
-                request = request
-                    .header("X-Emby-Authorization", &authorization)
-                    .header(reqwest::header::AUTHORIZATION, &authorization)
-                    .header("X-Emby-Token", token);
-            }
-        }
-        if is_resolver_origin_request(&original, &current, &resolver_base)
-            && !is_jellyfin_item_image_url(current.as_str())
-        {
+        if is_resolver_origin_request(&original, &current, &resolver_base) {
             let resolver_token = resolver_auth_token()
                 .read()
                 .ok()
@@ -1006,26 +927,10 @@ fn cache_temp_path(path: &std::path::Path) -> PathBuf {
     path.with_file_name(format!("{name}.{}.{sequence}.tmp", std::process::id()))
 }
 
-fn is_jellyfin_item_image_url(url: &str) -> bool {
-    let Ok(parsed) = url::Url::parse(url) else {
-        return false;
-    };
-    let segments = parsed
-        .path_segments()
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
-    segments.windows(3).any(|window| {
-        window[0].eq_ignore_ascii_case("Items")
-            && !window[1].is_empty()
-            && window[2].eq_ignore_ascii_case("Images")
-    })
-}
-
 /// Compact, credential-free identity of the image subject for diagnostics.
-/// Jellyfin/Person image URLs contribute the leading item GUID characters and
-/// the image type; everything else contributes only the host. Query parameters
-/// (image tags, api keys) are never included.
+/// Item image URLs contribute the leading item GUID characters and the image
+/// type; everything else contributes only the host. Query parameters (image
+/// tags, api keys) are never included.
 fn diagnostic_subject(url: &str) -> String {
     let Ok(parsed) = url::Url::parse(url) else {
         return "thumbnail".to_string();
@@ -1273,17 +1178,6 @@ mod tests {
     }
 
     #[test]
-    fn jellyfin_base_url_getter_and_clearing() {
-        super::set_jellyfin_base_url("https://jellyfin.example:8096/");
-        assert_eq!(
-            super::current_jellyfin_base_url(),
-            "https://jellyfin.example:8096"
-        );
-        super::set_jellyfin_base_url("");
-        assert_eq!(super::current_jellyfin_base_url(), "");
-    }
-
-    #[test]
     fn resolver_token_is_scoped_to_its_origin_and_not_redirected_hosts() {
         let original =
             url::Url::parse("https://resolver.example/admin/api/v2/video-phash/thumbnail?id=anon")
@@ -1361,79 +1255,6 @@ mod tests {
     }
 
     #[test]
-    fn jellyfin_auth_token_sent_only_to_configured_jellyfin_origin_and_fails_closed() {
-        let _guard = RESOLVER_REQUEST_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        // 1. Unset Jellyfin base fails closed (no token sent)
-        super::set_jellyfin_base_url("");
-        let listener_unconfigured = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let addr_unconfigured = listener_unconfigured.local_addr().unwrap();
-        let server_unconfigured = std::thread::spawn(move || {
-            let (mut stream, _) = listener_unconfigured.accept().unwrap();
-            let request = read_request(&mut stream);
-            respond(
-                &mut stream,
-                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
-            );
-            request
-        });
-
-        let result = super::send_image_request(
-            &format!(
-                "http://{addr_unconfigured}/Items/12345678-1234-4234-8234-123456789012/Images/Primary"
-            ),
-            Some("secret-jellyfin-token"),
-        );
-        assert!(result.is_ok());
-        let unconfigured_req = server_unconfigured.join().unwrap().to_ascii_lowercase();
-        assert!(!unconfigured_req.contains("x-emby-token"));
-        assert!(!unconfigured_req.contains("secret-jellyfin-token"));
-
-        // 2. Configured Jellyfin base sends token to configured origin but strips on redirect to CDN
-        let jf = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let jf_addr = jf.local_addr().unwrap();
-        let cdn = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let cdn_addr = cdn.local_addr().unwrap();
-
-        let cdn_server = std::thread::spawn(move || {
-            let (mut stream, _) = cdn.accept().unwrap();
-            let request = read_request(&mut stream);
-            respond(
-                &mut stream,
-                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
-            );
-            request
-        });
-
-        let jf_server = std::thread::spawn(move || {
-            let (mut stream, _) = jf.accept().unwrap();
-            let request = read_request(&mut stream);
-            let location = format!("http://{cdn_addr}/image.jpg");
-            let response = format!(
-                "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-            );
-            respond(&mut stream, response.as_bytes());
-            request
-        });
-
-        super::set_jellyfin_base_url(&format!("http://{jf_addr}"));
-        let result = super::send_image_request(
-            &format!("http://{jf_addr}/Items/12345678-1234-4234-8234-123456789012/Images/Primary"),
-            Some("secret-jellyfin-token"),
-        );
-        assert!(result.is_ok());
-        let jf_req = jf_server.join().unwrap().to_ascii_lowercase();
-        let cdn_req = cdn_server.join().unwrap().to_ascii_lowercase();
-        assert!(jf_req.contains("x-emby-token: secret-jellyfin-token"));
-        assert!(!cdn_req.contains("x-emby-token"));
-        assert!(!cdn_req.contains("secret-jellyfin-token"));
-
-        super::set_jellyfin_base_url("");
-    }
-
-    #[test]
     fn rejects_html_and_json_success_responses_as_invalid_image_responses() {
         assert!(is_non_image_content_type("text/html; charset=utf-8"));
         assert!(is_non_image_content_type("application/json"));
@@ -1448,7 +1269,7 @@ mod tests {
     fn diagnostic_subject_identifies_items_without_credentials() {
         assert_eq!(
             super::diagnostic_subject(
-                "https://jellyfin.example/Items/6ba7b810-9dad-11d1-80b4-00c04fd430c8/Images/Primary?tag=secret-tag&api_key=abc123"
+                "https://media.example/Items/6ba7b810-9dad-11d1-80b4-00c04fd430c8/Images/Primary?tag=secret-tag&api_key=abc123"
             ),
             "thumbnail for item 6ba7b810 (Primary)"
         );
@@ -1467,12 +1288,12 @@ mod tests {
     #[test]
     fn retry_invalidates_tagged_and_untagged_cache_keys() {
         let variants = cache_url_variants(
-            "https://jellyfin.example/Items/abc/Images/Primary?tag=opaque&quality=90",
+            "https://media.example/Items/abc/Images/Primary?tag=opaque&quality=90",
         );
         assert_eq!(variants.len(), 2);
         assert_eq!(
             variants[1],
-            "https://jellyfin.example/Items/abc/Images/Primary?quality=90"
+            "https://media.example/Items/abc/Images/Primary?quality=90"
         );
         assert!(cache_url_variants("").is_empty());
     }
@@ -1480,7 +1301,7 @@ mod tests {
     #[test]
     fn retry_removes_existing_tagged_and_untagged_cache_entries() {
         let url = format!(
-            "https://jellyfin.example/Items/retry-test/Images/Primary?tag=retry-{}&quality=90",
+            "https://media.example/Items/retry-test/Images/Primary?tag=retry-{}&quality=90",
             std::process::id()
         );
         let paths = cache_url_variants(&url)
@@ -1543,7 +1364,7 @@ mod tests {
         std::fs::write(&neighbor, b"leave this cache entry alone").unwrap();
 
         super::discard_corrupt_cache_entry(
-            "https://jellyfin.example/Items/12345678-1234-4234-8234-123456789012/Images/Primary",
+            "https://media.example/Items/12345678-1234-4234-8234-123456789012/Images/Primary",
             &corrupt,
         );
 

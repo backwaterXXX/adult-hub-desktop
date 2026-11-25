@@ -946,41 +946,12 @@ fn run_download_task(
     }
 
     // Step 2: Resolve media URL and headers
-    let is_adult_hub_api = match ctx.local_store.is_adult_hub_api_enabled() {
-        Ok(enabled) => enabled,
-        Err(e) => {
-            crate::diagnostics::GLOBAL_LOG.e(
-                "Download",
-                &format!("Failed to read Adult Hub API mode setting: {e}"),
-            );
-            *task
-                .status
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = DownloadStatus::Error(
-                "Could not verify storage configuration. Download aborted for safety.".into(),
-            );
-            manager.advance_queue_if_idle(ctx);
-            return;
-        }
-    };
     let session = ctx.credential_store.get().ok().flatten();
-    let server_url = session.as_ref().map(|s| s.server_url.as_str());
-    let resolver_url = ctx.get_resolver_url();
-    let access_token = session.as_ref().map(|s| s.access_token.as_str());
 
     let download_url;
     let mut download_headers = Vec::new();
     let mut is_local_file = false;
     let source_identity;
-
-    let item_opt = ctx.find_catalog_item(&task.item_id).or_else(|| {
-        ctx.current_playing_item
-            .lock()
-            .unwrap()
-            .as_ref()
-            .filter(|it| it.id == task.item_id)
-            .cloned()
-    });
 
     if task.item_id == "sample" || task.item_id == "sample2" {
         let filename = if task.item_id == "sample2" {
@@ -1001,7 +972,7 @@ fn run_download_task(
             .to_owned();
         is_local_file = true;
         source_identity = format!("direct:{download_url}");
-    } else if is_adult_hub_api {
+    } else {
         let Some(mut active_session) = session.clone() else {
             *task
                 .status
@@ -1132,72 +1103,6 @@ fn run_download_task(
             task.rendition_id.as_deref().unwrap_or("default"),
             stream_path
         );
-    } else if task.item_id.starts_with("telegram:")
-        || item_opt.as_ref().is_some_and(|it| it.is_telegram())
-    {
-        let Some(resolver) = resolver_url.as_deref().filter(|s| !s.is_empty()) else {
-            *task
-                .status
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = DownloadStatus::Error(
-                "Resolver URL is required to download Telegram videos. Configure it in Settings."
-                    .into(),
-            );
-            manager.advance_queue_if_idle(ctx);
-            return;
-        };
-        let dummy_item = item_opt.unwrap_or_else(|| TvItem {
-            id: task.item_id.clone(),
-            title: task.item_title.clone(),
-            source_provider: Some("telegram".into()),
-            provider_video_id: Some(
-                task.item_id
-                    .strip_prefix("telegram:")
-                    .unwrap_or(&task.item_id)
-                    .to_string(),
-            ),
-            ..Default::default()
-        });
-        match crate::session::PlaybackSessionController::resolve_stream_url(
-            &dummy_item,
-            server_url,
-            Some(resolver),
-            access_token,
-        ) {
-            Ok((url, _)) => download_url = url,
-            Err(e) => {
-                let formatted = e.replace("to play Telegram content", "to download Telegram video");
-                *task
-                    .status
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                    DownloadStatus::Error(format!("Download error: {formatted}"));
-                manager.advance_queue_if_idle(ctx);
-                return;
-            }
-        }
-        source_identity = format!("telegram:{}", task.item_id);
-    } else {
-        // Jellyfin media item: prefer direct static stream (the original unmodified media)
-        let server = server_url.unwrap_or("").trim_end_matches('/');
-        if server.is_empty() {
-            *task
-                .status
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                DownloadStatus::Error("Jellyfin server URL is required".into());
-            manager.advance_queue_if_idle(ctx);
-            return;
-        }
-        // The token travels in the X-Emby-Token header only, never in the URL,
-        // so it stays out of logs and copied URLs.
-        download_url = format!("{server}/Videos/{}/stream?static=true", task.item_id);
-        if let Some(token) = access_token {
-            if !token.is_empty() {
-                download_headers.push(("X-Emby-Token".to_string(), token.to_string()));
-            }
-        }
-        source_identity = format!("jellyfin:{}|{}", server, task.item_id);
     }
 
     let mut existing_bytes = 0;
@@ -1287,8 +1192,8 @@ fn run_download_task(
         .unwrap_or_else(std::sync::PoisonError::into_inner) = DownloadStatus::Downloading;
 
     // A request that carries the account token may only follow redirects within
-    // its own origin. reqwest does not strip custom headers such as X-Emby-Token
-    // on cross-host redirects, so the default policy would leak the token.
+    // its own origin. reqwest does not strip custom credential headers on
+    // cross-host redirects, so the default policy would leak the token.
     let redirect_policy = if download_headers.is_empty() {
         reqwest::redirect::Policy::default()
     } else {
@@ -1352,7 +1257,7 @@ fn run_download_task(
     };
 
     // If 401 in Adult Hub mode, attempt token renewal and retry once
-    if response.status() == reqwest::StatusCode::UNAUTHORIZED && is_adult_hub_api {
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
         let failed_token = download_headers
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))

@@ -1,41 +1,6 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ServerInfo {
-    pub id: String,
-    pub name: String,
-    pub version: String,
-    pub url: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AuthResult {
-    pub access_token: String,
-    pub user_id: String,
-    pub username: String,
-    pub server_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct QuickConnectInit {
-    pub code: String,
-    pub secret: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct QuickConnectStatus {
-    pub authenticated: bool,
-    pub secret: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TvLibrary {
-    pub id: String,
-    pub name: String,
-    pub collection_type: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TvPersonRole {
     pub id: String,
     pub name: String,
@@ -44,20 +9,12 @@ pub struct TvPersonRole {
     pub primary_image_tag: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct TvPersonDetails {
-    pub id: String,
-    pub name: String,
-    pub overview: Option<String>,
-    pub primary_image_tag: Option<String>,
-    pub child_count: Option<u32>,
-}
-
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct TvItem {
     pub id: String,
     pub title: String,
-    /// Origin reported by a Resolver DTO. Jellyfin API items leave this empty.
+    /// Origin reported by the catalog source (for example `adult_hub` or
+    /// `telegram`). Local files and legacy cache rows leave this empty.
     #[serde(default)]
     pub source_provider: Option<String>,
     pub overview: Option<String>,
@@ -123,10 +80,8 @@ impl TvItem {
     }
 
     /// True when the material is delivered by the Telegram resolver. That is
-    /// either a resolver row (`telegram:` id / `telegram` source provider) or a
-    /// Jellyfin library entry whose `telegram` ProviderId identifies the media
-    /// the `.strm` pointer refers to — such items stream through the resolver,
-    /// while their library metadata and watched state stay on Jellyfin.
+    /// either a resolver row (`telegram:` id / `telegram` source provider) or
+    /// an item whose `provider_video_id` identifies the Telegram media.
     pub fn is_telegram(&self) -> bool {
         self.id.starts_with("telegram:")
             || match self.source_provider.as_deref() {
@@ -391,95 +346,6 @@ pub enum PlayMethod {
     Transcode,
 }
 
-/// Server-selected stream and session metadata returned by Jellyfin PlaybackInfo.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlaybackResolution {
-    pub stream_url: String,
-    pub media_source_id: Option<String>,
-    pub play_session_id: Option<String>,
-    pub required_headers: Vec<String>,
-    pub play_method: PlayMethod,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PlaybackStartInfo {
-    #[serde(rename = "ItemId")]
-    pub item_id: String,
-    #[serde(rename = "MediaSourceId", skip_serializing_if = "Option::is_none")]
-    pub media_source_id: Option<String>,
-    #[serde(rename = "PositionTicks")]
-    pub position_ticks: i64,
-    #[serde(rename = "PlaySessionId", skip_serializing_if = "Option::is_none")]
-    pub play_session_id: Option<String>,
-    #[serde(rename = "CanSeek")]
-    pub can_seek: bool,
-    #[serde(rename = "IsMuted")]
-    pub is_muted: bool,
-    #[serde(rename = "IsPaused")]
-    pub is_paused: bool,
-    #[serde(rename = "RepeatMode")]
-    pub repeat_mode: String,
-    #[serde(rename = "PlaybackOrder")]
-    pub playback_order: String,
-    #[serde(rename = "PlayMethod")]
-    pub play_method: PlayMethod,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PlaybackProgressInfo {
-    #[serde(rename = "ItemId")]
-    pub item_id: String,
-    #[serde(rename = "MediaSourceId", skip_serializing_if = "Option::is_none")]
-    pub media_source_id: Option<String>,
-    #[serde(rename = "PositionTicks")]
-    pub position_ticks: i64,
-    #[serde(rename = "PlaySessionId", skip_serializing_if = "Option::is_none")]
-    pub play_session_id: Option<String>,
-    #[serde(rename = "CanSeek")]
-    pub can_seek: bool,
-    #[serde(rename = "IsMuted")]
-    pub is_muted: bool,
-    #[serde(rename = "IsPaused")]
-    pub is_paused: bool,
-    #[serde(rename = "RepeatMode")]
-    pub repeat_mode: String,
-    #[serde(rename = "PlaybackOrder")]
-    pub playback_order: String,
-    #[serde(rename = "PlayMethod")]
-    pub play_method: PlayMethod,
-}
-
-impl From<PlaybackStartInfo> for PlaybackProgressInfo {
-    fn from(start: PlaybackStartInfo) -> Self {
-        Self {
-            item_id: start.item_id,
-            media_source_id: start.media_source_id,
-            position_ticks: start.position_ticks,
-            play_session_id: start.play_session_id,
-            can_seek: start.can_seek,
-            is_muted: start.is_muted,
-            is_paused: start.is_paused,
-            repeat_mode: start.repeat_mode,
-            playback_order: start.playback_order,
-            play_method: start.play_method,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PlaybackStopInfo {
-    #[serde(rename = "ItemId")]
-    pub item_id: String,
-    #[serde(rename = "MediaSourceId", skip_serializing_if = "Option::is_none")]
-    pub media_source_id: Option<String>,
-    #[serde(rename = "PositionTicks")]
-    pub position_ticks: i64,
-    #[serde(rename = "PlaySessionId", skip_serializing_if = "Option::is_none")]
-    pub play_session_id: Option<String>,
-    #[serde(rename = "Failed")]
-    pub failed: bool,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PhashGenerationRequest {
     pub video_id: String,
@@ -650,8 +516,8 @@ mod tests {
     #[test]
     fn non_telegram_resolver_provider_is_not_misclassified_as_telegram() {
         let item: TvItem = VideoDto {
-            id: "jellyfin-item-id".into(),
-            provider: "jellyfin".into(),
+            id: "library-item-id".into(),
+            provider: "adult_hub".into(),
             provider_video_id: "remote-provider-id".into(),
             title: "A real library title".into(),
             slug: String::new(),
@@ -667,8 +533,8 @@ mod tests {
         }
         .into();
 
-        assert_eq!(item.id, "jellyfin-item-id");
-        assert_eq!(item.source_provider.as_deref(), Some("jellyfin"));
+        assert_eq!(item.id, "library-item-id");
+        assert_eq!(item.source_provider.as_deref(), Some("adult_hub"));
         assert_eq!(item.provider_video_id, None);
         assert!(!item.is_telegram());
     }

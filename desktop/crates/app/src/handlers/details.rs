@@ -1,19 +1,17 @@
 use crate::catalog::{
-    filter_catalog_items, sample_catalog_tv_items, set_catalog, tv_item_to_card,
-    tv_item_to_card_for_server,
+    sample_catalog_tv_items, set_catalog, tv_item_to_card, tv_item_to_card_for_server,
 };
 use crate::context::AppContext;
 use crate::playback::{format_time, show_error};
 use crate::session::PlaybackSessionController;
 use crate::{MainWindow, VideoCardData};
-use adult_hub_client::{JellyfinClient, TvItem};
+use adult_hub_client::TvItem;
 use slint::{ComponentHandle, Model};
 use std::rc::Rc;
 
 pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
     let local_store = ctx.local_store.clone();
     let credential_store = ctx.credential_store.clone();
-    let jellyfin = ctx.jellyfin.clone();
     let session_ctrl = ctx.session_ctrl.clone();
     let current_item = ctx.current_playing_item.clone();
     let cached_catalog = ctx.cached_catalog.clone();
@@ -86,9 +84,8 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
         let weak = ui.as_weak();
         let cached_catalog = cached_catalog.clone();
         let local_store = local_store.clone();
-        let session_ctrl = session_ctrl.clone();
         let credential_store = credential_store.clone();
-        let jellyfin = jellyfin.clone();
+        let session_ctrl = session_ctrl.clone();
         let ctx_detail = ctx.clone();
         ui.on_open_item_detail(move |id| {
             let Some(ui) = weak.upgrade() else { return };
@@ -282,26 +279,7 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                 .as_deref()
                 .filter(|t| !t.trim().is_empty())
             {
-                let trimmed = tag.trim();
-                let lower_tag = trimmed.to_ascii_lowercase();
-                if trimmed.starts_with('/')
-                    || lower_tag.starts_with("http://")
-                    || lower_tag.starts_with("https://")
-                {
-                    crate::thumbnails::resolve_resolver_thumbnail_url(trimmed)
-                } else if !is_telegram_item {
-                    artwork_server.as_ref().map(|server| {
-                        JellyfinClient::image_url(
-                            server,
-                            &target_item.id,
-                            "Backdrop/0",
-                            1920,
-                            Some(trimmed),
-                        )
-                    })
-                } else {
-                    None
-                }
+                crate::thumbnails::resolve_resolver_thumbnail_url(tag.trim())
             } else {
                 None
             };
@@ -400,7 +378,6 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                 .collect::<Vec<slint::SharedString>>();
 
             let mut performer_image_jobs = Vec::new();
-            let person_width = crate::thumbnails::person_thumbnail_max_width();
             let performer_cards = target_item
                 .people
                 .iter()
@@ -415,7 +392,7 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                 })
                 .take(20)
                 .map(|person| {
-                    // A stable Jellyfin person GUID plus its Primary tag yields
+                    // A stable person GUID plus its artwork path yields
                     // the exact URL the profile screen uses for this actor, so
                     // both surfaces share one portrait cache entry. Name-slug
                     // IDs (resolver items) and tag-less entries are resolved
@@ -425,28 +402,7 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                         .as_deref()
                         .filter(|tag| !tag.trim().is_empty())
                     {
-                        let trimmed = tag.trim();
-                        let lower_tag = trimmed.to_ascii_lowercase();
-                        if trimmed.starts_with('/')
-                            || lower_tag.starts_with("http://")
-                            || lower_tag.starts_with("https://")
-                        {
-                            crate::thumbnails::resolve_resolver_thumbnail_url(trimmed)
-                        } else if let Some(server) = artwork_server.as_ref() {
-                            if uuid::Uuid::parse_str(&person.id).is_ok() {
-                                Some(JellyfinClient::image_url(
-                                    server,
-                                    &person.id,
-                                    "Primary",
-                                    person_width,
-                                    Some(trimmed),
-                                ))
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
+                        crate::thumbnails::resolve_resolver_thumbnail_url(tag.trim())
                     } else {
                         None
                     };
@@ -508,7 +464,7 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                 if is_telegram_item {
                     "Telegram".to_string()
                 } else {
-                    "Jellyfin".to_string()
+                    "Adult Hub".to_string()
                 }
             });
 
@@ -548,120 +504,8 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
             ui.set_detail_resume_text(resume_text.into());
             let perf_model = Rc::new(slint::VecModel::from(performers));
             ui.set_detail_performers(perf_model.into());
-            let needs_cast_lookup = performer_cards.is_empty();
             ui.set_detail_performer_cards(Rc::new(slint::VecModel::from(performer_cards)).into());
             ui.set_detail_scroll_y(0.0);
-
-            // Resolver listings and older cache entries often carry no cast, so
-            // the section stays hidden. Recover it from the matching Jellyfin
-            // entry without blocking the UI thread.
-            let cast_session = if needs_cast_lookup {
-                artwork_session.clone()
-            } else {
-                None
-            };
-            if let Some(session) = cast_session {
-                let weak = weak.clone();
-                let detail_id = target_item.id.clone();
-                let detail_title = target_item.title.clone();
-                let provider_video_id = target_item.provider_video_id.clone();
-                let jellyfin = jellyfin.clone();
-                std::thread::spawn(move || {
-                    let resolved = provider_video_id
-                        .as_deref()
-                        .and_then(|provider_id| {
-                            jellyfin
-                                .find_telegram_item(
-                                    &session.server_url,
-                                    &session.user_id,
-                                    &session.access_token,
-                                    provider_id,
-                                    &detail_title,
-                                )
-                                .ok()
-                                .flatten()
-                        })
-                        .or_else(|| {
-                            // Only a GUID can address a Jellyfin item directly.
-                            // Resolver and `telegram:` ids would just 404.
-                            uuid::Uuid::parse_str(&detail_id).ok()?;
-                            jellyfin
-                                .get_item_details(
-                                    &session.server_url,
-                                    &session.user_id,
-                                    &session.access_token,
-                                    &detail_id,
-                                )
-                                .ok()
-                        });
-                    let Some(resolved) = resolved else { return };
-                    let person_width = crate::thumbnails::person_thumbnail_max_width();
-                    let cards = resolved
-                        .people
-                        .into_iter()
-                        .filter(|person| !person.name.trim().is_empty())
-                        .filter(|person| {
-                            person
-                                .person_type
-                                .as_deref()
-                                .is_none_or(|kind| kind.eq_ignore_ascii_case("actor"))
-                        })
-                        .take(20)
-                        .map(|person| {
-                            let image_bytes = person
-                                .primary_image_tag
-                                .as_deref()
-                                .filter(|tag| !tag.trim().is_empty())
-                                .and_then(|tag| {
-                                    uuid::Uuid::parse_str(&person.id).ok()?;
-                                    Some(JellyfinClient::image_url(
-                                        &session.server_url,
-                                        &person.id,
-                                        "Primary",
-                                        person_width,
-                                        Some(tag),
-                                    ))
-                                })
-                                .and_then(|url| {
-                                    crate::thumbnails::load_cached_image_bytes(&url).or_else(|| {
-                                        crate::thumbnails::fetch_and_cache_image_bytes(
-                                            &url,
-                                            Some(&session.access_token),
-                                        )
-                                    })
-                                });
-                            (person, image_bytes)
-                        })
-                        .collect::<Vec<_>>();
-                    if cards.is_empty() {
-                        return;
-                    }
-                    let _ = slint::invoke_from_event_loop(move || {
-                        let Some(ui) = weak.upgrade() else { return };
-                        if ui.get_detail_id() != detail_id.as_str()
-                            || ui.get_detail_performer_cards().row_count() > 0
-                        {
-                            return;
-                        }
-                        let cards = cards
-                            .into_iter()
-                            .map(|(person, image_bytes)| {
-                                let image = image_bytes
-                                    .as_deref()
-                                    .and_then(crate::thumbnails::image_from_bytes);
-                                crate::PerformerCardData {
-                                    id: person.id.into(),
-                                    name: person.name.into(),
-                                    role: person.role.as_deref().unwrap_or("Actor").into(),
-                                    has_image: image.is_some(),
-                                    image: image.unwrap_or_default(),
-                                }
-                            })
-                            .collect::<Vec<_>>();
-                        ui.set_detail_performer_cards(Rc::new(slint::VecModel::from(cards)).into());
-                    });
-                });
-            }
 
             // The library entry size is unreliable for referrals (.strm) and is
             // often absent entirely. Resolve the real media size off the UI
@@ -671,14 +515,12 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                 let item_id = target_item.id.clone();
                 let item_for_size = target_item.clone();
                 let session_for_size = artwork_session.clone();
-                let jellyfin_for_size = jellyfin.clone();
                 let ctx_for_size = ctx_detail.clone();
                 std::thread::spawn(move || {
                     let Some(bytes) = resolve_real_media_size(
                         &item_for_size,
                         &ctx_for_size,
                         session_for_size.as_ref(),
-                        &jellyfin_for_size,
                     ) else {
                         return;
                     };
@@ -755,7 +597,7 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                     .collect();
             let sim_model = Rc::new(slint::VecModel::from(similar_cards));
             ui.set_detail_similar_items(sim_model.into());
-            ui.set_detail_similar_loading(!is_telegram_item && artwork_session.is_some());
+            ui.set_detail_similar_loading(false);
 
             if !initial_sim_image_jobs.is_empty() {
                 let weak = weak.clone();
@@ -815,7 +657,7 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                     ) else {
                         return;
                     };
-                    // Reject empty/black Jellyfin artwork just like Android TV. The
+                    // Reject empty/black artwork just like Android TV. The
                     // detail poster remains visible underneath as the fallback.
                     if crate::thumbnails::is_poor_thumbnail_bytes(&image_bytes) {
                         return;
@@ -863,50 +705,17 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                 let weak = weak.clone();
                 let item_id = target_item.id.clone();
                 let session_for_cast = artwork_session.clone();
-                let jellyfin_for_cast = jellyfin.clone();
                 std::thread::spawn(move || {
                     let Some(session) = session_for_cast else {
                         return;
                     };
                     let token = session.access_token.as_str();
-                    for (person_id, direct_url, name) in performer_image_jobs {
-                        let mut bytes = direct_url.as_deref().and_then(|url| {
+                    for (person_id, direct_url, _name) in performer_image_jobs {
+                        let bytes = direct_url.as_deref().and_then(|url| {
                             crate::thumbnails::load_cached_image_bytes(url).or_else(|| {
                                 crate::thumbnails::fetch_and_cache_image_bytes(url, Some(token))
                             })
                         });
-                        if bytes.is_none() {
-                            // Fall back to the actor data service: the Persons
-                            // endpoint returns the stable GUID and Primary tag,
-                            // so the retrieved portrait equals the one shown on
-                            // the actor profile and in the Performers shelf.
-                            if let Ok(person) = jellyfin_for_cast.get_person(
-                                &session.server_url,
-                                &session.user_id,
-                                token,
-                                &name,
-                            ) && let Some(tag) = person
-                                .primary_image_tag
-                                .as_deref()
-                                .filter(|tag| !tag.trim().is_empty())
-                            {
-                                let url = JellyfinClient::image_url(
-                                    &session.server_url,
-                                    &person.id,
-                                    "Primary",
-                                    person_width,
-                                    Some(tag),
-                                );
-                                bytes = crate::thumbnails::load_cached_image_bytes(&url).or_else(
-                                    || {
-                                        crate::thumbnails::fetch_and_cache_image_bytes(
-                                            &url,
-                                            Some(token),
-                                        )
-                                    },
-                                );
-                            }
-                        }
                         let Some(image_bytes) = bytes else {
                             continue;
                         };
@@ -937,123 +746,6 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                         });
                     }
                 });
-            }
-
-            if !is_telegram_item {
-                if let Some(session) = artwork_session {
-                    let weak = weak.clone();
-                    let detail_id = target_item.id.clone();
-                    let jellyfin = jellyfin.clone();
-                    let local_store = local_store.clone();
-                    std::thread::spawn(move || {
-                        let similar_result = jellyfin.get_similar_items(
-                            &session.server_url,
-                            &session.access_token,
-                            &detail_id,
-                            12,
-                        );
-                        let similar_items = match similar_result {
-                            Ok(items) => filter_catalog_items(items, &local_store),
-                            Err(_) => {
-                                let _ = slint::invoke_from_event_loop(move || {
-                                    if let Some(ui) = weak.upgrade()
-                                        && ui.get_detail_id() == detail_id.as_str()
-                                    {
-                                        ui.set_detail_similar_loading(false);
-                                    }
-                                });
-                                return;
-                            }
-                        };
-
-                        let weak = weak.clone();
-                        let detail_id_for_ui = detail_id.clone();
-                        let server_url = session.server_url.clone();
-                        let token = session.access_token.clone();
-                        let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(ui) = weak.upgrade()
-                                && ui.get_detail_id() == detail_id_for_ui.as_str()
-                            {
-                                if !similar_items.is_empty() {
-                                    let cards = similar_items
-                                        .iter()
-                                        .map(|item| tv_item_to_card_for_server(item, &server_url))
-                                        .collect::<Vec<_>>();
-                                    let image_jobs = cards
-                                        .iter()
-                                        .filter(|card| {
-                                            !card.has_thumbnail
-                                                || (card.provider == "telegram"
-                                                    && !card.fallback_thumbnail_url.is_empty())
-                                        })
-                                        .map(|card| {
-                                            (
-                                                card.id.to_string(),
-                                                crate::catalog::ThumbnailRequest::from(card),
-                                            )
-                                        })
-                                        .collect::<Vec<_>>();
-                                    ui.set_detail_similar_items(
-                                        Rc::new(slint::VecModel::from(cards)).into(),
-                                    );
-
-                                    if !image_jobs.is_empty() {
-                                        let weak = weak.clone();
-                                        let detail_id = detail_id_for_ui.clone();
-                                        std::thread::spawn(move || {
-                                            for (card_id, request) in image_jobs {
-                                                let Some(thumbnail) =
-                                                    crate::catalog::fetch_card_thumbnail(
-                                                        &request,
-                                                        Some(&token),
-                                                    )
-                                                else {
-                                                    continue;
-                                                };
-                                                let weak = weak.clone();
-                                                let detail_id = detail_id.clone();
-                                                let _ = slint::invoke_from_event_loop(move || {
-                                                    if let Some(ui) = weak.upgrade()
-                                                        && ui.get_detail_id() == detail_id.as_str()
-                                                        && let Some(image) =
-                                                            crate::thumbnails::image_from_bytes(
-                                                                &thumbnail.bytes,
-                                                            )
-                                                    {
-                                                        let model = ui.get_detail_similar_items();
-                                                        let mut cards = (0..model.row_count())
-                                                            .filter_map(|row| model.row_data(row))
-                                                            .collect::<Vec<_>>();
-                                                        // Attach by stable record id, never by
-                                                        // the index captured at batch start.
-                                                        if let Some(card) =
-                                                            cards.iter_mut().find(|card| {
-                                                                card.id == card_id.as_str()
-                                                            })
-                                                        {
-                                                            card.thumbnail = image;
-                                                            card.thumbnail_url =
-                                                                thumbnail.url.into();
-                                                            card.has_thumbnail = true;
-                                                            card.thumbnail_state = "ready".into();
-                                                            ui.set_detail_similar_items(
-                                                                Rc::new(slint::VecModel::from(
-                                                                    cards,
-                                                                ))
-                                                                .into(),
-                                                            );
-                                                        }
-                                                    }
-                                                });
-                                            }
-                                        });
-                                    }
-                                }
-                                ui.set_detail_similar_loading(false);
-                            }
-                        });
-                    });
-                }
             }
         });
     }
@@ -1090,164 +782,94 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
         let weak = ui.as_weak();
         let cached_catalog = cached_catalog.clone();
         let credential_store = credential_store.clone();
-        let jellyfin = jellyfin.clone();
-        let local_store = local_store.clone();
         let detail_fav_in_flight = adult_hub_client::InFlightGuard::new();
         ui.on_toggle_detail_favorite(move |id| {
             let Some(ui) = weak.upgrade() else { return };
             let id = id.to_string();
             let new_fav = !ui.get_detail_is_favorite();
-            let is_api_mode = local_store.is_adult_hub_api_enabled().unwrap_or(false);
-
-            if is_api_mode {
-                let Some(slot) = detail_fav_in_flight.acquire(&id) else {
-                    log::debug!(
-                        "Favorite toggle for {id} is already in-flight; ignoring duplicate click"
-                    );
-                    return;
-                };
-
-                let Some(session) = credential_store.get().ok().flatten() else {
-                    drop(slot);
-                    ui.set_status("Sign in to Adult Hub to change favorites".into());
-                    ui.set_status_color(slint::Color::from_rgb_u8(244, 67, 54));
-                    return;
-                };
-
-                let item_id = id.clone();
-                let weak = weak.clone();
-                let cached_catalog = cached_catalog.clone();
-
-                std::thread::spawn(move || {
-                    let client = match adult_hub_client::AdultHubClient::new(&session.server_url) {
-                        Ok(c) => c.with_token(&session.access_token),
-                        Err(e) => {
-                            let _ = slint::invoke_from_event_loop(move || {
-                                if let Some(ui) = weak.upgrade() {
-                                    ui.set_status(format!("Adult Hub client error: {e}").into());
-                                    ui.set_status_color(slint::Color::from_rgb_u8(244, 67, 54));
-                                }
-                                drop(slot);
-                            });
-                            return;
-                        }
-                    };
-
-                    let res = if new_fav {
-                        client.add_favorite(&item_id)
-                    } else {
-                        client.remove_favorite(&item_id)
-                    };
-
-                    match res {
-                        Ok(resp) => {
-                            let actual_fav = resp.is_favorite;
-                            let canonical_vid = resp.video_id;
-                            let _ = slint::invoke_from_event_loop(move || {
-                                if let Some(ui) = weak.upgrade() {
-                                    ui.set_detail_is_favorite(actual_fav);
-                                    let mut list = cached_catalog
-                                        .lock()
-                                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                                    for item in list.iter_mut() {
-                                        if item.id == item_id
-                                            || canonical_vid.as_deref() == Some(&item.id)
-                                        {
-                                            item.is_favorite = actual_fav;
-                                        }
-                                    }
-                                    let cards =
-                                        list.iter().map(tv_item_to_card).collect::<Vec<_>>();
-                                    drop(list);
-                                    set_catalog(&ui, cards);
-                                    ui.set_status(
-                                        if actual_fav {
-                                            "Added to favorites"
-                                        } else {
-                                            "Removed from favorites"
-                                        }
-                                        .into(),
-                                    );
-                                    ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
-                                }
-                                drop(slot);
-                            });
-                        }
-                        Err(err) => {
-                            let _ = slint::invoke_from_event_loop(move || {
-                                if let Some(ui) = weak.upgrade() {
-                                    ui.set_status(
-                                        format!("Could not update favorite: {err}").into(),
-                                    );
-                                    ui.set_status_color(slint::Color::from_rgb_u8(244, 67, 54));
-                                }
-                                drop(slot);
-                            });
-                        }
-                    }
-                });
+            let Some(slot) = detail_fav_in_flight.acquire(&id) else {
+                log::debug!(
+                    "Favorite toggle for {id} is already in-flight; ignoring duplicate click"
+                );
                 return;
-            }
+            };
 
-            ui.set_detail_is_favorite(new_fav);
+            let Some(session) = credential_store.get().ok().flatten() else {
+                drop(slot);
+                ui.set_status("Sign in to Adult Hub to change favorites".into());
+                ui.set_status_color(slint::Color::from_rgb_u8(244, 67, 54));
+                return;
+            };
 
-            let mut list = cached_catalog
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(item) = list.iter_mut().find(|i| i.id == id) {
-                item.is_favorite = new_fav;
-            }
-            let cards = list.iter().map(tv_item_to_card).collect::<Vec<_>>();
-            drop(list);
-            set_catalog(&ui, cards);
+            let item_id = id.clone();
+            let weak = weak.clone();
+            let cached_catalog = cached_catalog.clone();
 
-            let session = credential_store.get().ok().flatten();
-            if let Some(sess) = session {
-                let jf = jellyfin.clone();
-                let item_id = id.clone();
-                let weak = weak.clone();
-                let cached_catalog = cached_catalog.clone();
-                std::thread::spawn(move || {
-                    if jf
-                        .toggle_favorite(
-                            &sess.server_url,
-                            &sess.user_id,
-                            &sess.access_token,
-                            &item_id,
-                            new_fav,
-                        )
-                        .is_err()
-                    {
+            std::thread::spawn(move || {
+                let client = match adult_hub_client::AdultHubClient::new(&session.server_url) {
+                    Ok(c) => c.with_token(&session.access_token),
+                    Err(e) => {
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(ui) = weak.upgrade() {
-                                ui.set_detail_is_favorite(!new_fav);
-                                let mut items = cached_catalog
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                                if let Some(item) = items.iter_mut().find(|item| item.id == item_id)
-                                {
-                                    item.is_favorite = !new_fav;
-                                }
-                                set_catalog(&ui, items.iter().map(tv_item_to_card).collect());
-                                ui.set_status("Could not update favorite state on Jellyfin".into());
+                                ui.set_status(format!("Adult Hub client error: {e}").into());
                                 ui.set_status_color(slint::Color::from_rgb_u8(244, 67, 54));
                             }
+                            drop(slot);
+                        });
+                        return;
+                    }
+                };
+
+                let res = if new_fav {
+                    client.add_favorite(&item_id)
+                } else {
+                    client.remove_favorite(&item_id)
+                };
+
+                match res {
+                    Ok(resp) => {
+                        let actual_fav = resp.is_favorite;
+                        let canonical_vid = resp.video_id;
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = weak.upgrade() {
+                                ui.set_detail_is_favorite(actual_fav);
+                                let mut list = cached_catalog
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                for item in list.iter_mut() {
+                                    if item.id == item_id
+                                        || canonical_vid.as_deref() == Some(&item.id)
+                                    {
+                                        item.is_favorite = actual_fav;
+                                    }
+                                }
+                                let cards = list.iter().map(tv_item_to_card).collect::<Vec<_>>();
+                                drop(list);
+                                set_catalog(&ui, cards);
+                                ui.set_status(
+                                    if actual_fav {
+                                        "Added to favorites"
+                                    } else {
+                                        "Removed from favorites"
+                                    }
+                                    .into(),
+                                );
+                                ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
+                            }
+                            drop(slot);
                         });
                     }
-                });
-            } else {
-                ui.set_detail_is_favorite(!new_fav);
-                if let Some(item) = cached_catalog
-                    .lock()
-                    .unwrap()
-                    .iter_mut()
-                    .find(|item| item.id == id)
-                {
-                    item.is_favorite = !new_fav;
+                    Err(err) => {
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = weak.upgrade() {
+                                ui.set_status(format!("Could not update favorite: {err}").into());
+                                ui.set_status_color(slint::Color::from_rgb_u8(244, 67, 54));
+                            }
+                            drop(slot);
+                        });
+                    }
                 }
-                ui.set_status("Sign in to Jellyfin to change favorites".into());
-                ui.set_status_color(slint::Color::from_rgb_u8(244, 67, 54));
-            }
+            });
         });
     }
 
@@ -1258,12 +880,10 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
         let cached_catalog = cached_catalog.clone();
         let home_catalog = home_catalog.clone();
         let credential_store = credential_store.clone();
-        let jellyfin = jellyfin.clone();
-        let local_store = local_store.clone();
         let player_fav_in_flight = adult_hub_client::InFlightGuard::new();
         ui.on_toggle_player_favorite(move || {
             let Some(ui) = weak.upgrade() else { return };
-            let Some(mut item) = current_item
+            let Some(item) = current_item
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone()
@@ -1272,8 +892,7 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                 return;
             };
 
-            let is_api_mode = local_store.is_adult_hub_api_enabled().unwrap_or(false);
-            if is_api_mode {
+            {
                 let Some(slot) = player_fav_in_flight.acquire(&item.id) else {
                     log::debug!(
                         "Player favorite toggle for {} is already in-flight",
@@ -1375,112 +994,7 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                         }
                     }
                 });
-                return;
             }
-
-            if item.is_telegram() || uuid::Uuid::parse_str(&item.id).is_err() {
-                ui.set_status("Favorites are available for Jellyfin library items".into());
-                ui.set_status_color(slint::Color::from_rgb_u8(244, 177, 66));
-                return;
-            }
-            let Some(session) = credential_store.get().ok().flatten() else {
-                show_error(&ui, "Sign in to Jellyfin to change favorites");
-                return;
-            };
-
-            let new_favorite = !item.is_favorite;
-            item.is_favorite = new_favorite;
-            *current_item
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(item.clone());
-            for catalog in [&cached_catalog, &home_catalog] {
-                if let Some(cached) = catalog
-                    .lock()
-                    .unwrap()
-                    .iter_mut()
-                    .find(|cached| cached.id == item.id)
-                {
-                    cached.is_favorite = new_favorite;
-                }
-            }
-            ui.set_player_is_favorite(new_favorite);
-            {
-                let catalog = cached_catalog
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                set_catalog(&ui, catalog.iter().map(tv_item_to_card).collect());
-            }
-
-            let weak = weak.clone();
-            let current_item = current_item.clone();
-            let cached_catalog = cached_catalog.clone();
-            let home_catalog = home_catalog.clone();
-            let jellyfin = jellyfin.clone();
-            let item_id = item.id.clone();
-            std::thread::spawn(move || {
-                if jellyfin
-                    .toggle_favorite(
-                        &session.server_url,
-                        &session.user_id,
-                        &session.access_token,
-                        &item.id,
-                        new_favorite,
-                    )
-                    .is_ok()
-                {
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = weak.upgrade() {
-                            ui.set_status(
-                                if new_favorite {
-                                    "Added to favorites"
-                                } else {
-                                    "Removed from favorites"
-                                }
-                                .into(),
-                            );
-                            ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
-                            ui.invoke_refresh_home();
-                        }
-                    });
-                    return;
-                }
-
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = weak.upgrade() {
-                        let mut current_matches = false;
-                        if let Some(item) = current_item
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .as_mut()
-                        {
-                            if item.id == item_id {
-                                item.is_favorite = !new_favorite;
-                                current_matches = true;
-                            }
-                        }
-                        if current_matches {
-                            ui.set_player_is_favorite(!new_favorite);
-                        }
-                        for catalog in [&cached_catalog, &home_catalog] {
-                            if let Some(item) = catalog
-                                .lock()
-                                .unwrap()
-                                .iter_mut()
-                                .find(|item| item.id == item_id)
-                            {
-                                item.is_favorite = !new_favorite;
-                            }
-                        }
-                        let catalog = cached_catalog
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        set_catalog(&ui, catalog.iter().map(tv_item_to_card).collect());
-                        ui.set_status("Could not update favorite state on Jellyfin".into());
-                        ui.set_status_color(slint::Color::from_rgb_u8(244, 67, 54));
-                        ui.invoke_refresh_home();
-                    }
-                });
-            });
         });
     }
 
@@ -1488,8 +1002,6 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
     {
         let weak = ui.as_weak();
         let cached_catalog = cached_catalog.clone();
-        let credential_store = credential_store.clone();
-        let jellyfin = jellyfin.clone();
         let local_store = local_store.clone();
         ui.on_toggle_detail_played(move |id| {
             let Some(ui) = weak.upgrade() else { return };
@@ -1515,21 +1027,6 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
             if id.starts_with("telegram:") {
                 let prov_id = id.strip_prefix("telegram:").unwrap_or(&id);
                 let _ = local_store.mark_telegram_played(prov_id, new_played, None, None, None);
-            }
-
-            let session = credential_store.get().ok().flatten();
-            if let Some(sess) = session {
-                let jf = jellyfin.clone();
-                let item_id = id.clone();
-                std::thread::spawn(move || {
-                    let _ = jf.toggle_played(
-                        &sess.server_url,
-                        &sess.user_id,
-                        &sess.access_token,
-                        &item_id,
-                        new_played,
-                    );
-                });
             }
         });
     }
@@ -1740,11 +1237,7 @@ fn is_non_media_content_type(content_type: &str) -> bool {
 /// the origin that issued the URL receives credentials; redirects are
 /// followed manually without auth headers. Also used by the connection
 /// diagnostics as a stream-access check.
-pub(crate) fn probe_remote_media_size(
-    url: &str,
-    token: Option<&str>,
-    extra_headers: &[String],
-) -> Option<u64> {
+pub(crate) fn probe_remote_media_size(url: &str, extra_headers: &[String]) -> Option<u64> {
     let original = url::Url::parse(url).ok()?;
     if !matches!(original.scheme(), "http" | "https") {
         return None;
@@ -1763,11 +1256,6 @@ pub(crate) fn probe_remote_media_size(
             if let Some((name, value)) = header.split_once(':') {
                 request = request.header(name.trim(), value.trim());
             }
-        }
-        if current.origin() == original.origin()
-            && let Some(token) = token.filter(|token| !token.is_empty())
-        {
-            request = request.header("X-Emby-Token", token);
         }
         let Ok(response) = request.send() else {
             return None;
@@ -1823,12 +1311,11 @@ pub(crate) fn probe_remote_media_size(
 }
 
 /// Trusted media size, tried in order: completed download, the active player
-/// stream, Jellyfin's resolved playback URL, then the resolver stream URL.
+/// stream, then the resolver stream URL.
 fn resolve_real_media_size(
     item: &TvItem,
     ctx: &AppContext,
     session: Option<&adult_hub_storage::Session>,
-    jellyfin: &JellyfinClient,
 ) -> Option<u64> {
     if let Some(done) = ctx
         .download_manager
@@ -1861,21 +1348,6 @@ fn resolve_real_media_size(
     }
 
     let session = session?;
-    if uuid::Uuid::parse_str(&item.id).is_ok()
-        && let Ok(resolution) = jellyfin.resolve_playback(
-            &session.server_url,
-            &session.user_id,
-            &session.access_token,
-            &item.id,
-        )
-        && let Some(size) = probe_remote_media_size(
-            &resolution.stream_url,
-            Some(&session.access_token),
-            &resolution.required_headers,
-        )
-    {
-        return Some(size);
-    }
 
     if item.is_telegram() {
         let resolver_url =
@@ -1885,7 +1357,7 @@ fn resolve_real_media_size(
             Some(&session.server_url),
             resolver_url.as_deref(),
             Some(&session.access_token),
-        ) && let Some(size) = probe_remote_media_size(&stream_url, None, &[])
+        ) && let Some(size) = probe_remote_media_size(&stream_url, &[])
         {
             return Some(size);
         }
@@ -1931,7 +1403,7 @@ mod tests {
 
     #[test]
     fn test_resolve_item_telegram_id_from_provider_video_id() {
-        let mut item = TvItem::new("jellyfin-guid-1234", "Sample Video");
+        let mut item = TvItem::new("library-guid-1234", "Sample Video");
         item.provider_video_id = Some("-100123456789:456:789".into());
         assert_eq!(
             resolve_item_telegram_id(&item, None),
@@ -1973,31 +1445,6 @@ mod tests {
     fn test_resolve_item_telegram_id_empty_for_regular_media() {
         let item = TvItem::new("regular-id-888", "Standard Movie");
         assert_eq!(resolve_item_telegram_id(&item, None), None);
-    }
-
-    #[test]
-    fn test_favorites_api_mode_vs_jellyfin_mode_eligibility() {
-        use adult_hub_storage::LocalStore;
-
-        let store = LocalStore::open_in_memory().unwrap();
-        // Default mode is false (Jellyfin mode)
-        assert!(!store.is_adult_hub_api_enabled().unwrap());
-
-        let tg_item = TvItem::new("telegram:-100123:456:789", "Telegram Scene");
-        let jf_guid_item = TvItem::new("a1b2c3d4-e5f6-7890-abcd-ef1234567890", "Jellyfin Scene");
-
-        // In Jellyfin mode: Telegram items are NOT eligible for player favorites
-        assert!(tg_item.is_telegram());
-        assert!(uuid::Uuid::parse_str(&tg_item.id).is_err());
-        // Jellyfin UUID items ARE eligible in Jellyfin mode
-        assert!(uuid::Uuid::parse_str(&jf_guid_item.id).is_ok());
-
-        // Enable Adult Hub API mode
-        store.set_adult_hub_api_enabled(true).unwrap();
-        assert!(store.is_adult_hub_api_enabled().unwrap());
-
-        // In Adult Hub API mode, Telegram items ARE eligible for favorites
-        assert!(!tg_item.id.is_empty());
     }
 
     #[test]

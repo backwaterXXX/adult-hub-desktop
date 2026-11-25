@@ -1,8 +1,8 @@
+use crate::MainWindow;
 use crate::catalog::set_catalog;
 use crate::context::AppContext;
 use crate::playback::{export_file_dialog, pick_config_file, show_error};
-use crate::{LibraryOptionData, MainWindow};
-use adult_hub_client::{GetItemsQuery, JellyfinClient, ServiceUrlPolicy, ServiceUrlValidation};
+use adult_hub_client::{AdultHubClient, ServiceUrlPolicy, ServiceUrlValidation};
 use slint::ComponentHandle;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -68,11 +68,10 @@ impl Check {
 /// Diagnostic text must never carry credentials: image and stream URLs embed
 /// `api_key=`, and transport errors echo the full request URL and auth headers.
 fn redact_diagnostics(text: &str) -> String {
-    const SECRETS: [&str; 6] = [
+    const SECRETS: [&str; 5] = [
         "api_key",
         "apikey",
-        "x-emby-token",
-        "x-emby-authorization",
+        "access_token",
         "authorization",
         "token",
     ];
@@ -146,34 +145,31 @@ fn timed<T: Send + 'static>(
         .map_err(|_| format!("no response within {secs}s"))
 }
 
-fn jellyfin_thumbnail_probe(
-    jellyfin: &JellyfinClient,
+fn adult_hub_thumbnail_probe(
+    client: &AdultHubClient,
     session: &adult_hub_storage::Session,
 ) -> Check {
-    let page = match jellyfin.get_items(
-        &session.server_url,
-        &session.user_id,
-        &session.access_token,
-        &GetItemsQuery {
-            start_index: 0,
-            limit: 8,
-            sort_by: "DateCreated",
-            sort_descending: true,
-            include_item_types: Some("Movie"),
-            ..Default::default()
-        },
-    ) {
+    let page = match client.get_catalog_videos(&adult_hub_client::CatalogVideosQuery {
+        offset: Some(0),
+        limit: Some(8),
+        sort: Some("latest"),
+        ..Default::default()
+    }) {
         Ok(page) => page,
-        Err(_) => return Check::error("Jellyfin image sample: failed to fetch movies"),
+        Err(_) => return Check::error("Adult Hub image sample: failed to fetch videos"),
     };
-    let cards = page
+    let items = page
         .items
+        .into_iter()
+        .map(adult_hub_client::TvItem::from)
+        .collect::<Vec<_>>();
+    let cards = items
         .iter()
         .take(5)
         .map(|item| crate::catalog::tv_item_to_card_for_server(item, &session.server_url))
         .collect::<Vec<_>>();
     if cards.is_empty() {
-        return Check::skipped("Jellyfin image sample: no movies in response");
+        return Check::skipped("Adult Hub image sample: no videos in response");
     }
 
     let mut loaded = 0;
@@ -193,7 +189,7 @@ fn jellyfin_thumbnail_probe(
             without_url += 1;
             continue;
         }
-        match fetch_any_fresh_jellyfin_image(&candidates, &session.access_token) {
+        match fetch_any_fresh_image(&candidates, &session.access_token) {
             Ok(()) => loaded += 1,
             Err(failure) => failures.push(format!(
                 "{label} ({stage})",
@@ -211,8 +207,6 @@ fn jellyfin_thumbnail_probe(
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        // Keep the one-line check detail readable: the full per-item trace is
-        // in the log, the check shows the distinct categories.
         let shown = unique
             .drain(..2.min(unique.len()))
             .collect::<Vec<_>>()
@@ -227,32 +221,32 @@ fn jellyfin_thumbnail_probe(
 
     if loaded == cards.len() {
         Check::connected(format!(
-            "Jellyfin image sample: loaded {loaded}/{} posters",
+            "Adult Hub image sample: loaded {loaded}/{} posters",
             cards.len()
         ))
     } else if loaded > 0 {
         Check {
             state: CHECK_PARTIAL,
             detail: format!(
-                "Jellyfin image sample: partial failure, loaded {loaded}/{} posters; {without_url} without URL{failure_note}",
+                "Adult Hub image sample: partial failure, loaded {loaded}/{} posters; {without_url} without URL{failure_note}",
                 cards.len()
             ),
         }
     } else {
         Check::error(format!(
-            "Jellyfin image sample: failed for 0/{} posters; {without_url} without URL{failure_note}",
+            "Adult Hub image sample: failed for 0/{} posters; {without_url} without URL{failure_note}",
             cards.len()
         ))
     }
 }
 
-fn fetch_any_fresh_jellyfin_image(
+fn fetch_any_fresh_image(
     urls: &[String],
     token: &str,
 ) -> Result<(), crate::thumbnails::ThumbnailFailure> {
     let mut last = crate::thumbnails::ThumbnailFailure::Request;
     for url in urls {
-        match fetch_fresh_jellyfin_image(url, token) {
+        match fetch_fresh_image(url, token) {
             Ok(()) => return Ok(()),
             Err(failure) => last = failure,
         }
@@ -260,14 +254,11 @@ fn fetch_any_fresh_jellyfin_image(
     Err(last)
 }
 
-fn fetch_fresh_jellyfin_image(
-    url: &str,
-    token: &str,
-) -> Result<(), crate::thumbnails::ThumbnailFailure> {
+fn fetch_fresh_image(url: &str, token: &str) -> Result<(), crate::thumbnails::ThumbnailFailure> {
     match crate::thumbnails::probe_image(url, Some(token)) {
         Ok(()) => Ok(()),
         Err(failure) => {
-            // An item whose ImageTags no longer match the stored artwork fails
+            // An item whose image tag no longer matches the stored artwork fails
             // with 404 on the tagged URL but succeeds untagged; retry that
             // variant before reporting the tagged failure.
             let Ok(mut untagged) = url::Url::parse(url) else {
@@ -288,7 +279,6 @@ fn fetch_fresh_jellyfin_image(
             }
             match crate::thumbnails::probe_image(untagged.as_str(), Some(token)) {
                 Ok(()) => Ok(()),
-                // Report the original tagged failure: it is what the cards use.
                 Err(_) => Err(failure),
             }
         }
@@ -350,60 +340,35 @@ fn resolver_probe(resolver: &adult_hub_client::ResolverClient, base_url: &str) -
 /// the media. Kept separate from the availability checks: a server can answer
 /// API requests while the actual video bytes are unreachable.
 fn stream_access_probe(
-    jellyfin: &JellyfinClient,
+    client: &AdultHubClient,
     session: Option<&adult_hub_storage::Session>,
-    resolver_url: &str,
 ) -> Check {
-    let Some(session) = session else {
-        return Check::skipped("Stream probe skipped: no media server session");
+    let Some(_session) = session else {
+        return Check::skipped("Stream probe skipped: not signed in");
     };
-    let page = match jellyfin.get_latest_items(
-        &session.server_url,
-        &session.user_id,
-        &session.access_token,
-        None,
-        1,
-    ) {
-        Ok(items) => items,
+    let page = match client.get_catalog_videos(&adult_hub_client::CatalogVideosQuery {
+        offset: Some(0),
+        limit: Some(1),
+        sort: Some("latest"),
+        ..Default::default()
+    }) {
+        Ok(page) => page,
         Err(error) => return Check::error(format!("Stream probe skipped: {error}")),
     };
-    let Some(item) = page.first() else {
-        return Check::skipped("Stream probe skipped: no library item to probe");
+    let Some(video) = page.items.first() else {
+        return Check::skipped("Stream probe skipped: no catalog item to probe");
     };
-    let sampled = item.title.clone();
-    let request = if uuid::Uuid::parse_str(&item.id).is_ok() {
-        jellyfin
-            .resolve_playback(
-                &session.server_url,
-                &session.user_id,
-                &session.access_token,
-                &item.id,
-            )
-            .map(|resolution| {
-                (
-                    resolution.stream_url,
-                    Some(session.access_token.as_str()),
-                    resolution.required_headers,
-                )
-            })
-            .map_err(|error| error.to_string())
-    } else if let Ok((url, _method)) = crate::session::PlaybackSessionController::resolve_stream_url(
-        item,
-        Some(&session.server_url),
-        (!resolver_url.is_empty()).then_some(resolver_url),
-        Some(&session.access_token),
-    ) {
-        Ok((url, None, Vec::new()))
-    } else {
-        Err(format!(
-            "no stream source could be built for the sampled title \"{sampled}\""
-        ))
+    let sampled = video.title.clone();
+    let descriptor = match client.get_playback_descriptor(&video.id) {
+        Ok(descriptor) => descriptor,
+        Err(error) => return Check::error(format!("Stream probe skipped: {error}")),
     };
-    let (url, token, headers) = match request {
-        Ok(request) => request,
-        Err(error) => return Check::error(redact_diagnostics(&error)),
-    };
-    match super::details::probe_remote_media_size(&url, token, &headers) {
+    let (url, _method, headers) =
+        match crate::playback::resolve_adult_hub_stream_target(client, &descriptor, None) {
+            Ok(target) => target,
+            Err(error) => return Check::error(redact_diagnostics(&error)),
+        };
+    match super::details::probe_remote_media_size(&url, &headers) {
         Some(bytes) => Check::connected(format!(
             "Stream reachable: {} ({})",
             adult_hub_client::format_media_size(bytes),
@@ -455,7 +420,6 @@ fn merge_checks(parts: Vec<Check>) -> Check {
 /// access and artwork.
 fn spawn_connection_diagnostics(
     weak: slint::Weak<MainWindow>,
-    jellyfin: Arc<JellyfinClient>,
     resolver: Arc<adult_hub_client::ResolverClient>,
     session: Option<adult_hub_storage::Session>,
     resolver_url: String,
@@ -464,7 +428,7 @@ fn spawn_connection_diagnostics(
     if ui.get_checking_connections() {
         return;
     }
-    let (jellyfin_state, jellyfin_detail) = if session.is_some() {
+    let (server_state, server_detail) = if session.is_some() {
         (CHECK_CHECKING, "Checking…".to_string())
     } else {
         (CHECK_SKIPPED, "Not signed in".to_string())
@@ -475,8 +439,8 @@ fn spawn_connection_diagnostics(
         (CHECK_CHECKING, "Checking…".to_string())
     };
     ui.set_checking_connections(true);
-    ui.set_jellyfin_connection_state(jellyfin_state.into());
-    ui.set_jellyfin_connection_status(jellyfin_detail.into());
+    ui.set_server_connection_state(server_state.into());
+    ui.set_server_connection_status(server_detail.into());
     ui.set_resolver_connection_state(resolver_state.into());
     ui.set_resolver_connection_status(resolver_detail.into());
     ui.set_artwork_connection_state(CHECK_CHECKING.into());
@@ -488,24 +452,30 @@ fn spawn_connection_diagnostics(
 
     std::thread::spawn(move || {
         let server_check = match session.clone() {
-            None => Check::skipped("Media server: not signed in"),
+            None => Check::skipped("Adult Hub server: not signed in"),
             Some(session) => {
-                let probe_jellyfin = jellyfin.clone();
+                let server_url = session.server_url.clone();
+                let access_token = session.access_token.clone();
                 match timed(20, move || {
-                    probe_jellyfin
-                        .get_user_views(
-                            &session.server_url,
-                            &session.user_id,
-                            &session.access_token,
-                        )
-                        .map(|views| views.len())
+                    AdultHubClient::new(&server_url)
+                        .map(|client| client.with_token(&access_token))
+                        .and_then(|client| {
+                            client.get_categories(&adult_hub_client::CatalogTaxonomyQuery {
+                                offset: Some(0),
+                                limit: Some(1),
+                                q: None,
+                            })
+                        })
+                        .map(|response| response.total_count)
                         .map_err(|error| error.to_string())
                 }) {
-                    Err(elapsed) => Check::error(format!("Media server: timed out ({elapsed})")),
-                    Ok(Err(error)) => Check::error(format!("Media server: {error}")),
-                    Ok(Ok(count)) => {
-                        Check::connected(format!("Media server: connected ({count} libraries)"))
+                    Err(elapsed) => {
+                        Check::error(format!("Adult Hub server: timed out ({elapsed})"))
                     }
+                    Ok(Err(error)) => Check::error(format!("Adult Hub server: {error}")),
+                    Ok(Ok(count)) => Check::connected(format!(
+                        "Adult Hub server: connected ({count} categories)"
+                    )),
                 }
             }
         };
@@ -516,9 +486,7 @@ fn spawn_connection_diagnostics(
             let probe_resolver = resolver.clone();
             let url = resolver_url.clone();
             match timed(20, move || {
-                let resolver = probe_resolver;
-                let url = url;
-                resolver
+                probe_resolver
                     .get_categories(&url)
                     .map(|categories| categories.len())
                     .map_err(|error| error.to_string())
@@ -532,18 +500,22 @@ fn spawn_connection_diagnostics(
         };
 
         let artwork_check = {
-            let jellyfin_art = session.as_ref().map_or_else(
-                || Check::skipped("Jellyfin artwork: not signed in"),
+            let server_art = session.as_ref().map_or_else(
+                || Check::skipped("Adult Hub artwork: not signed in"),
                 |session| {
-                    let probe_jellyfin = jellyfin.clone();
+                    let server_url = session.server_url.clone();
+                    let access_token = session.access_token.clone();
                     let session = session.clone();
                     match timed(25, move || {
-                        jellyfin_thumbnail_probe(&probe_jellyfin, &session)
+                        AdultHubClient::new(&server_url)
+                            .map(|client| client.with_token(&access_token))
+                            .map(|client| adult_hub_thumbnail_probe(&client, &session))
                     }) {
                         Err(elapsed) => {
-                            Check::error(format!("Jellyfin artwork: timed out ({elapsed})"))
+                            Check::error(format!("Adult Hub artwork: timed out ({elapsed})"))
                         }
-                        Ok(check) => check,
+                        Ok(Err(error)) => Check::error(format!("Adult Hub artwork: {error}")),
+                        Ok(Ok(check)) => check,
                     }
                 },
             );
@@ -559,20 +531,23 @@ fn spawn_connection_diagnostics(
                     Ok(check) => check,
                 }
             };
-            merge_checks(vec![jellyfin_art, resolver_art])
+            merge_checks(vec![server_art, resolver_art])
         };
 
         let stream_check = match session.as_ref() {
             None => Check::skipped("Stream access: not signed in"),
             Some(session) => {
-                let probe_jellyfin = jellyfin.clone();
+                let server_url = session.server_url.clone();
+                let access_token = session.access_token.clone();
                 let session = session.clone();
-                let url_for_probe = resolver_url.clone();
                 match timed(30, move || {
-                    stream_access_probe(&probe_jellyfin, Some(&session), &url_for_probe)
+                    AdultHubClient::new(&server_url)
+                        .map(|client| client.with_token(&access_token))
+                        .map(|client| stream_access_probe(&client, Some(&session)))
                 }) {
                     Err(elapsed) => Check::error(format!("Stream access: timed out ({elapsed})")),
-                    Ok(check) => check,
+                    Ok(Err(error)) => Check::error(format!("Stream access: {error}")),
+                    Ok(Ok(check)) => check,
                 }
             }
         };
@@ -595,8 +570,8 @@ fn spawn_connection_diagnostics(
                 iter.next().unwrap(),
                 iter.next().unwrap(),
             );
-            ui.set_jellyfin_connection_state(server_check.state.into());
-            ui.set_jellyfin_connection_status(server_check.detail.into());
+            ui.set_server_connection_state(server_check.state.into());
+            ui.set_server_connection_status(server_check.detail.into());
             ui.set_resolver_connection_state(service_check.state.into());
             ui.set_resolver_connection_status(service_check.detail.into());
             ui.set_stream_connection_state(stream_check.state.into());
@@ -632,10 +607,8 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
     let player = ctx.player.clone();
     let local_store = ctx.local_store.clone();
     let credential_store = ctx.credential_store.clone();
-    let jellyfin = ctx.jellyfin.clone();
     let resolver = ctx.resolver.clone();
     let phash_coord = ctx.phash_coord.clone();
-    let reporter = ctx.reporter.clone();
     let session_ctrl = ctx.session_ctrl.clone();
     let current_item = ctx.current_playing_item.clone();
     let cached_catalog = ctx.cached_catalog.clone();
@@ -673,7 +646,6 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
         let player = player.clone();
         let session_ctrl = session_ctrl.clone();
         let current_item = current_item.clone();
-        let reporter = reporter.clone();
         ui.on_panic_exit(move || {
             crate::diagnostics::GLOBAL_LOG.w(
                 "Privacy",
@@ -693,7 +665,6 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
                 {
                     session_ctrl.checkpoint_progress(item, pos_ms, dur_ms, false);
                 }
-                reporter.stop_session(pos_ms);
                 let _ = player.stop();
             }
             std::process::exit(0);
@@ -738,8 +709,8 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
             ui.set_status("Resume progress cleared".into());
             ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
             // Telegram resume data is local. Refresh the previous screen so
-            // server-backed Jellyfin resume items remain visible and local
-            // Telegram positions disappear from shelves and channel cards.
+            // server-backed resume items remain visible and local Telegram
+            // positions disappear from shelves and channel cards.
             refresh_content_after_filter_change(&ui);
         });
     }
@@ -819,7 +790,6 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
     // 5. Test Connection (media server, video service, stream access, artwork)
     {
         let weak = ui.as_weak();
-        let jellyfin = jellyfin.clone();
         let resolver = resolver.clone();
         let credential_store = credential_store.clone();
         let local_store = local_store.clone();
@@ -828,10 +798,8 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
             if ui.get_checking_connections() {
                 return;
             }
-            // Only a configured video service is probed as such. Falling back to
-            // the Jellyfin address here asked the media server for resolver
-            // endpoints, which always failed and left "Status: Not checked"
-            // even while playback worked.
+            // Only a configured video service is probed as such, never the
+            // media server address.
             let mut url = ui
                 .get_resolver_url_input()
                 .trim()
@@ -864,20 +832,13 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
                 }
             }
             let session = credential_store.get().ok().flatten();
-            spawn_connection_diagnostics(
-                weak.clone(),
-                jellyfin.clone(),
-                resolver.clone(),
-                session,
-                url,
-            );
+            spawn_connection_diagnostics(weak.clone(), resolver.clone(), session, url);
         });
     }
 
     // Check both configured services and surface their results in Settings.
     {
         let weak = ui.as_weak();
-        let jellyfin = jellyfin.clone();
         let resolver = resolver.clone();
         let credential_store = credential_store.clone();
         let local_store = local_store.clone();
@@ -930,13 +891,7 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
                 }
             }
 
-            spawn_connection_diagnostics(
-                weak.clone(),
-                jellyfin.clone(),
-                resolver.clone(),
-                session,
-                resolver_url,
-            );
+            spawn_connection_diagnostics(weak.clone(), resolver.clone(), session, resolver_url);
         });
     }
 
@@ -1199,46 +1154,6 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
         });
     }
 
-    // Toggle Adult Hub API (Opt-in)
-    {
-        let weak = ui.as_weak();
-        let local_store = local_store.clone();
-        let credential_store = credential_store.clone();
-        ui.on_toggle_adult_hub_api(move || {
-            let Some(ui) = weak.upgrade() else { return };
-            let active = !ui.get_adult_hub_api_enabled();
-            if let Err(err) = adult_hub_storage::check_adult_hub_mode_change(
-                ui.get_is_logged_in(),
-                active,
-                &local_store,
-                &credential_store,
-            ) {
-                show_error(&ui, err.to_string());
-                return;
-            }
-            match local_store.set_adult_hub_api_enabled(active) {
-                Ok(()) => {
-                    if active {
-                        crate::thumbnails::set_jellyfin_base_url("");
-                    }
-                    ui.set_adult_hub_api_enabled(active);
-                    if active {
-                        ui.set_toast_message("Adult Hub API mode enabled (opt-in preview)".into());
-                        ui.set_toast_type("info".into());
-                    } else {
-                        ui.set_toast_message("Jellyfin fallback mode enabled".into());
-                        ui.set_toast_type("info".into());
-                    }
-                    ui.set_toast_action_text("".into());
-                    ui.set_toast_visible(true);
-                }
-                Err(err) => {
-                    show_error(&ui, format!("Failed to update API mode setting: {err}"));
-                }
-            }
-        });
-    }
-
     // 10. Excluded Tags
     {
         let weak = ui.as_weak();
@@ -1379,8 +1294,8 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
     {
         let weak = ui.as_weak();
         let local_store = local_store.clone();
-        let phash_coord = phash_coord.clone();
         let credential_store = credential_store.clone();
+        let phash_coord = phash_coord.clone();
         let autoplay_active = autoplay_active.clone();
         ui.on_import_config(move || {
             let Some(ui) = weak.upgrade() else { return };
@@ -1389,21 +1304,6 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
                 show_error(&ui, "Nie wybrano pliku konfiguracji");
                 return;
             };
-
-            // Finding 5: Refuse an imported mode change while a session is active
-            if let Ok(parsed) = serde_json::from_str::<adult_hub_storage::AppConfigExport>(&json) {
-                if let Some(imported_mode) = parsed.adult_hub_api_enabled {
-                    if let Err(err) = adult_hub_storage::check_adult_hub_mode_change(
-                        ui.get_is_logged_in(),
-                        imported_mode,
-                        &local_store,
-                        &credential_store,
-                    ) {
-                        show_error(&ui, err.to_string());
-                        return;
-                    }
-                }
-            }
 
             match local_store.import_non_secret_config_json(&json) {
                 Ok(()) => {
@@ -1428,9 +1328,6 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
                         ui.set_autoplay_active(config.autoplay_next);
                         crate::thumbnails::set_low_ram_mode(config.low_ram_mode);
                         ui.set_low_ram_active(config.low_ram_mode);
-                        if let Some(enabled) = config.adult_hub_api_enabled {
-                            ui.set_adult_hub_api_enabled(enabled);
-                        }
                             if let Some(url) = config.resolver_base_url {
                                 ui.set_resolver_url_input(url.into());
                             }
@@ -1606,119 +1503,6 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
             }
         });
     }
-
-    // 16. List and select Jellyfin libraries.
-    {
-        let weak = ui.as_weak();
-        let credential_store = credential_store.clone();
-        let jellyfin = jellyfin.clone();
-        let local_store = local_store.clone();
-        ui.on_refresh_library_list(move || {
-            let Some(ui) = weak.upgrade() else { return };
-            let Some(session) = credential_store.get().ok().flatten() else {
-                ui.set_status("Sign in to load Jellyfin libraries".into());
-                ui.set_status_color(slint::Color::from_rgb_u8(144, 152, 168));
-                return;
-            };
-            ui.set_status("Loading Jellyfin libraries…".into());
-            let weak = weak.clone();
-            let jellyfin = jellyfin.clone();
-            let local_store = local_store.clone();
-            std::thread::spawn(move || {
-                let selected_id = local_store
-                    .get_setting("selected_library_id")
-                    .ok()
-                    .flatten();
-                let result = jellyfin.get_user_views(
-                    &session.server_url,
-                    &session.user_id,
-                    &session.access_token,
-                );
-                slint::invoke_from_event_loop(move || {
-                    let Some(ui) = weak.upgrade() else { return };
-                    match result {
-                        Ok(views) => {
-                            let options = views
-                                .into_iter()
-                                .map(|view| LibraryOptionData {
-                                    selected: selected_id.as_deref() == Some(view.id.as_str()),
-                                    id: view.id.into(),
-                                    name: view.name.into(),
-                                })
-                                .collect::<Vec<_>>();
-                            ui.set_library_options(Rc::new(slint::VecModel::from(options)).into());
-                        }
-                        Err(error) => show_error(&ui, format!("Could not load libraries: {error}")),
-                    }
-                })
-                .ok();
-            });
-        });
-    }
-    {
-        let weak = ui.as_weak();
-        ui.on_switch_library(move || {
-            if let Some(ui) = weak.upgrade() {
-                ui.invoke_refresh_library_list();
-            }
-        });
-    }
-    {
-        let weak = ui.as_weak();
-        let credential_store = credential_store.clone();
-        let jellyfin = jellyfin.clone();
-        let local_store = local_store.clone();
-        ui.on_select_library(move |library_id| {
-            let Some(ui) = weak.upgrade() else { return };
-            let Some(session) = credential_store.get().ok().flatten() else {
-                show_error(&ui, "Please log in to select a Jellyfin library");
-                return;
-            };
-            let library_id = library_id.to_string();
-            let weak = weak.clone();
-            let jellyfin = jellyfin.clone();
-            let local_store = local_store.clone();
-            std::thread::spawn(move || {
-                let result = jellyfin
-                    .get_user_views(&session.server_url, &session.user_id, &session.access_token)
-                    .map(|views| views.into_iter().find(|view| view.id == library_id));
-                slint::invoke_from_event_loop(move || {
-                    let Some(ui) = weak.upgrade() else { return };
-                    match result {
-                        Ok(Some(view)) => {
-                            if let Err(error) = local_store
-                                .set_setting("selected_library_id", &view.id)
-                                .and_then(|_| {
-                                    local_store.set_setting("selected_library_name", &view.name)
-                                })
-                            {
-                                show_error(
-                                    &ui,
-                                    format!("Could not save selected library: {error}"),
-                                );
-                                return;
-                            }
-                            ui.set_current_library(view.name.into());
-                            ui.set_active_category("Latest".into());
-                            ui.set_search_query("".into());
-                            ui.invoke_reset_catalog_text_filters();
-                            ui.set_status("Active library changed".into());
-                            ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
-                            ui.invoke_refresh_library_list();
-                            ui.invoke_refresh_home_categories();
-                            ui.invoke_refresh_home();
-                            if ui.get_active_screen() == "browse" {
-                                ui.invoke_filter_category("Latest".into());
-                            }
-                        }
-                        Ok(None) => show_error(&ui, "The selected library is no longer available"),
-                        Err(error) => show_error(&ui, format!("Could not select library: {error}")),
-                    }
-                })
-                .ok();
-            });
-        });
-    }
 }
 
 #[cfg(test)]
@@ -1729,20 +1513,20 @@ mod tests {
     fn diagnostics_never_reveal_credentials() {
         // Regression: diagnostics strings are copied into the exported log and
         // shown in the expandable Settings section, so every credential form
-        // Jellyfin uses has to be masked at the source.
-        let text = "GET https://jf.local:8096/Items/1/Images/Primary?tag=abc&api_key=SECRET1 failed, headers Authorization: MediaBrowser Token=\"SECRET2\", X-Emby-Token: SECRET3";
+        // the server uses has to be masked at the source.
+        let text = "GET https://media.example/api/v1/artwork/poster.jpg?tag=abc&api_key=SECRET1 failed, headers Authorization: Bearer SECRET2, token: SECRET3";
         let redacted = redact_diagnostics(text);
         assert!(!redacted.contains("SECRET1"), "{redacted}");
         assert!(!redacted.contains("SECRET2"), "{redacted}");
         assert!(!redacted.contains("SECRET3"), "{redacted}");
         // The non-secret part of the diagnosis survives.
-        assert!(redacted.contains("https://jf.local:8096/Items/1/Images/Primary"));
+        assert!(redacted.contains("https://media.example/api/v1/artwork/poster.jpg"));
         assert!(redacted.contains("failed"), "{redacted}");
     }
 
     #[test]
     fn diagnostics_leave_plain_words_untouched() {
-        let text = "Media server: connected (3 libraries), no token required";
+        let text = "Adult Hub server: connected (3 libraries), no token required";
         assert_eq!(redact_diagnostics(text), text);
     }
 
@@ -1763,7 +1547,7 @@ mod tests {
         assert_eq!(only_skips.state, CHECK_SKIPPED);
 
         let mixed = merge_checks(vec![
-            Check::connected("Jellyfin image sample: loaded 5/5 posters"),
+            Check::connected("Adult Hub image sample: loaded 5/5 posters"),
             Check::error("Resolver image sample: download failed"),
         ]);
         assert_eq!(mixed.state, CHECK_PARTIAL);

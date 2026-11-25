@@ -240,10 +240,10 @@ mod tests {
 
     #[test]
     fn redacts_sensitive_values() {
-        let input = "Connecting to https://jellyfin.example:8096/emby with token=abc123xyz and password: mySecretPassword123";
+        let input = "Connecting to https://media.example:8090/api/v1 with token=abc123xyz and password: mySecretPassword123";
         let redacted = redact(input);
         assert!(!redacted.contains("https://"));
-        assert!(!redacted.contains("jellyfin.example"));
+        assert!(!redacted.contains("media.example"));
         assert!(!redacted.contains("abc123xyz"));
         assert!(!redacted.contains("mySecretPassword123"));
         assert!(redacted.contains("[URL]"));

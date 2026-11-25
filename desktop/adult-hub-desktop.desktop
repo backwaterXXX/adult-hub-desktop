@@ -8,6 +8,6 @@ Exec=adult-hub-desktop %U
 Icon=adult-hub-desktop
 Terminal=false
 Categories=AudioVideo;Player;Video;
-Keywords=video;media;player;streaming;jellyfin;
+Keywords=video;media;player;streaming;catalog;
 StartupNotify=true
 StartupWMClass=adult-hub-desktop
