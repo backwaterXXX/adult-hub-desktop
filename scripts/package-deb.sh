@@ -39,8 +39,8 @@ cp "${ROOT_DIR}/desktop/assets/adult-hub-desktop.svg" "${STAGING_DIR}/usr/share/
 cp "${ROOT_DIR}/desktop/assets/adult-hub-desktop.png" "${STAGING_DIR}/usr/share/icons/hicolor/256x256/apps/"
 
 # AppStream metadata
-cp "${ROOT_DIR}/desktop/assets/adult-hub-desktop.appdata.xml" "${STAGING_DIR}/usr/share/metainfo/"
-chmod 644 "${STAGING_DIR}/usr/share/metainfo/adult-hub-desktop.appdata.xml"
+cp "${ROOT_DIR}/desktop/assets/io.github.backwaterxxx.adulthubdesktop.appdata.xml" "${STAGING_DIR}/usr/share/metainfo/"
+chmod 644 "${STAGING_DIR}/usr/share/metainfo/io.github.backwaterxxx.adulthubdesktop.appdata.xml"
 
 # Copyright & Notices
 cat "${ROOT_DIR}/LICENSE" > "${STAGING_DIR}/usr/share/doc/adult-hub-desktop/copyright"

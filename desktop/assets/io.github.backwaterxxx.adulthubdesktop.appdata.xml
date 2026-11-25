@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>io.github.backwaterxxx.AdultHubDesktop</id>
+  <id>io.github.backwaterxxx.adulthubdesktop</id>
   <name>Adult Hub Desktop</name>
   <summary>Browse and play your Adult Hub catalog</summary>
   <metadata_license>CC0-1.0</metadata_license>
