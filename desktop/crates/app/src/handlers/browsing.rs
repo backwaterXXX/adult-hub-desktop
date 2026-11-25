@@ -22,9 +22,9 @@ const CATALOG_PAGE_SIZE: usize = 50;
 const CHANNEL_SEARCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 const HOME_CATEGORIES_TTL: Duration = Duration::from_secs(60);
 
-static HOME_CATEGORIES_CACHE: OnceLock<
-    Mutex<std::collections::HashMap<String, (Instant, Vec<TvItem>)>>,
-> = OnceLock::new();
+type HomeCategoriesCache = Mutex<std::collections::HashMap<String, (Instant, Vec<TvItem>)>>;
+
+static HOME_CATEGORIES_CACHE: OnceLock<HomeCategoriesCache> = OnceLock::new();
 
 fn cached_home_categories(
     client: &AdultHubClient,
