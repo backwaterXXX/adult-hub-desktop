@@ -836,7 +836,7 @@ fn safe_error_category(err: &adult_hub_client::AdultHubError) -> &'static str {
 
 #[derive(Debug)]
 #[allow(dead_code)]
-enum RefreshSessionError {
+pub(crate) enum RefreshSessionError {
     NoSessionOrToken,
     ClientError(String),
     RefreshFailed(String),
@@ -845,7 +845,7 @@ enum RefreshSessionError {
 
 /// Synchronously refreshes the Adult Hub session if the token has not already been refreshed
 /// by another task. Returns the active session on success.
-fn refresh_adult_hub_session_if_current(
+pub(crate) fn refresh_adult_hub_session_if_current(
     ctx: &crate::context::AppContext,
     failed_access_token: &str,
 ) -> Result<adult_hub_storage::Session, RefreshSessionError> {

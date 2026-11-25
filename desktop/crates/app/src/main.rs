@@ -452,6 +452,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let local_store = local_store.clone();
             let server_url = session.server_url.clone();
             let access_token = session.access_token.clone();
+            let ctx_refresh = ctx.clone();
             std::thread::spawn(move || {
                 let check = adult_hub_client::AdultHubClient::new(&server_url)
                     .map(|client| client.with_token(&access_token))
@@ -462,12 +463,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             q: None,
                         })
                     });
-                let invalid = matches!(
-                    check,
+                let unauthorized = matches!(
+                    &check,
                     Err(adult_hub_client::AdultHubError::Unauthorized { .. })
-                        | Err(adult_hub_client::AdultHubError::NotFound(_))
                 );
-                if !invalid {
+                let invalid = matches!(&check, Err(adult_hub_client::AdultHubError::NotFound(_)));
+                if unauthorized {
+                    // Prefer the refresh token over a forced logout: access
+                    // tokens are expected to expire while the refresh token
+                    // remains valid.
+                    if crate::download::refresh_adult_hub_session_if_current(
+                        &ctx_refresh,
+                        &access_token,
+                    )
+                    .is_ok()
+                    {
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = weak.upgrade() {
+                                ui.invoke_refresh_home();
+                            }
+                        });
+                        return;
+                    }
+                }
+                if !invalid && !unauthorized {
                     return;
                 }
                 let _ = credential_store.clear();
@@ -2531,7 +2550,7 @@ mod tests {
     }
 
     #[test]
-    fn test_telegram_resolver_missing_error() {
+    fn test_telegram_requires_api_playback_descriptor() {
         use adult_hub_client::TvItem;
         let item = TvItem {
             id: "telegram:chan:123".into(),
@@ -2540,7 +2559,7 @@ mod tests {
         };
         let err =
             PlaybackSessionController::resolve_stream_url(&item, None, None, None).unwrap_err();
-        assert!(err.contains("Resolver URL is required"));
+        assert!(err.contains("playback descriptor"));
     }
 
     #[test]

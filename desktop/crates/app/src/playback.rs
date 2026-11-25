@@ -1931,3 +1931,76 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod remap_integration_tests {
+    use super::*;
+    use adult_hub_storage::LocalStore;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    fn respond(stream: &mut std::net::TcpStream, status: &str, body: &str) {
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.flush();
+    }
+
+    #[test]
+    fn stale_id_is_remapped_by_title_and_progress_is_migrated() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buffer = [0_u8; 4096];
+                let count = stream.read(&mut buffer).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buffer[..count]);
+                let path = request.lines().next().unwrap_or_default();
+                if path.contains("/playback/renditions/") && path.contains("legacy") {
+                    respond(&mut stream, "404 Not Found", r#"{"error":"not found"}"#);
+                } else if path.contains("/catalog/videos") {
+                    respond(
+                        &mut stream,
+                        "200 OK",
+                        r#"{"items":[{"id":"telegram:canonical","title":"Old Title","duration_seconds":120,"categories":[],"tags":[],"performers":[]}],"total_count":1,"offset":0,"limit":10,"has_more":false}"#,
+                    );
+                } else {
+                    respond(
+                        &mut stream,
+                        "200 OK",
+                        r#"{"video_id":"telegram:canonical","stream_path":"/api/v1/playback/stream/canonical","mime_type":"video/mp4","duration_seconds":120,"file_size_bytes":1000,"width":1920,"height":1080,"renditions":[]}"#,
+                    );
+                }
+            }
+        });
+
+        let store = LocalStore::open_in_memory().unwrap();
+        let old_id = "telegram:legacy";
+        let new_id = "telegram:canonical";
+        store
+            .save_progress("local", old_id, 30_000, 120_000)
+            .unwrap();
+        let client = adult_hub_client::AdultHubClient::new(&format!("http://{address}"))
+            .unwrap()
+            .with_token("test-token");
+        let mut item = TvItem::new(old_id, "Old Title");
+        item.runtime_ticks = Some(120 * 10_000_000);
+
+        let descriptor =
+            resolve_playback_descriptor(&client, &mut item, &store).expect("remap succeeds");
+        assert_eq!(item.id, new_id);
+        assert_eq!(
+            descriptor.stream_path.as_deref(),
+            Some("/api/v1/playback/stream/canonical")
+        );
+        assert!(store.get_progress("local", old_id).unwrap().is_none());
+        assert_eq!(
+            store.get_progress("local", new_id).unwrap(),
+            Some((30_000, 120_000))
+        );
+        let _ = server.join();
+    }
+}

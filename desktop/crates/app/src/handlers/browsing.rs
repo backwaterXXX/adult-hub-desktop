@@ -15,11 +15,52 @@ use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 const CATALOG_PAGE_SIZE: usize = 50;
 const CHANNEL_SEARCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+const HOME_CATEGORIES_TTL: Duration = Duration::from_secs(60);
+
+static HOME_CATEGORIES_CACHE: OnceLock<
+    Mutex<std::collections::HashMap<String, (Instant, Vec<TvItem>)>>,
+> = OnceLock::new();
+
+fn cached_home_categories(
+    client: &AdultHubClient,
+    session: &Session,
+) -> std::result::Result<Vec<TvItem>, String> {
+    let cache = HOME_CATEGORIES_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let cached = {
+        let guard = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard
+            .get(&session.server_url)
+            .filter(|(cached_at, _)| cached_at.elapsed() < HOME_CATEGORIES_TTL)
+            .map(|(_, items)| items.clone())
+    };
+    if let Some(items) = cached {
+        return Ok(items);
+    }
+    let response = client
+        .get_categories(&CatalogTaxonomyQuery {
+            offset: Some(0),
+            limit: Some(200),
+            q: None,
+        })
+        .map_err(|error| error.to_string())?;
+    let items = response
+        .items
+        .into_iter()
+        .map(|item| item.to_category_tv_item())
+        .collect::<Vec<_>>();
+    cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(session.server_url.clone(), (Instant::now(), items.clone()));
+    Ok(items)
+}
 
 #[derive(Debug)]
 enum CatalogError {
@@ -1915,23 +1956,12 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             let weak = weak_for_categories.clone();
             let local_store = local_store_for_categories.clone();
             std::thread::spawn(move || {
-                let categories = AdultHubClient::new(&session.server_url)
+                let categories = match AdultHubClient::new(&session.server_url)
                     .map(|client| client.with_token(&session.access_token))
-                    .and_then(|client| {
-                        client.get_categories(&CatalogTaxonomyQuery {
-                            offset: Some(0),
-                            limit: Some(200),
-                            q: None,
-                        })
-                    })
-                    .map(|response| {
-                        response
-                            .items
-                            .into_iter()
-                            .map(|item| item.to_category_tv_item())
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
+                {
+                    Ok(client) => cached_home_categories(&client, &session).unwrap_or_default(),
+                    Err(_) => Vec::new(),
+                };
                 let selected = resolve_home_category_ids(&categories, &local_store);
                 slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
@@ -1967,6 +1997,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             });
         }
         let catalog_views_for_home = catalog_views.clone();
+        let ctx_home = ctx.clone();
         ui.on_refresh_home(move || {
             let Some(ui) = weak.upgrade() else { return };
             catalog_views_for_home.borrow_mut().clear();
@@ -2056,6 +2087,24 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     Ok(resp) => resp.items.into_iter().map(TvItem::from).collect::<Vec<_>>(),
                     Err(err) => {
                         let is_unauth = err.is_unauthorized();
+                        if is_unauth {
+                            // Access tokens expire routinely; try the refresh
+                            // token before forcing the user back to the login
+                            // screen.
+                            if crate::download::refresh_adult_hub_session_if_current(
+                                &ctx_home,
+                                &session.access_token,
+                            )
+                            .is_ok()
+                            {
+                                let _ = slint::invoke_from_event_loop(move || {
+                                    if let Some(ui) = weak.upgrade() {
+                                        ui.invoke_refresh_home();
+                                    }
+                                });
+                                return;
+                            }
+                        }
                         let msg = format!("Failed to load latest videos: {err}");
                         slint::invoke_from_event_loop(move || {
                             if let Some(ui) = weak.upgrade() {
@@ -2129,20 +2178,9 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 fastrand::shuffle(&mut performers);
                 performers.truncate(12);
 
-                let categories_res = client.get_categories(&CatalogTaxonomyQuery {
-                    offset: Some(0),
-                    limit: Some(200),
-                    q: None,
-                });
-                let (categories, categories_error) = match categories_res {
-                    Ok(response) => (
-                        response
-                            .items
-                            .into_iter()
-                            .map(|item| item.to_category_tv_item())
-                            .collect::<Vec<_>>(),
-                        String::new(),
-                    ),
+                let (categories, categories_error) = match cached_home_categories(&client, &session)
+                {
+                    Ok(categories) => (categories, String::new()),
                     Err(err) => (Vec::new(), format!("Couldn't load categories: {err}")),
                 };
                 let selected_categories = resolve_home_category_ids(&categories, &local_store);
