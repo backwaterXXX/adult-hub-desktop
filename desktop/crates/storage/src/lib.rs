@@ -39,6 +39,31 @@ impl TelegramProgressRecord {
     }
 }
 
+/// Telegram rows are keyed by the provider reference (`<channel>:<message>:<file>`).
+/// Older builds stored the catalog id (`telegram:<ref>`) instead, and rows written
+/// from a catalog item nested the prefix again (`telegram:telegram:<ref>`). Every
+/// surface - resume shelf, details, player, phash - has to address the same material
+/// with one key, otherwise the item is stored under one id and opened under another
+/// and playback fails with a 404. Reads and writes therefore normalise to the bare
+/// provider reference.
+pub fn normalize_telegram_provider_id(id: &str) -> String {
+    let mut value = id.trim();
+    while let Some(rest) = value.strip_prefix("telegram:") {
+        value = rest;
+    }
+    value.to_string()
+}
+
+/// Every stored spelling of the same Telegram key: the bare reference plus the
+/// historical one- and two-prefix variants.
+fn telegram_key_variants(bare: &str) -> [String; 3] {
+    [
+        bare.to_string(),
+        format!("telegram:{bare}"),
+        format!("telegram:telegram:{bare}"),
+    ]
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StoredPhashJob {
     pub resolver_scope: String,
@@ -515,6 +540,12 @@ impl LocalStore {
         };
 
         let conn = self.conn()?;
+        let bare = normalize_telegram_provider_id(&record.provider_video_id);
+        let key = if bare.is_empty() {
+            record.provider_video_id.trim().to_string()
+        } else {
+            bare
+        };
         conn.execute(
             "INSERT INTO local_progress (channel_id, video_id, position_ms, duration_ms, updated_at, is_played, title, thumbnail_url)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
@@ -527,7 +558,7 @@ impl LocalStore {
                 thumbnail_url = COALESCE(?8, thumbnail_url)",
             params![
                 channel,
-                record.provider_video_id,
+                key,
                 record.position_ms as i64,
                 record.duration_ms as i64,
                 now,
@@ -535,6 +566,13 @@ impl LocalStore {
                 record.title,
                 record.thumbnail_url,
             ],
+        )?;
+        // Rows written under a prefixed spelling describe the same material and
+        // would otherwise produce a second, unusable resume card.
+        let [_, prefixed, doubled] = telegram_key_variants(&key);
+        conn.execute(
+            "DELETE FROM local_progress WHERE channel_id = ?1 AND video_id IN (?2, ?3)",
+            params![channel, prefixed, doubled],
         )?;
         Ok(())
     }
@@ -544,13 +582,20 @@ impl LocalStore {
         provider_video_id: &str,
     ) -> Result<Option<TelegramProgressRecord>> {
         let conn = self.conn()?;
+        let bare = normalize_telegram_provider_id(provider_video_id);
+        let key = if bare.is_empty() {
+            provider_video_id.trim().to_string()
+        } else {
+            bare
+        };
+        let [bare_key, prefixed, doubled] = telegram_key_variants(&key);
         let mut stmt = conn.prepare(
             "SELECT channel_id, video_id, position_ms, duration_ms, updated_at, is_played, title, thumbnail_url
              FROM local_progress
-             WHERE video_id = ?1
+             WHERE video_id IN (?1, ?2, ?3)
              ORDER BY updated_at DESC LIMIT 1",
         )?;
-        let mut rows = stmt.query(params![provider_video_id])?;
+        let mut rows = stmt.query(params![bare_key, prefixed, doubled])?;
         if let Some(row) = rows.next()? {
             let channel_id: String = row.get(0)?;
             let video_id: String = row.get(1)?;
@@ -562,7 +607,7 @@ impl LocalStore {
             let thumb: Option<String> = row.get(7)?;
 
             Ok(Some(TelegramProgressRecord {
-                provider_video_id: video_id,
+                provider_video_id: normalize_telegram_provider_id(&video_id),
                 channel_id: Some(channel_id),
                 position_ms: pos.max(0) as u64,
                 duration_ms: dur.max(0) as u64,
@@ -731,7 +776,7 @@ impl LocalStore {
             let thumb: Option<String> = row.get(7)?;
 
             Ok(TelegramProgressRecord {
-                provider_video_id: video_id,
+                provider_video_id: normalize_telegram_provider_id(&video_id),
                 channel_id: Some(channel_id),
                 position_ms: pos.max(0) as u64,
                 duration_ms: dur.max(0) as u64,
@@ -743,17 +788,32 @@ impl LocalStore {
         })?;
 
         let mut results = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         for r in rows {
-            results.push(r?);
+            let record = r?;
+            // The same material can still be stored under several spellings
+            // (for example a `local` row keyed by the catalog id next to a
+            // Telegram row keyed by the provider reference). Rows arrive newest
+            // first, so the first spelling wins and the shelf shows one card.
+            if seen.insert(record.provider_video_id.clone()) {
+                results.push(record);
+            }
         }
         Ok(results)
     }
 
     pub fn clear_telegram_progress(&self, provider_video_id: &str) -> Result<()> {
         let conn = self.conn()?;
+        let bare = normalize_telegram_provider_id(provider_video_id);
+        let key = if bare.is_empty() {
+            provider_video_id.trim().to_string()
+        } else {
+            bare
+        };
+        let [bare_key, prefixed, doubled] = telegram_key_variants(&key);
         conn.execute(
-            "DELETE FROM local_progress WHERE video_id = ?1",
-            params![provider_video_id],
+            "DELETE FROM local_progress WHERE video_id IN (?1, ?2, ?3)",
+            params![bare_key, prefixed, doubled],
         )?;
         Ok(())
     }
@@ -1904,6 +1964,112 @@ mod tests {
         assert!(!store.get_all_telegram_progress(10).unwrap().is_empty());
         store.clear_all_progress().unwrap();
         assert!(store.get_all_telegram_progress(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn telegram_progress_normalizes_prefixed_keys() {
+        let store = LocalStore::open_in_memory().unwrap();
+        let provider_ref = "-1001618765010:315:5377541844798282037";
+
+        assert_eq!(
+            normalize_telegram_provider_id(&format!("telegram:{provider_ref}")),
+            provider_ref
+        );
+        assert_eq!(
+            normalize_telegram_provider_id(&format!("telegram:telegram:{provider_ref}")),
+            provider_ref
+        );
+        assert_eq!(normalize_telegram_provider_id(provider_ref), provider_ref);
+
+        // The same material saved through three spellings keeps one row.
+        for id in [
+            provider_ref.to_string(),
+            format!("telegram:{provider_ref}"),
+            format!("telegram:telegram:{provider_ref}"),
+        ] {
+            let rec = TelegramProgressRecord {
+                provider_video_id: id,
+                channel_id: Some("telegram".into()),
+                position_ms: 98_000,
+                duration_ms: 254_000,
+                title: "Screwed 1".into(),
+                thumbnail_url: None,
+                is_played: false,
+                updated_at: 2000,
+            };
+            store.save_telegram_progress(&rec).unwrap();
+        }
+
+        let all = store.get_all_telegram_progress(10).unwrap();
+        assert_eq!(all.len(), 1, "one row per material: {all:?}");
+        assert_eq!(all[0].provider_video_id, provider_ref);
+
+        // Any spelling finds the row, and the returned key is canonical.
+        for probe in [
+            provider_ref.to_string(),
+            format!("telegram:{provider_ref}"),
+            format!("telegram:telegram:{provider_ref}"),
+        ] {
+            let loaded = store
+                .get_telegram_progress(&probe)
+                .unwrap()
+                .expect("row found");
+            assert_eq!(loaded.provider_video_id, provider_ref);
+            assert_eq!(loaded.position_ms, 98_000);
+        }
+
+        store
+            .clear_telegram_progress(&format!("telegram:{provider_ref}"))
+            .unwrap();
+        assert!(store.get_telegram_progress(provider_ref).unwrap().is_none());
+    }
+
+    #[test]
+    fn telegram_progress_reads_legacy_doubled_rows() {
+        let store = LocalStore::open_in_memory().unwrap();
+        let provider_ref = "-1001618765010:141:5337054953330449443";
+        let doubled = format!("telegram:telegram:{provider_ref}");
+
+        // Rows written by older builds sit in the database under the doubled
+        // spelling; a canonical lookup still has to find them.
+        {
+            let conn = store.conn().unwrap();
+            conn.execute(
+                "INSERT INTO local_progress (channel_id, video_id, position_ms, duration_ms, updated_at, is_played, title, thumbnail_url)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, NULL)",
+                params!["telegram", doubled, 347_500i64, 416_000i64, 3_000i64, "Screwed 1"],
+            )
+            .unwrap();
+        }
+
+        let loaded = store
+            .get_telegram_progress(provider_ref)
+            .unwrap()
+            .expect("legacy row found");
+        assert_eq!(loaded.provider_video_id, provider_ref);
+        assert_eq!(loaded.position_ms, 347_500);
+
+        let all = store.get_all_telegram_progress(10).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].provider_video_id, provider_ref);
+
+        // Saving under the canonical key replaces the legacy spelling.
+        let rec = TelegramProgressRecord {
+            provider_video_id: provider_ref.into(),
+            channel_id: Some("telegram".into()),
+            position_ms: 350_000,
+            duration_ms: 416_000,
+            title: "Screwed 1".into(),
+            thumbnail_url: None,
+            is_played: false,
+            updated_at: 4_000,
+        };
+        store.save_telegram_progress(&rec).unwrap();
+
+        let all = store.get_all_telegram_progress(10).unwrap();
+        assert_eq!(all.len(), 1, "legacy row collapsed: {all:?}");
+        assert_eq!(all[0].position_ms, 350_000);
+        assert_eq!(all[0].provider_video_id, provider_ref);
     }
 
     #[test]

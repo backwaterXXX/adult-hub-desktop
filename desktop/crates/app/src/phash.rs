@@ -11,6 +11,25 @@ use std::time::Duration;
 static TELEGRAM_VIDEO_ID_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^telegram:-?\d+:\d+:\d{1,20}$").expect("valid telegram regex"));
 
+/// Canonical `telegram:<channel>:<message>:<file>` catalog id for a raw provider
+/// value, or `None` when the value is not a Telegram provider reference (for
+/// example a hub uuid).
+///
+/// Stored rows and API payloads use several spellings of the same key: the bare
+/// reference, `telegram:<ref>` and `telegram:telegram:<ref>`. Prefixing an
+/// already-prefixed value produced ids that neither the catalog nor the resolver
+/// accept, so every spelling is normalised here before the prefix is added.
+pub fn canonical_telegram_id(raw: &str) -> Option<String> {
+    let bare = adult_hub_storage::normalize_telegram_provider_id(raw);
+    if bare.is_empty() {
+        return None;
+    }
+    let full_id = format!("telegram:{bare}");
+    TELEGRAM_VIDEO_ID_REGEX
+        .is_match(&full_id)
+        .then_some(full_id)
+}
+
 pub fn adult_hub_video_id(item: &TvItem) -> Option<String> {
     let raw = item
         .provider_video_id
@@ -24,17 +43,7 @@ pub fn adult_hub_video_id(item: &TvItem) -> Option<String> {
             }
         })?;
 
-    let full_id = if raw.starts_with("telegram:") {
-        raw.to_string()
-    } else {
-        format!("telegram:{raw}")
-    };
-
-    if TELEGRAM_VIDEO_ID_REGEX.is_match(&full_id) {
-        Some(full_id)
-    } else {
-        None
-    }
+    canonical_telegram_id(raw)
 }
 
 pub fn resolve_phash_duration_us(

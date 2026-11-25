@@ -842,6 +842,29 @@ fn is_legacy_telegram_hash_id(id: &str) -> bool {
         .is_some_and(|rest| !rest.contains(':'))
 }
 
+/// Playback id for one entry of the local resume ("Continue watching") shelf.
+///
+/// Telegram rows are keyed by the provider reference, but older builds stored the
+/// catalog id (`telegram:<ref>`) inside the row, and rows written from a catalog
+/// item nested the prefix again. Prefixing such a value unconditionally produced
+/// `telegram:telegram:…` - an id the catalog and the resolver both reject - so the
+/// card opened a 404. Hub rows keep their own catalog id instead of a fake prefix.
+fn resume_item_id(video_id: &str) -> Option<String> {
+    let raw = video_id.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if let Some(full_id) = crate::phash::canonical_telegram_id(raw) {
+        return Some(full_id);
+    }
+    if raw.starts_with("telegram:") {
+        // Legacy opaque hash rows are remapped by title further down the shelf.
+        let bare = adult_hub_storage::normalize_telegram_provider_id(raw);
+        return Some(format!("telegram:{bare}"));
+    }
+    Some(raw.to_string())
+}
+
 fn item_matches_query(item: &TvItem, query: &str) -> bool {
     if query.is_empty() {
         return true;
@@ -2167,11 +2190,13 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                             && (record.duration_ms == 0
                                 || record.position_ms < record.duration_ms * 9 / 10)
                     }) {
-                        let provider_id = record.provider_video_id.clone();
+                        let Some(item_id) = resume_item_id(&record.provider_video_id) else {
+                            continue;
+                        };
                         resume.push(TvItem {
-                            id: format!("telegram:{provider_id}"),
+                            id: item_id,
                             title: if record.title.is_empty() {
-                                format!("Telegram {provider_id}")
+                                format!("Telegram {}", record.provider_video_id)
                             } else {
                                 record.title
                             },
@@ -2185,6 +2210,27 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                             source_provider: Some("telegram".into()),
                             ..Default::default()
                         });
+                    }
+                }
+
+                // Local rows only carry what was recorded during playback, and
+                // rows written before the metadata arrived have an empty title
+                // (the shelf then shows a raw provider reference). The resume id
+                // is canonical now, so borrow the metadata of the catalog entry
+                // it points at whenever that entry is already loaded.
+                let catalog_meta: std::collections::HashMap<&str, &TvItem> = latest_items
+                    .iter()
+                    .chain(random_items.iter())
+                    .chain(performers.iter())
+                    .chain(category_items.iter())
+                    .map(|item| (item.id.as_str(), item))
+                    .collect();
+                for entry in resume.iter_mut() {
+                    if let Some(meta) = catalog_meta.get(entry.id.as_str()) {
+                        entry.title = meta.title.clone();
+                        entry.primary_image_tag = meta.primary_image_tag.clone();
+                        entry.runtime_ticks = entry.runtime_ticks.or(meta.runtime_ticks);
+                        entry.source_provider = meta.source_provider.clone();
                     }
                 }
 
@@ -4500,6 +4546,45 @@ mod tests {
     fn item_matches_query_ignores_unrelated_telegram_prefix() {
         let item = telegram_item();
         assert!(!item_matches_query(&item, "telegram:999"));
+    }
+
+    #[test]
+    fn resume_item_id_never_doubles_the_telegram_prefix() {
+        // Every spelling stored by older builds maps to the id the catalog and
+        // the resolver accept; a doubled prefix is what made the card 404.
+        let provider_ref = "-1001618765010:315:5377541844798282037";
+        for stored in [
+            provider_ref.to_string(),
+            format!("telegram:{provider_ref}"),
+            format!("telegram:telegram:{provider_ref}"),
+            format!("  telegram:{provider_ref}  "),
+        ] {
+            assert_eq!(
+                resume_item_id(&stored).as_deref(),
+                Some("telegram:-1001618765010:315:5377541844798282037"),
+                "stored value {stored:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn resume_item_id_keeps_legacy_hashes_and_hub_ids() {
+        // Legacy opaque hashes still carry the Telegram prefix so the title
+        // based remap downstream can pick them up.
+        assert_eq!(
+            resume_item_id("telegram:7f3a91c2").as_deref(),
+            Some("telegram:7f3a91c2")
+        );
+        assert_eq!(
+            resume_item_id("telegram:telegram:7f3a91c2").as_deref(),
+            Some("telegram:7f3a91c2")
+        );
+        // Hub catalog ids are already canonical and must not gain a prefix.
+        assert_eq!(
+            resume_item_id("864d93c2-630d-5cfc-9022-a20ec78a352e").as_deref(),
+            Some("864d93c2-630d-5cfc-9022-a20ec78a352e")
+        );
+        assert_eq!(resume_item_id("   "), None);
     }
 
     #[test]
