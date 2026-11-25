@@ -119,13 +119,22 @@ fn redact_diagnostics(text: &str) -> String {
             continue;
         }
         out.extend_from_slice(b"[redacted]");
-        while index < bytes.len()
-            && !matches!(
-                bytes[index],
-                b' ' | b'\t' | b'&' | b'"' | b'\'' | b',' | b';' | b')' | b'\n' | b'\r'
-            )
-        {
-            index += 1;
+        if key.eq_ignore_ascii_case("authorization") {
+            // Authorization values may contain several space-separated parts,
+            // e.g. "Bearer <token>" or "MediaBrowser Client=..., Token=...".
+            // Mask the whole header value, not just its first word.
+            while index < bytes.len() && !matches!(bytes[index], b',' | b';' | b'\n' | b'\r') {
+                index += 1;
+            }
+        } else {
+            while index < bytes.len()
+                && !matches!(
+                    bytes[index],
+                    b' ' | b'\t' | b'&' | b'"' | b'\'' | b',' | b';' | b')' | b'\n' | b'\r'
+                )
+            {
+                index += 1;
+            }
         }
     }
     String::from_utf8_lossy(&out).into_owned()
