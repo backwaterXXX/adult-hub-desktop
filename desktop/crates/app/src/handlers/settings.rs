@@ -377,15 +377,13 @@ fn stream_access_probe(
             Ok(target) => target,
             Err(error) => return Check::error(redact_diagnostics(&error)),
         };
-    match super::details::probe_remote_media_size(&url, &headers) {
-        Some(bytes) => Check::connected(format!(
+    match super::details::probe_remote_media_size_detailed(&url, &headers) {
+        Ok(bytes) => Check::connected(format!(
             "Stream reachable: {} ({})",
             adult_hub_client::format_media_size(bytes),
             sampled
         )),
-        None => Check::error(format!(
-            "Stream probe failed: no byte range for \"{sampled}\""
-        )),
+        Err(error) => Check::error(format!("Stream probe failed for \"{sampled}\": {error}")),
     }
 }
 

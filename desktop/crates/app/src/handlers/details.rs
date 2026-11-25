@@ -1247,49 +1247,57 @@ fn is_non_media_content_type(content_type: &str) -> bool {
 }
 
 /// Ask a stream URL for its total size with a `bytes=0-0` range probe. Only
-/// the origin that issued the URL receives credentials; redirects are
-/// followed manually without auth headers. Also used by the connection
-/// diagnostics as a stream-access check.
-pub(crate) fn probe_remote_media_size(url: &str, extra_headers: &[String]) -> Option<u64> {
-    let original = url::Url::parse(url).ok()?;
+/// the origin that issued the URL receives credentials; cross-origin redirects
+/// are followed without auth headers. Also used by the connection diagnostics
+/// as a stream-access check.
+pub(crate) fn probe_remote_media_size_detailed(
+    url: &str,
+    extra_headers: &[String],
+) -> std::result::Result<u64, String> {
+    let original = url::Url::parse(url).map_err(|_| "invalid stream URL".to_string())?;
     if !matches!(original.scheme(), "http" | "https") {
-        return None;
+        return Err("stream URL must use HTTP or HTTPS".to_string());
     }
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .ok()?;
+        .map_err(|error| format!("could not build HTTP client: {error}"))?;
     let mut current = original.clone();
     for _ in 0..=3 {
         let mut request = client
             .get(current.clone())
             .header(reqwest::header::RANGE, "bytes=0-0");
-        for header in extra_headers {
-            if let Some((name, value)) = header.split_once(':') {
-                request = request.header(name.trim(), value.trim());
+        if current.origin() == original.origin() {
+            for header in extra_headers {
+                if let Some((name, value)) = header.split_once(':') {
+                    request = request.header(name.trim(), value.trim());
+                }
             }
         }
-        let Ok(response) = request.send() else {
-            return None;
-        };
+        let response = request
+            .send()
+            .map_err(|error| format!("request failed: {error}"))?;
         if response.status().is_redirection() {
             let location = response
                 .headers()
                 .get(reqwest::header::LOCATION)
                 .and_then(|value| value.to_str().ok())
-                .map(str::to_owned)?;
-            let Ok(next) = response.url().join(&location) else {
-                return None;
-            };
+                .ok_or_else(|| "redirect without a usable Location header".to_string())?
+                .to_owned();
+            let next = response
+                .url()
+                .join(&location)
+                .map_err(|_| "invalid redirect target".to_string())?;
             if !matches!(next.scheme(), "http" | "https") {
-                return None;
+                return Err("redirect target must use HTTP or HTTPS".to_string());
             }
             current = next;
             continue;
         }
-        if !response.status().is_success() {
-            return None;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(format!("HTTP {status}"));
         }
         let content_type = response
             .headers()
@@ -1298,7 +1306,7 @@ pub(crate) fn probe_remote_media_size(url: &str, extra_headers: &[String]) -> Op
             .unwrap_or_default()
             .to_owned();
         if is_non_media_content_type(&content_type) {
-            return None;
+            return Err(format!("server answered {content_type} instead of media"));
         }
         if let Some(total) = response
             .headers()
@@ -1307,7 +1315,7 @@ pub(crate) fn probe_remote_media_size(url: &str, extra_headers: &[String]) -> Op
             .and_then(content_range_total_bytes)
             && total >= MIN_PLAUSIBLE_MEDIA_BYTES
         {
-            return Some(total);
+            return Ok(total);
         }
         if let Some(len) = response
             .headers()
@@ -1316,11 +1324,22 @@ pub(crate) fn probe_remote_media_size(url: &str, extra_headers: &[String]) -> Op
             .and_then(|value| value.parse::<u64>().ok())
             && len >= MIN_PLAUSIBLE_MEDIA_BYTES
         {
-            return Some(len);
+            return Ok(len);
         }
-        return None;
+        let content_type = if content_type.is_empty() {
+            "unknown content-type"
+        } else {
+            content_type.as_str()
+        };
+        return Err(format!(
+            "no byte range reported (HTTP {status}, {content_type})"
+        ));
     }
-    None
+    Err("redirect limit exceeded".to_string())
+}
+
+pub(crate) fn probe_remote_media_size(url: &str, extra_headers: &[String]) -> Option<u64> {
+    probe_remote_media_size_detailed(url, extra_headers).ok()
 }
 
 /// Trusted media size, tried in order: completed download, the active player
@@ -1363,16 +1382,19 @@ fn resolve_real_media_size(
     let session = session?;
 
     if item.is_telegram() {
-        let resolver_url =
-            AppContext::resolve_effective_resolver_url(&ctx.local_store, &ctx.credential_store);
-        if let Ok((stream_url, _method)) = PlaybackSessionController::resolve_stream_url(
-            item,
-            Some(&session.server_url),
-            resolver_url.as_deref(),
-            Some(&session.access_token),
-        ) && let Some(size) = probe_remote_media_size(&stream_url, &[])
-        {
-            return Some(size);
+        if let Ok(client) = adult_hub_client::AdultHubClient::new(&session.server_url) {
+            let client = client.with_token(&session.access_token);
+            let mut probe_item = item.clone();
+            if let Ok(descriptor) = crate::playback::resolve_playback_descriptor(
+                &client,
+                &mut probe_item,
+                &ctx.local_store,
+            ) && let Ok((stream_url, _method, headers)) =
+                crate::playback::resolve_adult_hub_stream_target(&client, &descriptor, None)
+                && let Some(size) = probe_remote_media_size(&stream_url, &headers)
+            {
+                return Some(size);
+            }
         }
     }
 

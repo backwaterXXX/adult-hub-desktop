@@ -616,6 +616,103 @@ impl LocalStore {
         self.save_telegram_progress(&record)
     }
 
+    /// Move local playback state and watch-history rows from a stale item id
+    /// (for example a legacy Telegram hash) to the canonical catalog id.
+    pub fn migrate_item_identity(&self, old_id: &str, new_id: &str) -> Result<()> {
+        if old_id.trim().is_empty() || new_id.trim().is_empty() || old_id == new_id {
+            return Ok(());
+        }
+        let conn = self.conn()?;
+
+        let progress_rows = {
+            let mut stmt = conn.prepare(
+                "SELECT channel_id, position_ms, duration_ms, updated_at, is_played, title, thumbnail_url
+                 FROM local_progress WHERE video_id = ?1",
+            )?;
+            let rows = stmt.query_map(params![old_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                ))
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        for (channel_id, position_ms, duration_ms, updated_at, is_played, title, thumbnail) in
+            progress_rows
+        {
+            conn.execute(
+                "INSERT INTO local_progress
+                    (channel_id, video_id, position_ms, duration_ms, updated_at, is_played, title, thumbnail_url)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(channel_id, video_id) DO UPDATE SET
+                    position_ms = excluded.position_ms,
+                    duration_ms = excluded.duration_ms,
+                    updated_at = MAX(updated_at, excluded.updated_at),
+                    is_played = excluded.is_played,
+                    title = CASE WHEN excluded.title != '' THEN excluded.title ELSE local_progress.title END,
+                    thumbnail_url = COALESCE(excluded.thumbnail_url, local_progress.thumbnail_url)",
+                params![
+                    channel_id,
+                    new_id,
+                    position_ms,
+                    duration_ms,
+                    updated_at,
+                    is_played,
+                    title,
+                    thumbnail
+                ],
+            )?;
+        }
+        conn.execute(
+            "DELETE FROM local_progress WHERE video_id = ?1",
+            params![old_id],
+        )?;
+
+        let history_json = match conn.query_row(
+            "SELECT item_json FROM watch_history WHERE item_id = ?1",
+            params![old_id],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(json) => Some(json),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(error) => return Err(error.into()),
+        };
+        if let Some(json) = history_json {
+            let rewritten = match serde_json::from_str::<serde_json::Value>(&json) {
+                Ok(mut value) => {
+                    if let Some(object) = value.as_object_mut() {
+                        object.insert(
+                            "id".to_string(),
+                            serde_json::Value::String(new_id.to_string()),
+                        );
+                    }
+                    serde_json::to_string(&value).unwrap_or(json)
+                }
+                Err(_) => json,
+            };
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            conn.execute(
+                "INSERT INTO watch_history (item_id, watched_at, item_json)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(item_id) DO UPDATE SET watched_at = ?2, item_json = ?3",
+                params![new_id, now, rewritten],
+            )?;
+            conn.execute(
+                "DELETE FROM watch_history WHERE item_id = ?1",
+                params![old_id],
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn get_all_telegram_progress(&self, limit: usize) -> Result<Vec<TelegramProgressRecord>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(

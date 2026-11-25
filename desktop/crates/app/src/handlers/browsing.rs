@@ -834,6 +834,14 @@ fn reported_catalog_total(
 ///
 /// Titles, ids and overviews are matched by substring. A `telegram:` prefix is
 /// ignored for id matching so a pasted Telegram reference still finds its item.
+/// Older releases keyed some Telegram items by an opaque hash
+/// (`telegram:<hash>`) instead of the canonical provider reference. Those rows
+/// are still candidates for a title-based remap, but are never valid API ids.
+fn is_legacy_telegram_hash_id(id: &str) -> bool {
+    id.strip_prefix("telegram:")
+        .is_some_and(|rest| !rest.contains(':'))
+}
+
 fn item_matches_query(item: &TvItem, query: &str) -> bool {
     if query.is_empty() {
         return true;
@@ -2098,6 +2106,59 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 fastrand::shuffle(&mut performers);
                 performers.truncate(12);
 
+                let categories_res = client.get_categories(&CatalogTaxonomyQuery {
+                    offset: Some(0),
+                    limit: Some(200),
+                    q: None,
+                });
+                let (categories, categories_error) = match categories_res {
+                    Ok(response) => (
+                        response
+                            .items
+                            .into_iter()
+                            .map(|item| item.to_category_tv_item())
+                            .collect::<Vec<_>>(),
+                        String::new(),
+                    ),
+                    Err(err) => (Vec::new(), format!("Couldn't load categories: {err}")),
+                };
+                let selected_categories = resolve_home_category_ids(&categories, &local_store);
+                let mut category_items = Vec::new();
+                let mut category_shelves = Vec::new();
+                for category in categories
+                    .iter()
+                    .filter(|category| selected_categories.iter().any(|id| id == &category.id))
+                {
+                    let result = client.get_videos(&adult_hub_client::CatalogVideosQuery {
+                        offset: Some(0),
+                        limit: Some(16),
+                        sort: Some("latest"),
+                        category: Some(category.title.as_str()),
+                        ..Default::default()
+                    });
+                    let (items, error) = match result {
+                        Ok(response) => (
+                            response
+                                .items
+                                .into_iter()
+                                .map(TvItem::from)
+                                .collect::<Vec<_>>(),
+                            String::new(),
+                        ),
+                        Err(err) => (
+                            Vec::new(),
+                            format!("Couldn't load {}: {err}", category.title),
+                        ),
+                    };
+                    let items = filter_catalog_items(items, &local_store);
+                    category_items.extend(items.iter().cloned());
+                    category_shelves.push((
+                        category.title.clone(),
+                        items.into_iter().take(4).collect::<Vec<_>>(),
+                        error,
+                    ));
+                }
+
                 let mut resume = Vec::new();
                 if let Ok(records) = local_store.get_all_telegram_progress(50) {
                     for record in records.into_iter().filter(|record| {
@@ -2127,12 +2188,35 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     }
                 }
 
-                let history = local_store
+                let mut history = local_store
                     .get_watch_history(16)
                     .unwrap_or_default()
                     .into_iter()
                     .filter_map(|json| serde_json::from_str::<TvItem>(&json).ok())
                     .collect::<Vec<_>>();
+
+                // Try to map legacy hash ids to canonical catalog items. If a
+                // title no longer exists in the catalog, hide the stale shelf
+                // entry instead of letting playback fail with a 404 later.
+                let mut legacy_checks = 0usize;
+                let mut stale_ids = std::collections::HashSet::new();
+                for item in resume.iter_mut().chain(history.iter_mut()) {
+                    if !is_legacy_telegram_hash_id(&item.id) {
+                        continue;
+                    }
+                    if legacy_checks >= 12 {
+                        break;
+                    }
+                    legacy_checks += 1;
+                    let stale_id = item.id.clone();
+                    if crate::playback::remap_stale_catalog_item(&client, item, &local_store)
+                        .is_none()
+                    {
+                        stale_ids.insert(stale_id);
+                    }
+                }
+                resume.retain(|item| !stale_ids.contains(&item.id));
+                history.retain(|item| !stale_ids.contains(&item.id));
 
                 let mut all_home_items = Vec::new();
                 all_home_items.extend(resume.clone());
@@ -2140,6 +2224,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 all_home_items.extend(latest_items.clone());
                 all_home_items.extend(random_items.clone());
                 all_home_items.extend(performers.clone());
+                all_home_items.extend(category_items);
 
                 *home_catalog
                     .lock()
@@ -2155,9 +2240,22 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                             random_items.iter().map(tv_item_to_card).collect::<Vec<_>>();
                         let performer_cards =
                             performers.iter().map(tv_item_to_card).collect::<Vec<_>>();
+                        let category_cards = category_shelves
+                            .iter()
+                            .map(|(name, items, error)| {
+                                (
+                                    name.clone(),
+                                    items
+                                        .iter()
+                                        .map(tv_item_to_card)
+                                        .collect::<Vec<VideoCardData>>(),
+                                    error.clone(),
+                                )
+                            })
+                            .collect::<Vec<_>>();
 
                         ui.set_home_is_loading(false);
-                        ui.set_home_error_message(String::new().into());
+                        ui.set_home_error_message(categories_error.into());
                         ui.set_home_resume_error(String::new().into());
                         ui.set_home_latest_error(String::new().into());
                         ui.set_home_random_error(random_error.into());
@@ -2172,9 +2270,17 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                                 performer_cards,
                             ],
                         );
-                        set_home_category_options(&ui, &[], &[]);
+                        set_home_category_options(&ui, &categories, &selected_categories);
+                        let ui_category_shelves = category_cards
+                            .into_iter()
+                            .map(|(name, items, error)| HomeCategoryShelfData {
+                                name: name.into(),
+                                items: Rc::new(slint::VecModel::from(items)).into(),
+                                error_message: error.into(),
+                            })
+                            .collect::<Vec<_>>();
                         ui.set_home_category_shelves(
-                            Rc::new(slint::VecModel::from(Vec::new())).into(),
+                            Rc::new(slint::VecModel::from(ui_category_shelves)).into(),
                         );
                     }
                 })

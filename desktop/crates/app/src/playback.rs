@@ -371,7 +371,7 @@ pub fn start_item_playback_with_resume(
                 return;
             }
         };
-        let descriptor = match resolve_playback_descriptor(&client, &mut item) {
+        let descriptor = match resolve_playback_descriptor(&client, &mut item, local_store) {
             Ok(d) => d,
             Err(err) => {
                 let safe_msg = format!(
@@ -555,49 +555,72 @@ pub fn format_safe_adult_hub_error(err: &adult_hub_client::AdultHubError) -> Str
     }
 }
 
+/// Try to remap a stale local item id to a canonical catalog item by exact title
+/// (and closest duration). Returns the canonical id on success and migrates the
+/// local progress/history rows in the same step.
+pub(crate) fn remap_stale_catalog_item(
+    client: &adult_hub_client::AdultHubClient,
+    item: &mut TvItem,
+    local_store: &adult_hub_storage::LocalStore,
+) -> Option<String> {
+    let title = item.title.trim();
+    if title.is_empty() {
+        return None;
+    }
+    let response = client
+        .get_videos(&adult_hub_client::CatalogVideosQuery {
+            offset: Some(0),
+            limit: Some(10),
+            q: Some(title),
+            ..Default::default()
+        })
+        .ok()?;
+    let duration = item
+        .runtime_ticks
+        .map(|ticks| (ticks / 10_000_000).max(0) as u64)
+        .unwrap_or(0);
+    let candidate = response.items.into_iter().find(|candidate| {
+        candidate.title.trim().eq_ignore_ascii_case(title)
+            && (duration == 0
+                || candidate.duration_seconds == 0
+                || candidate.duration_seconds.abs_diff(duration) <= 5)
+    })?;
+    let stale_id = item.id.clone();
+    crate::log_debug(&format!(
+        "catalog: remapped stale item {} to canonical {} by title",
+        stale_id, candidate.id
+    ));
+    if let Err(error) = local_store.migrate_item_identity(&stale_id, &candidate.id) {
+        crate::diagnostics::GLOBAL_LOG.w(
+            "Catalog",
+            &format!(
+                "could not migrate local state {stale_id} -> {}: {error}",
+                candidate.id
+            ),
+        );
+    }
+    item.id = candidate.id.clone();
+    item.title = candidate.title;
+    if item.source_provider.is_none() {
+        item.source_provider = Some("adult_hub".into());
+    }
+    Some(candidate.id)
+}
+
 /// Resolve a playback descriptor for the item. Local resume/history rows written
 /// by older releases may key a Telegram item by a legacy hash instead of the
 /// canonical catalog id. When the server returns 404, retry once by exact title
 /// (and closest duration) so those items remain playable.
-fn resolve_playback_descriptor(
+pub(crate) fn resolve_playback_descriptor(
     client: &adult_hub_client::AdultHubClient,
     item: &mut TvItem,
+    local_store: &adult_hub_storage::LocalStore,
 ) -> std::result::Result<adult_hub_client::PlaybackDescriptorDto, adult_hub_client::AdultHubError> {
     match client.get_playback_descriptor(&item.id) {
         Ok(descriptor) => Ok(descriptor),
         Err(err @ adult_hub_client::AdultHubError::NotFound(_)) => {
-            let title = item.title.trim();
-            if title.is_empty() {
+            if remap_stale_catalog_item(client, item, local_store).is_none() {
                 return Err(err);
-            }
-            let Ok(response) = client.get_videos(&adult_hub_client::CatalogVideosQuery {
-                offset: Some(0),
-                limit: Some(10),
-                q: Some(title),
-                ..Default::default()
-            }) else {
-                return Err(err);
-            };
-            let duration = item
-                .runtime_ticks
-                .map(|ticks| (ticks / 10_000_000).max(0) as u64)
-                .unwrap_or(0);
-            let Some(candidate) = response.items.into_iter().find(|candidate| {
-                candidate.title.trim().eq_ignore_ascii_case(title)
-                    && (duration == 0
-                        || candidate.duration_seconds == 0
-                        || candidate.duration_seconds.abs_diff(duration) <= 5)
-            }) else {
-                return Err(err);
-            };
-            crate::log_debug(&format!(
-                "playback: remapped stale item {} to canonical {} by title",
-                item.id, candidate.id
-            ));
-            item.id = candidate.id.clone();
-            item.title = candidate.title;
-            if item.source_provider.is_none() {
-                item.source_provider = Some("adult_hub".into());
             }
             client.get_playback_descriptor(&item.id)
         }
@@ -880,43 +903,46 @@ pub fn start_item_playback_with_resume_ctx(
                 server_progress = progress;
             }
 
-            let descriptor = match resolve_playback_descriptor(&client, &mut item) {
-                Ok(d) => d,
-                Err(err) => {
-                    let is_unauth = err.is_unauthorized();
-                    let safe_err = format_safe_adult_hub_error(&err);
-                    let msg = format!("Could not resolve Adult Hub playback: {safe_err}");
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = weak_ui.upgrade() {
-                            if !ctx_clone.session_ctrl.is_request_current(request_id) {
-                                return;
+            let descriptor =
+                match resolve_playback_descriptor(&client, &mut item, &ctx_clone.local_store) {
+                    Ok(d) => d,
+                    Err(err) => {
+                        let is_unauth = err.is_unauthorized();
+                        let safe_err = format_safe_adult_hub_error(&err);
+                        let msg = format!("Could not resolve Adult Hub playback: {safe_err}");
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = weak_ui.upgrade() {
+                                if !ctx_clone.session_ctrl.is_request_current(request_id) {
+                                    return;
+                                }
+                                ui.set_player_state("failed".into());
+                                ui.set_is_changing_quality(false);
+                                ui.set_is_switching_movie(false);
+                                show_error(&ui, msg.clone());
+                                if is_unauth {
+                                    ui.set_is_logged_in(false);
+                                    ui.set_login_modal_visible(true);
+                                    ui.set_login_modal_message(
+                                        "Session expired (401 Unauthorized). Please sign in again."
+                                            .into(),
+                                    );
+                                    ui.set_toast_message(
+                                        "Session expired. Please reconnect.".into(),
+                                    );
+                                    ui.set_toast_type("warning".into());
+                                    ui.set_toast_action_text("Sign In".into());
+                                    ui.set_toast_visible(true);
+                                } else {
+                                    ui.set_toast_message(msg.into());
+                                    ui.set_toast_type("error".into());
+                                    ui.set_toast_action_text("".into());
+                                    ui.set_toast_visible(true);
+                                }
                             }
-                            ui.set_player_state("failed".into());
-                            ui.set_is_changing_quality(false);
-                            ui.set_is_switching_movie(false);
-                            show_error(&ui, msg.clone());
-                            if is_unauth {
-                                ui.set_is_logged_in(false);
-                                ui.set_login_modal_visible(true);
-                                ui.set_login_modal_message(
-                                    "Session expired (401 Unauthorized). Please sign in again."
-                                        .into(),
-                                );
-                                ui.set_toast_message("Session expired. Please reconnect.".into());
-                                ui.set_toast_type("warning".into());
-                                ui.set_toast_action_text("Sign In".into());
-                                ui.set_toast_visible(true);
-                            } else {
-                                ui.set_toast_message(msg.into());
-                                ui.set_toast_type("error".into());
-                                ui.set_toast_action_text("".into());
-                                ui.set_toast_visible(true);
-                            }
-                        }
-                    });
-                    return;
-                }
-            };
+                        });
+                        return;
+                    }
+                };
 
             let renditions = descriptor.renditions.clone();
             if !renditions.is_empty() {

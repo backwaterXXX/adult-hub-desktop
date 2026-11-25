@@ -159,6 +159,16 @@ pub fn phash_thumbnail_url(video_id: &str) -> Option<String> {
     if base.is_empty() || !video_id.starts_with("telegram:") {
         return None;
     }
+    // Canonical Telegram refs are `telegram:<channel>:<message>:<file>`.
+    // Legacy resume rows used `telegram:<hash>` and have no resolver artwork.
+    if video_id
+        .trim_start_matches("telegram:")
+        .matches(':')
+        .count()
+        < 2
+    {
+        return None;
+    }
     let query = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("video_id", video_id)
         .finish();
