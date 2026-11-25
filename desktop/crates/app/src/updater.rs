@@ -382,7 +382,8 @@ pub fn download_and_verify_package(
     progress_callback: impl Fn(u64, u64),
 ) -> Result<PathBuf, UpdateError> {
     let temp_dir = std::env::temp_dir();
-    let file_stem = format!("adult-hub-update-{}", package.package_type);
+    let unique = uuid::Uuid::new_v4();
+    let file_stem = format!("adult-hub-update-{}-{unique}", package.package_type);
     let staging_path = temp_dir.join(format!("{file_stem}.staging"));
     let final_ext = match package.package_type.as_str() {
         "exe" => "exe",
@@ -496,7 +497,11 @@ pub fn launch_installation(
             let parent = current_exe.parent().ok_or_else(|| {
                 UpdateError::Io("current executable has no parent directory".into())
             })?;
-            let write_probe = parent.join(format!(".adult-hub-update-{}.tmp", std::process::id()));
+            let write_probe = parent.join(format!(
+                ".adult-hub-update-{}-{}.tmp",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
             std::fs::write(&write_probe, b"update-write-check").map_err(|e| {
                 UpdateError::Io(format!(
                     "application directory is not writable for the update: {e}"
