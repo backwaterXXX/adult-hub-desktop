@@ -83,6 +83,7 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
     {
         let weak = ui.as_weak();
         let cached_catalog = cached_catalog.clone();
+        let home_catalog = home_catalog.clone();
         let local_store = local_store.clone();
         let credential_store = credential_store.clone();
         let session_ctrl = session_ctrl.clone();
@@ -535,11 +536,23 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                 });
             }
 
-            // Stage 7: Similar Items ("More Like This")
-            let all_items = cached_catalog
+            // Stage 7: Similar Items ("More Like This"). The API has no
+            // dedicated similar endpoint, so rank locally across both the
+            // browse cache and the Home catalog.
+            let mut all_items = cached_catalog
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
+            {
+                let home_items = home_catalog
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                for item in home_items.iter() {
+                    if !all_items.iter().any(|existing| existing.id == item.id) {
+                        all_items.push(item.clone());
+                    }
+                }
+            }
             let mut scored: Vec<(i32, TvItem)> = all_items
                 .into_iter()
                 .filter(|i| i.id != target_item.id)

@@ -1125,6 +1125,9 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
             let active = !ui.get_low_ram_active();
             let _ = local_store.set_setting("low_ram_mode", if active { "true" } else { "false" });
             crate::thumbnails::set_low_ram_mode(active);
+            // Cached posters may use the previous size; regenerate them with
+            // the new decode target.
+            crate::thumbnails::clear_cache();
             ui.set_low_ram_active(active);
             ui.set_status(
                 if active {

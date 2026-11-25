@@ -591,14 +591,10 @@ pub fn resolve_adult_hub_stream_target(
         .resolve_stream_url(trimmed)
         .map_err(|e| format!("Invalid stream URL: {e}"))?;
 
-    let parsed = url::Url::parse(&stream_url).map_err(|e| format!("Invalid stream URL: {e}"))?;
-    if parsed.origin().ascii_serialization() != client.origin() {
-        return Err(format!(
-            "Origin mismatch: expected {}, got {}",
-            client.origin(),
-            parsed.origin().ascii_serialization()
-        ));
-    }
+    // `resolve_stream_url` already enforces the same scheme/host/port as the
+    // client's base URL. Do not re-compare serialized origins here: url
+    // omits default ports (e.g. :443), while ServiceUrl::origin keeps them,
+    // which produced a false mismatch on HTTPS servers.
 
     let mut headers = Vec::new();
     if let Some(auth) = client.auth_header_value() {
@@ -1690,7 +1686,30 @@ mod tests {
                 .contains("protocol-relative")
         );
 
-        // 6. Header routing preserves the Authorization header produced by
+        // 6. HTTPS default port must not trigger a false origin mismatch:
+        // url serializes the origin without :443 while ServiceUrl keeps it.
+        let https_client = adult_hub_client::AdultHubClient::new("https://media.example")
+            .expect("https base URL")
+            .with_token("test_bearer_token_123");
+        let default_port_descriptor = PlaybackDescriptorDto {
+            video_id: "default-port".into(),
+            stream_path: Some("/api/v1/playback/stream/default-port".into()),
+            mime_type: None,
+            duration_seconds: None,
+            file_size_bytes: None,
+            width: None,
+            height: None,
+            renditions: Vec::new(),
+        };
+        let (default_port_url, _, _) =
+            resolve_adult_hub_stream_target(&https_client, &default_port_descriptor, None)
+                .expect("default HTTPS port must be accepted");
+        assert_eq!(
+            default_port_url,
+            "https://media.example/api/v1/playback/stream/default-port"
+        );
+
+        // 7. Header routing preserves the Authorization header produced by
         // the Adult Hub client.
         let api_headers = route_playback_headers(&[], &auth_headers);
         assert!(api_headers.contains(&"Authorization: Bearer test_bearer_token_123".to_string()));

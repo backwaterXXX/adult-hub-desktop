@@ -345,7 +345,16 @@ fn decode_dynamic_image(bytes: &[u8]) -> Option<image::DynamicImage> {
 }
 
 fn decode_image(bytes: &[u8]) -> Option<(slint::Image, Vec<u8>)> {
-    let decoded = decode_dynamic_image(bytes)?.into_rgba8();
+    let decoded = decode_dynamic_image(bytes)?;
+    // Low-RAM mode downscales decoded artwork before it reaches the UI and the
+    // disk cache. This keeps poster memory bounded without asking the server
+    // to re-encode images.
+    let decoded = if LOW_RAM_MODE.load(Ordering::Relaxed) && decoded.width() > 320 {
+        decoded.resize(320, u32::MAX, image::imageops::FilterType::Triangle)
+    } else {
+        decoded
+    };
+    let decoded = decoded.into_rgba8();
     let pixels = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
         decoded.as_raw(),
         decoded.width(),

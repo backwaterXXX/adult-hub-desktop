@@ -1946,6 +1946,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             ui.set_home_latest_error(String::new().into());
             ui.set_home_random_error(String::new().into());
             ui.set_home_performer_error(String::new().into());
+            let random_unwatched_only = ui.get_home_random_unwatched_only();
             let weak = weak.clone();
             let credential_store = credential_store.clone();
             let local_store = local_store.clone();
@@ -2051,6 +2052,52 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     }
                 };
 
+                let random_res = client.get_catalog_videos(&adult_hub_client::CatalogVideosQuery {
+                    offset: Some(0),
+                    limit: Some(50),
+                    sort: Some("latest"),
+                    ..Default::default()
+                });
+                let (mut random_items, random_error) = match random_res {
+                    Ok(resp) => (
+                        resp.items.into_iter().map(TvItem::from).collect::<Vec<_>>(),
+                        String::new(),
+                    ),
+                    Err(err) => (Vec::new(), format!("Couldn't load Random Picks: {err}")),
+                };
+                if random_unwatched_only {
+                    random_items
+                        .retain(|item| !item.is_played && item.playback_position_ticks == 0);
+                }
+                fastrand::shuffle(&mut random_items);
+                random_items.truncate(4);
+
+                let performer_res =
+                    client.get_performers(&adult_hub_client::CatalogPerformersQuery {
+                        offset: Some(0),
+                        limit: Some(100),
+                        q: None,
+                        letter: None,
+                        photo_only: Some(true),
+                        sort: Some("video_count"),
+                        direction: Some("desc"),
+                    });
+                let (mut performers, performer_error) = match performer_res {
+                    Ok(resp) => (
+                        resp.items.into_iter().map(TvItem::from).collect::<Vec<_>>(),
+                        String::new(),
+                    ),
+                    Err(err) => (Vec::new(), format!("Couldn't load Performers: {err}")),
+                };
+                performers.retain(|person| {
+                    person
+                        .primary_image_tag
+                        .as_ref()
+                        .is_some_and(|tag| !tag.trim().is_empty())
+                });
+                fastrand::shuffle(&mut performers);
+                performers.truncate(12);
+
                 let mut resume = Vec::new();
                 if let Ok(records) = local_store.get_all_telegram_progress(50) {
                     for record in records.into_iter().filter(|record| {
@@ -2091,6 +2138,8 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 all_home_items.extend(resume.clone());
                 all_home_items.extend(history.clone());
                 all_home_items.extend(latest_items.clone());
+                all_home_items.extend(random_items.clone());
+                all_home_items.extend(performers.clone());
 
                 *home_catalog
                     .lock()
@@ -2102,22 +2151,25 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                         let history_cards = history.iter().map(tv_item_to_card).collect::<Vec<_>>();
                         let latest_cards =
                             latest_items.iter().map(tv_item_to_card).collect::<Vec<_>>();
-                        let empty_cards: Vec<VideoCardData> = Vec::new();
+                        let random_cards =
+                            random_items.iter().map(tv_item_to_card).collect::<Vec<_>>();
+                        let performer_cards =
+                            performers.iter().map(tv_item_to_card).collect::<Vec<_>>();
 
                         ui.set_home_is_loading(false);
                         ui.set_home_error_message(String::new().into());
                         ui.set_home_resume_error(String::new().into());
                         ui.set_home_latest_error(String::new().into());
-                        ui.set_home_random_error(String::new().into());
-                        ui.set_home_performer_error(String::new().into());
+                        ui.set_home_random_error(random_error.into());
+                        ui.set_home_performer_error(performer_error.into());
                         set_home_shelves(
                             &ui,
                             &[
                                 resume_cards,
                                 history_cards,
                                 latest_cards,
-                                empty_cards.clone(),
-                                empty_cards,
+                                random_cards,
+                                performer_cards,
                             ],
                         );
                         set_home_category_options(&ui, &[], &[]);
