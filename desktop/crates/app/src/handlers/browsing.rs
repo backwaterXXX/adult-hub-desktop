@@ -4693,4 +4693,33 @@ mod legacy_id_tests {
             "864d93c2-630d-5cfc-9022-a20ec78a352e"
         ));
     }
+
+    #[test]
+    fn resume_title_hydration_detects_ids_but_keeps_real_titles() {
+        let mut item = TvItem::new(
+            "telegram:-1001618765010:141:5337054953330449443",
+            "Telegram -1001618765010:141:5337054953330449443",
+        );
+        assert!(resume_title_needs_hydration(&item));
+        item.title = "telegram:-1001618765010:141:5337054953330449443".into();
+        assert!(resume_title_needs_hydration(&item));
+        item.title = "".into();
+        assert!(resume_title_needs_hydration(&item));
+        item.title = "Screwed 1".into();
+        assert!(!resume_title_needs_hydration(&item));
+    }
+
+    #[test]
+    fn telegram_reference_detection_requires_three_numeric_parts() {
+        assert!(looks_like_telegram_ref(
+            "-1001618765010:141:5337054953330449443"
+        ));
+        assert!(looks_like_telegram_ref(
+            "telegram:-1001618765010:141:5337054953330449443"
+        ));
+        assert!(!looks_like_telegram_ref(
+            "telegram:5c23c503c114b8a273fd6ec9fbe0a031"
+        ));
+        assert!(!looks_like_telegram_ref("Movie: Part 1"));
+    }
 }

@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.adult-hub.desktop</id>
+  <name>Adult Hub Desktop</name>
+  <summary>Browse and play your Adult Hub catalog</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Apache-2.0</project_license>
+  <developer id="com.adult-hub">
+    <name>Adult Hub Team</name>
+  </developer>
+  <description>
+    <p>
+      Adult Hub Desktop is a privacy-focused desktop client for the Adult Hub
+      ecosystem. It brings catalog browsing, performer and studio pages,
+      Resolver channels, downloads, and libmpv playback into one application.
+    </p>
+    <p>
+      The app connects only to the Adult Hub and Resolver addresses you
+      configure. Credentials are kept on the device and diagnostics are
+      exported only on request with sensitive values redacted.
+    </p>
+  </description>
+  <launchable type="desktop-id">adult-hub-desktop.desktop</launchable>
+  <provides>
+    <binary>adult-hub-desktop</binary>
+  </provides>
+  <url type="homepage">https://github.com/backwaterXXX/adult-hub-desktop</url>
+  <url type="bugtracker">https://github.com/backwaterXXX/adult-hub-desktop/issues</url>
+  <url type="vcs-browser">https://github.com/backwaterXXX/adult-hub-desktop</url>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Player</category>
+    <category>Video</category>
+  </categories>
+  <content_rating type="oars-1.1">
+    <content_attribute id="sex-nudity">intense</content_attribute>
+    <content_attribute id="sex-themes">intense</content_attribute>
+  </content_rating>
+  <releases>
+    <release version="0.2.39" date="2026-11-25"/>
+  </releases>
+</component>

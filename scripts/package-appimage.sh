@@ -30,6 +30,7 @@ mkdir -p "${APPDIR}/usr/lib"
 mkdir -p "${APPDIR}/usr/share/applications"
 mkdir -p "${APPDIR}/usr/share/icons/hicolor/256x256/apps"
 mkdir -p "${APPDIR}/usr/share/icons/hicolor/scalable/apps"
+mkdir -p "${APPDIR}/usr/share/metainfo"
 
 # Copy binary
 cp "${BIN_DIR}/adult-hub-desktop" "${APPDIR}/usr/bin/adult-hub-desktop"
@@ -42,6 +43,9 @@ cp "${ROOT_DIR}/desktop/assets/adult-hub-desktop.png" "${APPDIR}/"
 cp "${ROOT_DIR}/desktop/assets/adult-hub-desktop.png" "${APPDIR}/usr/share/icons/hicolor/256x256/apps/"
 cp "${ROOT_DIR}/desktop/assets/adult-hub-desktop.svg" "${APPDIR}/"
 cp "${ROOT_DIR}/desktop/assets/adult-hub-desktop.svg" "${APPDIR}/usr/share/icons/hicolor/scalable/apps/"
+
+# AppStream metadata
+cp "${ROOT_DIR}/desktop/assets/adult-hub-desktop.appdata.xml" "${APPDIR}/usr/share/metainfo/"
 
 # Copy license and notices
 cp "${ROOT_DIR}/LICENSE" "${APPDIR}/"
