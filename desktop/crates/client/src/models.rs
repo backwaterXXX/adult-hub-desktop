@@ -204,10 +204,8 @@ impl From<VideoDto> for TvItem {
         } else {
             v.provider_video_id
         };
-        let full_id = if is_telegram && !prov_id.starts_with("telegram:") {
-            format!("telegram:{prov_id}")
-        } else if is_telegram {
-            prov_id.clone()
+        let full_id = if is_telegram {
+            format!("telegram:{}", crate::canonical_telegram_ref(&prov_id))
         } else {
             v.id.clone()
         };

@@ -237,11 +237,7 @@ impl ResolverClient {
         base_url: &str,
         provider_or_id: &str,
     ) -> Result<crate::models::VideoVariantsResponseDto> {
-        let ref_id = if provider_or_id.starts_with("telegram:") {
-            provider_or_id.to_string()
-        } else {
-            format!("telegram:{provider_or_id}")
-        };
+        let ref_id = format!("telegram:{}", crate::canonical_telegram_ref(provider_or_id));
         let url = format!(
             "{}/admin/play/{ref_id}/variants",
             base_url.trim_end_matches('/')
@@ -274,11 +270,7 @@ impl ResolverClient {
         provider_or_id: &str,
         variant: Option<&str>,
     ) -> String {
-        let ref_id = if provider_or_id.starts_with("telegram:") {
-            provider_or_id.to_string()
-        } else {
-            format!("telegram:{provider_or_id}")
-        };
+        let ref_id = format!("telegram:{}", crate::canonical_telegram_ref(provider_or_id));
         let variant_query = match variant {
             Some(v) if !v.is_empty() && v != "original" => {
                 format!("&variant={}", urlencoding(v))
@@ -301,6 +293,22 @@ impl Default for ResolverClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolver_stream_url_never_doubles_the_telegram_prefix() {
+        let base = "http://resolver.local:8080/";
+        for spelling in [
+            "-1001618765010:315:5377541844798282037",
+            "telegram:-1001618765010:315:5377541844798282037",
+            "telegram:telegram:-1001618765010:315:5377541844798282037",
+        ] {
+            assert_eq!(
+                ResolverClient::stream_url(base, spelling),
+                "http://resolver.local:8080/admin/play/telegram:-1001618765010:315:5377541844798282037/stream?mode=proxy",
+                "spelling {spelling:?}"
+            );
+        }
+    }
 
     #[test]
     fn parses_resolver_category_dto() {

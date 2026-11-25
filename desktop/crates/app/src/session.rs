@@ -234,17 +234,19 @@ impl PlaybackSessionController {
             if resolver.is_empty() {
                 return Err("Resolver URL is required to play Telegram content".into());
             }
-            let prov_ref = if item.id.starts_with("telegram:") {
-                item.id.clone()
-            } else if let Some(ref vid) = item.provider_video_id {
-                if vid.starts_with("telegram:") {
-                    vid.clone()
-                } else {
-                    format!("telegram:{vid}")
-                }
-            } else {
-                format!("telegram:{}", item.id)
-            };
+            // A card may carry the catalog id, the provider reference, or a row
+            // written by an older build with the prefix attached twice. The
+            // resolver only accepts `telegram:<ref>`, so reduce whatever spelling
+            // we hold to the bare reference before the prefix goes back on.
+            let raw_ref = item
+                .provider_video_id
+                .as_deref()
+                .filter(|id| !id.trim().is_empty())
+                .unwrap_or(&item.id);
+            let prov_ref = format!(
+                "telegram:{}",
+                adult_hub_client::canonical_telegram_ref(raw_ref)
+            );
             let variant_param = match variant {
                 Some(v) if !v.is_empty() && v != "original" => {
                     format!("&variant={}", adult_hub_client::urlencoding(v))
