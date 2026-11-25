@@ -906,6 +906,27 @@ fn resume_item_id(video_id: &str) -> Option<String> {
     Some(raw.to_string())
 }
 
+fn looks_like_telegram_ref(value: &str) -> bool {
+    let raw = value.trim().trim_start_matches("telegram:");
+    let mut parts = raw.split(':');
+    let _channel = parts.next();
+    let message = parts.next();
+    let file = parts.next();
+    parts.next().is_none()
+        && message.is_some_and(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+        && file.is_some_and(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn resume_title_needs_hydration(item: &TvItem) -> bool {
+    let title = item.title.trim();
+    title.is_empty()
+        || title.eq_ignore_ascii_case(item.id.as_str())
+        || title.starts_with("telegram:")
+        || title
+            .strip_prefix("Telegram ")
+            .is_some_and(looks_like_telegram_ref)
+}
+
 fn item_matches_query(item: &TvItem, query: &str) -> bool {
     if query.is_empty() {
         return true;
@@ -2271,6 +2292,28 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                         entry.runtime_ticks = entry.runtime_ticks.or(meta.runtime_ticks);
                         entry.source_provider = meta.source_provider.clone();
                     }
+                }
+
+                // Older local rows may not have a title at all. Hydrate the
+                // visible resume cards directly by canonical id instead of
+                // showing a raw Telegram reference. Keep the lookup bounded.
+                let mut detail_budget = 12usize;
+                for entry in resume.iter_mut() {
+                    if !resume_title_needs_hydration(entry) {
+                        continue;
+                    }
+                    if detail_budget == 0 {
+                        break;
+                    }
+                    detail_budget -= 1;
+                    let Ok(detail) = client.get_catalog_video_detail(&entry.id) else {
+                        continue;
+                    };
+                    let meta = TvItem::from(detail);
+                    entry.title = meta.title;
+                    entry.primary_image_tag = meta.primary_image_tag;
+                    entry.runtime_ticks = entry.runtime_ticks.or(meta.runtime_ticks);
+                    entry.source_provider = meta.source_provider;
                 }
 
                 let mut history = local_store
