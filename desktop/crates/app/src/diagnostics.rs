@@ -22,6 +22,10 @@ static UUID_REGEX: LazyLock<Regex> = LazyLock::new(|| {
         .expect("valid uuid regex")
 });
 
+static AUTHORIZATION_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\bauthorization\b\s*[:=]\s*[^\r\n,;]+").expect("valid authorization regex")
+});
+
 static SECRET_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(token|authorization|password|api[_-]?key)\b\s*[:=]\s*[^\s,;]+")
         .expect("valid secret regex")
@@ -41,10 +45,11 @@ pub fn redact(message: &str) -> String {
     let s1 = URL_REGEX.replace_all(message, "[URL]");
     let s2 = WINDOWS_PATH_REGEX.replace_all(&s1, "${1}[PATH]");
     let s3 = UNIX_PATH_REGEX.replace_all(&s2, "${1}[PATH]");
-    let s4 = SECRET_REGEX.replace_all(&s3, "${1}=[REDACTED]");
-    let s5 = IDENTIFIER_REGEX.replace_all(&s4, "${1}=[REDACTED]");
-    let s6 = TITLE_REGEX.replace_all(&s5, "${1}=[REDACTED]");
-    UUID_REGEX.replace_all(&s6, "[ID]").into_owned()
+    let s4 = AUTHORIZATION_REGEX.replace_all(&s3, "authorization=[REDACTED]");
+    let s5 = SECRET_REGEX.replace_all(&s4, "${1}=[REDACTED]");
+    let s6 = IDENTIFIER_REGEX.replace_all(&s5, "${1}=[REDACTED]");
+    let s7 = TITLE_REGEX.replace_all(&s6, "${1}=[REDACTED]");
+    UUID_REGEX.replace_all(&s7, "[ID]").into_owned()
 }
 
 /// Tail of the on-disk startup log, redacted line by line, for the
@@ -240,15 +245,17 @@ mod tests {
 
     #[test]
     fn redacts_sensitive_values() {
-        let input = "Connecting to https://media.example:8090/api/v1 with token=abc123xyz and password: mySecretPassword123";
+        let input = "Connecting to https://media.example:8090/api/v1 with token=abc123xyz and password: mySecretPassword123, Authorization: Bearer headerSecret456";
         let redacted = redact(input);
         assert!(!redacted.contains("https://"));
         assert!(!redacted.contains("media.example"));
         assert!(!redacted.contains("abc123xyz"));
         assert!(!redacted.contains("mySecretPassword123"));
+        assert!(!redacted.contains("headerSecret456"));
         assert!(redacted.contains("[URL]"));
         assert!(redacted.contains("token=[REDACTED]"));
         assert!(redacted.contains("password=[REDACTED]"));
+        assert!(redacted.contains("authorization=[REDACTED]"));
     }
 
     #[test]
