@@ -443,6 +443,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &local_store,
                 &home_catalog,
             );
+            // A session saved by a pre-API build can point at a Jellyfin
+            // server, or carry an expired Adult Hub token. Validate it in the
+            // background and clear it only for definitive auth/API failures;
+            // transient network errors must not log the user out.
+            let weak = ui.as_weak();
+            let credential_store = credential_store.clone();
+            let local_store = local_store.clone();
+            let server_url = session.server_url.clone();
+            let access_token = session.access_token.clone();
+            std::thread::spawn(move || {
+                let check = adult_hub_client::AdultHubClient::new(&server_url)
+                    .map(|client| client.with_token(&access_token))
+                    .and_then(|client| {
+                        client.get_categories(&adult_hub_client::CatalogTaxonomyQuery {
+                            offset: Some(0),
+                            limit: Some(1),
+                            q: None,
+                        })
+                    });
+                let invalid = matches!(
+                    check,
+                    Err(adult_hub_client::AdultHubError::Unauthorized { .. })
+                        | Err(adult_hub_client::AdultHubError::NotFound(_))
+                );
+                if !invalid {
+                    return;
+                }
+                let _ = credential_store.clear();
+                let _ = local_store.clear_session();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_is_logged_in(false);
+                        ui.set_logged_in_user("".into());
+                        ui.set_login_modal_visible(true);
+                        ui.set_login_modal_message(
+                            "The saved session is not an Adult Hub server. Sign in again.".into(),
+                        );
+                        ui.set_toast_message(
+                            "Saved session expired or belongs to an old server. Sign in to Adult Hub again.".into(),
+                        );
+                        ui.set_toast_type("warning".into());
+                        ui.set_toast_action_text("Sign In".into());
+                        ui.set_toast_visible(true);
+                    }
+                });
+            });
         } else {
             *pending_http_restore
                 .lock()

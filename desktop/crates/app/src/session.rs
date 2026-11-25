@@ -201,10 +201,10 @@ impl PlaybackSessionController {
 
     pub fn resolve_stream_url_with_variant(
         item: &TvItem,
-        server_url: Option<&str>,
-        resolver_url: Option<&str>,
-        access_token: Option<&str>,
-        variant: Option<&str>,
+        _server_url: Option<&str>,
+        _resolver_url: Option<&str>,
+        _access_token: Option<&str>,
+        _variant: Option<&str>,
     ) -> Result<(String, PlayMethod), String> {
         if item.id == "sample" {
             return Ok((
@@ -229,35 +229,6 @@ impl PlaybackSessionController {
             ));
         }
 
-        if item.is_telegram() {
-            let resolver = resolver_url.unwrap_or("").trim().trim_end_matches('/');
-            if resolver.is_empty() {
-                return Err("Resolver URL is required to play Telegram content".into());
-            }
-            // A card may carry the catalog id, the provider reference, or a row
-            // written by an older build with the prefix attached twice. The
-            // resolver only accepts `telegram:<ref>`, so reduce whatever spelling
-            // we hold to the bare reference before the prefix goes back on.
-            let raw_ref = item
-                .provider_video_id
-                .as_deref()
-                .filter(|id| !id.trim().is_empty())
-                .unwrap_or(&item.id);
-            let prov_ref = format!(
-                "telegram:{}",
-                adult_hub_client::canonical_telegram_ref(raw_ref)
-            );
-            let variant_param = match variant {
-                Some(v) if !v.is_empty() && v != "original" => {
-                    format!("&variant={}", adult_hub_client::urlencoding(v))
-                }
-                _ => String::new(),
-            };
-            let url = format!("{resolver}/admin/play/{prov_ref}/stream?mode=proxy{variant_param}");
-            return Ok((url, PlayMethod::DirectStream));
-        }
-
-        let _ = (server_url, access_token);
         Err("Adult Hub playback descriptor is required for this item".into())
     }
 }
@@ -479,44 +450,13 @@ mod tests {
 
         let mut tg_item = library_item.clone();
         tg_item.provider_video_id = Some("101".into());
-        let (url, method) = PlaybackSessionController::resolve_stream_url(
+        let err = PlaybackSessionController::resolve_stream_url(
             &tg_item,
             None,
             Some("http://resolver.local:8080"),
             None,
         )
-        .unwrap();
-        assert_eq!(
-            url,
-            "http://resolver.local:8080/admin/play/telegram:101/stream?mode=proxy"
-        );
-        assert_eq!(method, PlayMethod::DirectStream);
-
-        // Variant resolution
-        let (orig_variant_url, _) = PlaybackSessionController::resolve_stream_url_with_variant(
-            &tg_item,
-            None,
-            Some("http://resolver.local:8080"),
-            None,
-            Some("original"),
-        )
-        .unwrap();
-        assert_eq!(
-            orig_variant_url,
-            "http://resolver.local:8080/admin/play/telegram:101/stream?mode=proxy"
-        );
-
-        let (alt_variant_url, _) = PlaybackSessionController::resolve_stream_url_with_variant(
-            &tg_item,
-            None,
-            Some("http://resolver.local:8080"),
-            None,
-            Some("alt_720p"),
-        )
-        .unwrap();
-        assert_eq!(
-            alt_variant_url,
-            "http://resolver.local:8080/admin/play/telegram:101/stream?mode=proxy&variant=alt_720p"
-        );
+        .unwrap_err();
+        assert!(err.contains("playback descriptor"));
     }
 }

@@ -1514,3 +1514,43 @@ mod tests {
         assert!(guard.is_in_flight(item_id));
     }
 }
+
+#[cfg(test)]
+mod stream_probe_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    fn serve_once(response: &'static str) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0_u8; 2048];
+            let _ = stream.read(&mut buffer);
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        });
+        (format!("http://{address}/stream"), handle)
+    }
+
+    #[test]
+    fn stream_probe_reports_content_range_size() {
+        let (url, server) = serve_once(
+            "HTTP/1.1 206 Partial Content\r\nContent-Type: video/mp4\r\nContent-Range: bytes 0-0/10000000\r\nContent-Length: 1\r\nConnection: close\r\n\r\nX",
+        );
+        let size = probe_remote_media_size_detailed(&url, &[]).expect("range probe succeeds");
+        assert_eq!(size, 10_000_000);
+        let _ = server.join();
+    }
+
+    #[test]
+    fn stream_probe_reports_http_status_on_failure() {
+        let (url, server) = serve_once(
+            "HTTP/1.1 403 Forbidden\r\nContent-Type: application/problem+json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+        );
+        let error = probe_remote_media_size_detailed(&url, &[]).expect_err("403 must fail");
+        assert!(error.contains("403"), "{error}");
+        let _ = server.join();
+    }
+}

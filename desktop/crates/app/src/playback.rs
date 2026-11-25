@@ -374,10 +374,18 @@ pub fn start_item_playback_with_resume(
         let descriptor = match resolve_playback_descriptor(&client, &mut item, local_store) {
             Ok(d) => d,
             Err(err) => {
-                let safe_msg = format!(
-                    "Could not resolve Adult Hub playback: {}",
-                    format_safe_adult_hub_error(&err)
-                );
+                let not_found = matches!(&err, adult_hub_client::AdultHubError::NotFound(_));
+                if not_found {
+                    let _ = local_store.forget_item(&item.id);
+                }
+                let safe_msg = if not_found {
+                    "This item is no longer in the Adult Hub catalog. It was removed from Continue Watching and history.".to_string()
+                } else {
+                    format!(
+                        "Could not resolve Adult Hub playback: {}",
+                        format_safe_adult_hub_error(&err)
+                    )
+                };
                 ui.set_player_state("failed".into());
                 show_error(ui, safe_msg);
                 return;
@@ -903,46 +911,55 @@ pub fn start_item_playback_with_resume_ctx(
                 server_progress = progress;
             }
 
-            let descriptor =
-                match resolve_playback_descriptor(&client, &mut item, &ctx_clone.local_store) {
-                    Ok(d) => d,
-                    Err(err) => {
-                        let is_unauth = err.is_unauthorized();
-                        let safe_err = format_safe_adult_hub_error(&err);
-                        let msg = format!("Could not resolve Adult Hub playback: {safe_err}");
-                        let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(ui) = weak_ui.upgrade() {
-                                if !ctx_clone.session_ctrl.is_request_current(request_id) {
-                                    return;
-                                }
-                                ui.set_player_state("failed".into());
-                                ui.set_is_changing_quality(false);
-                                ui.set_is_switching_movie(false);
-                                show_error(&ui, msg.clone());
-                                if is_unauth {
-                                    ui.set_is_logged_in(false);
-                                    ui.set_login_modal_visible(true);
-                                    ui.set_login_modal_message(
-                                        "Session expired (401 Unauthorized). Please sign in again."
-                                            .into(),
-                                    );
-                                    ui.set_toast_message(
-                                        "Session expired. Please reconnect.".into(),
-                                    );
-                                    ui.set_toast_type("warning".into());
-                                    ui.set_toast_action_text("Sign In".into());
-                                    ui.set_toast_visible(true);
-                                } else {
-                                    ui.set_toast_message(msg.into());
-                                    ui.set_toast_type("error".into());
-                                    ui.set_toast_action_text("".into());
-                                    ui.set_toast_visible(true);
-                                }
-                            }
-                        });
-                        return;
+            let descriptor = match resolve_playback_descriptor(
+                &client,
+                &mut item,
+                &ctx_clone.local_store,
+            ) {
+                Ok(d) => d,
+                Err(err) => {
+                    let is_unauth = err.is_unauthorized();
+                    let not_found = matches!(&err, adult_hub_client::AdultHubError::NotFound(_));
+                    if not_found {
+                        let _ = ctx_clone.local_store.forget_item(&item.id);
                     }
-                };
+                    let safe_err = format_safe_adult_hub_error(&err);
+                    let msg = if not_found {
+                        "This item is no longer in the Adult Hub catalog. It was removed from Continue Watching and history.".to_string()
+                    } else {
+                        format!("Could not resolve Adult Hub playback: {safe_err}")
+                    };
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak_ui.upgrade() {
+                            if !ctx_clone.session_ctrl.is_request_current(request_id) {
+                                return;
+                            }
+                            ui.set_player_state("failed".into());
+                            ui.set_is_changing_quality(false);
+                            ui.set_is_switching_movie(false);
+                            show_error(&ui, msg.clone());
+                            if is_unauth {
+                                ui.set_is_logged_in(false);
+                                ui.set_login_modal_visible(true);
+                                ui.set_login_modal_message(
+                                    "Session expired (401 Unauthorized). Please sign in again."
+                                        .into(),
+                                );
+                                ui.set_toast_message("Session expired. Please reconnect.".into());
+                                ui.set_toast_type("warning".into());
+                                ui.set_toast_action_text("Sign In".into());
+                                ui.set_toast_visible(true);
+                            } else {
+                                ui.set_toast_message(msg.into());
+                                ui.set_toast_type("error".into());
+                                ui.set_toast_action_text("".into());
+                                ui.set_toast_visible(true);
+                            }
+                        }
+                    });
+                    return;
+                }
+            };
 
             let renditions = descriptor.renditions.clone();
             if !renditions.is_empty() {

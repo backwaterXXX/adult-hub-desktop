@@ -802,6 +802,35 @@ impl LocalStore {
         Ok(results)
     }
 
+    /// Drop all local state for an item that the catalog no longer knows
+    /// about, including the historical Telegram prefix spellings.
+    pub fn forget_item(&self, item_id: &str) -> Result<()> {
+        let trimmed = item_id.trim();
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+        let mut ids = vec![trimmed.to_string()];
+        if trimmed.starts_with("telegram:") || trimmed.contains(':') {
+            let bare = normalize_telegram_provider_id(trimmed);
+            if !bare.is_empty() {
+                ids.push(bare.clone());
+                ids.push(format!("telegram:{bare}"));
+                ids.push(format!("telegram:telegram:{bare}"));
+            }
+        }
+        ids.sort();
+        ids.dedup();
+        let conn = self.conn()?;
+        for id in ids {
+            conn.execute(
+                "DELETE FROM local_progress WHERE video_id = ?1",
+                params![id],
+            )?;
+            conn.execute("DELETE FROM watch_history WHERE item_id = ?1", params![id])?;
+        }
+        Ok(())
+    }
+
     pub fn clear_telegram_progress(&self, provider_video_id: &str) -> Result<()> {
         let conn = self.conn()?;
         let bare = normalize_telegram_provider_id(provider_video_id);
@@ -2404,5 +2433,60 @@ mod tests {
         assert_eq!(meta2.permissions().mode() & 0o777, 0o600);
 
         let _ = std::fs::remove_dir_all(&cred_dir);
+    }
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    #[test]
+    fn migrate_item_identity_moves_progress_and_history() {
+        let store = LocalStore::open_in_memory().unwrap();
+        let old_id = "telegram:5c23c503c114b8a273fd6ec9fbe0a031";
+        let new_id = "telegram:-1001618765010:315:5377541844798282037";
+        store
+            .save_progress("local", old_id, 42_000, 120_000)
+            .unwrap();
+        store
+            .record_watch_history(old_id, r#"{"id":"telegram:5c23","title":"Old row"}"#)
+            .unwrap();
+
+        store.migrate_item_identity(old_id, new_id).unwrap();
+
+        assert!(store.get_progress("local", old_id).unwrap().is_none());
+        assert_eq!(
+            store.get_progress("local", new_id).unwrap(),
+            Some((42_000, 120_000))
+        );
+        let history = store.get_watch_history(10).unwrap();
+        assert_eq!(history.len(), 1);
+        let parsed: serde_json::Value = serde_json::from_str(&history[0]).unwrap();
+        assert_eq!(parsed["id"], new_id);
+    }
+
+    #[test]
+    fn forget_item_removes_all_telegram_spellings() {
+        let store = LocalStore::open_in_memory().unwrap();
+        let bare = "-1001618765010:315:5377541844798282037";
+        for id in [bare.to_string(), format!("telegram:{bare}")] {
+            let rec = TelegramProgressRecord {
+                provider_video_id: id.clone(),
+                channel_id: Some("telegram".into()),
+                position_ms: 10_000,
+                duration_ms: 60_000,
+                title: "Stale".into(),
+                thumbnail_url: None,
+                is_played: false,
+                updated_at: 1,
+            };
+            store.save_telegram_progress(&rec).unwrap();
+            store
+                .record_watch_history(&id, r#"{"id":"x","title":"Stale"}"#)
+                .unwrap();
+        }
+        store.forget_item(bare).unwrap();
+        assert!(store.get_telegram_progress(bare).unwrap().is_none());
+        assert!(store.get_watch_history(10).unwrap().is_empty());
     }
 }

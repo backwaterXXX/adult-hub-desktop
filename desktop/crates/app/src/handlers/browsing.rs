@@ -4594,3 +4594,21 @@ mod tests {
         assert!(item_matches_query(&item, "warsaw"));
     }
 }
+
+#[cfg(test)]
+mod legacy_id_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_telegram_hashes_are_distinguished_from_canonical_refs() {
+        assert!(is_legacy_telegram_hash_id(
+            "telegram:5c23c503c114b8a273fd6ec9fbe0a031"
+        ));
+        assert!(!is_legacy_telegram_hash_id(
+            "telegram:-1001618765010:315:5377541844798282037"
+        ));
+        assert!(!is_legacy_telegram_hash_id(
+            "864d93c2-630d-5cfc-9022-a20ec78a352e"
+        ));
+    }
+}
