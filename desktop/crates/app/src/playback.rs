@@ -301,7 +301,7 @@ pub fn start_item_playback(
 pub fn start_item_playback_with_resume(
     ui: &MainWindow,
     player: &Player,
-    item: TvItem,
+    mut item: TvItem,
     headers: &[String],
     credential_store: &Arc<CredentialStore>,
     local_store: &Arc<LocalStore>,
@@ -371,7 +371,7 @@ pub fn start_item_playback_with_resume(
                 return;
             }
         };
-        let descriptor = match client.get_playback_descriptor(&item.id) {
+        let descriptor = match resolve_playback_descriptor(&client, &mut item) {
             Ok(d) => d,
             Err(err) => {
                 let safe_msg = format!(
@@ -555,6 +555,56 @@ pub fn format_safe_adult_hub_error(err: &adult_hub_client::AdultHubError) -> Str
     }
 }
 
+/// Resolve a playback descriptor for the item. Local resume/history rows written
+/// by older releases may key a Telegram item by a legacy hash instead of the
+/// canonical catalog id. When the server returns 404, retry once by exact title
+/// (and closest duration) so those items remain playable.
+fn resolve_playback_descriptor(
+    client: &adult_hub_client::AdultHubClient,
+    item: &mut TvItem,
+) -> std::result::Result<adult_hub_client::PlaybackDescriptorDto, adult_hub_client::AdultHubError> {
+    match client.get_playback_descriptor(&item.id) {
+        Ok(descriptor) => Ok(descriptor),
+        Err(err @ adult_hub_client::AdultHubError::NotFound(_)) => {
+            let title = item.title.trim();
+            if title.is_empty() {
+                return Err(err);
+            }
+            let Ok(response) = client.get_videos(&adult_hub_client::CatalogVideosQuery {
+                offset: Some(0),
+                limit: Some(10),
+                q: Some(title),
+                ..Default::default()
+            }) else {
+                return Err(err);
+            };
+            let duration = item
+                .runtime_ticks
+                .map(|ticks| (ticks / 10_000_000).max(0) as u64)
+                .unwrap_or(0);
+            let Some(candidate) = response.items.into_iter().find(|candidate| {
+                candidate.title.trim().eq_ignore_ascii_case(title)
+                    && (duration == 0
+                        || candidate.duration_seconds == 0
+                        || candidate.duration_seconds.abs_diff(duration) <= 5)
+            }) else {
+                return Err(err);
+            };
+            crate::log_debug(&format!(
+                "playback: remapped stale item {} to canonical {} by title",
+                item.id, candidate.id
+            ));
+            item.id = candidate.id.clone();
+            item.title = candidate.title;
+            if item.source_provider.is_none() {
+                item.source_provider = Some("adult_hub".into());
+            }
+            client.get_playback_descriptor(&item.id)
+        }
+        Err(err) => Err(err),
+    }
+}
+
 pub fn resolve_adult_hub_stream_target(
     client: &adult_hub_client::AdultHubClient,
     descriptor: &adult_hub_client::PlaybackDescriptorDto,
@@ -651,7 +701,7 @@ pub fn start_item_playback_ctx(ui: &MainWindow, ctx: &AppContext, item: TvItem) 
 pub fn start_item_playback_with_resume_ctx(
     ui: &MainWindow,
     ctx: &AppContext,
-    item: TvItem,
+    mut item: TvItem,
     resume_choice: Option<bool>,
 ) {
     let Some(player) = ctx.player.clone() else {
@@ -830,7 +880,7 @@ pub fn start_item_playback_with_resume_ctx(
                 server_progress = progress;
             }
 
-            let descriptor = match client.get_playback_descriptor(&item.id) {
+            let descriptor = match resolve_playback_descriptor(&client, &mut item) {
                 Ok(d) => d,
                 Err(err) => {
                     let is_unauth = err.is_unauthorized();
