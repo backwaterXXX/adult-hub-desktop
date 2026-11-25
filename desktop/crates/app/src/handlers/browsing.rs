@@ -2013,6 +2013,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             let credential_store = credential_store.clone();
             let local_store = local_store.clone();
             let home_catalog = home_catalog.clone();
+            let ctx_home = ctx_home.clone();
 
             std::thread::spawn(move || {
                 let Some(session) = credential_store.get().ok().flatten() else {
