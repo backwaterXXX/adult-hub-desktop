@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>com.adult-hub.desktop</id>
+  <id>io.github.backwaterxxx.AdultHubDesktop</id>
   <name>Adult Hub Desktop</name>
   <summary>Browse and play your Adult Hub catalog</summary>
   <metadata_license>CC0-1.0</metadata_license>
@@ -37,6 +37,6 @@
     <content_attribute id="sex-themes">intense</content_attribute>
   </content_rating>
   <releases>
-    <release version="0.2.39" date="2026-11-25"/>
+    <release version="0.2.40" date="2026-11-25"/>
   </releases>
 </component>
