@@ -1,5 +1,6 @@
 use super::home_categories::{
-    cached_home_categories, clear_home_categories_cache, resume_title_needs_hydration,
+    cached_home_categories, catalog_lookup_id, clear_home_categories_cache,
+    resume_title_needs_hydration,
 };
 use crate::catalog::{
     append_catalog_page, filter_catalog_items, refresh_catalog_thumbnails_async,
@@ -579,6 +580,57 @@ fn item_matches_query(item: &TvItem, query: &str) -> bool {
             .is_some_and(|overview| overview.to_lowercase().contains(query))
 }
 
+/// Replace raw Telegram references with real catalog metadata.
+///
+/// Resume and history rows can predate canonical ids: the title is the bare
+/// provider reference (`channel:message:file`). Look the material up by its
+/// canonical id (adding the `telegram:` prefix when needed) and copy only the
+/// metadata fields, so local progress keys stay untouched.
+fn hydrate_missing_titles(client: &AdultHubClient, items: &mut [TvItem], limit: usize) {
+    if items.is_empty() || limit == 0 {
+        return;
+    }
+    let missing_indices = items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| resume_title_needs_hydration(item))
+        .map(|(index, _)| index)
+        .take(limit)
+        .collect::<Vec<_>>();
+    if missing_indices.is_empty() {
+        return;
+    }
+    let hydrated = std::thread::scope(|scope| {
+        let handles = missing_indices
+            .iter()
+            .filter_map(|index| {
+                let id = items.get(*index)?.id.clone();
+                let lookup = catalog_lookup_id(&id);
+                Some(scope.spawn(move || {
+                    client
+                        .get_catalog_video_detail(&lookup)
+                        .ok()
+                        .map(TvItem::from)
+                        .map(|meta| (*index, meta))
+                }))
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .filter_map(|handle| handle.join().ok().flatten())
+            .collect::<Vec<_>>()
+    });
+    for (index, meta) in hydrated {
+        let Some(entry) = items.get_mut(index) else {
+            continue;
+        };
+        entry.title = meta.title;
+        entry.primary_image_tag = meta.primary_image_tag;
+        entry.runtime_ticks = entry.runtime_ticks.or(meta.runtime_ticks);
+        entry.source_provider = meta.source_provider;
+    }
+}
+
 fn get_adult_hub_catalog_page(
     session: &Session,
     local_store: &LocalStore,
@@ -587,6 +639,10 @@ fn get_adult_hub_catalog_page(
     start_index: usize,
     filters: CatalogFilters,
 ) -> std::result::Result<CatalogPage, CatalogError> {
+    let client = adult_hub_client::AdultHubClient::new(&session.server_url)
+        .map_err(|e| CatalogError::Api(format!("Failed to initialize Adult Hub client: {e}")))?
+        .with_token(&session.access_token);
+
     if category == "Watch History" {
         let query = query.trim().to_lowercase();
         let mut history = local_store
@@ -605,11 +661,12 @@ fn get_adult_hub_catalog_page(
             history.reverse();
         }
         let total_count = history.len();
-        let items = history
+        let mut items = history
             .into_iter()
             .skip(start_index)
             .take(CATALOG_PAGE_SIZE)
             .collect::<Vec<_>>();
+        hydrate_missing_titles(&client, &mut items, 20);
         let next_start = start_index + items.len();
         return Ok(CatalogPage {
             items,
@@ -619,10 +676,6 @@ fn get_adult_hub_catalog_page(
             supplemental_total: 0,
         });
     }
-
-    let client = adult_hub_client::AdultHubClient::new(&session.server_url)
-        .map_err(|e| CatalogError::Api(format!("Failed to initialize Adult Hub client: {e}")))?
-        .with_token(&session.access_token);
 
     if category == "Categories" {
         let q_term = (!query.trim().is_empty()).then(|| query.trim());
@@ -1978,43 +2031,8 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 // Older local rows may not have a title at all. Hydrate the
                 // visible resume cards directly by canonical id instead of
                 // showing a raw Telegram reference. Keep the lookup bounded
-                // and run it in parallel so a slow link cannot stall Home.
-                let missing_indices = resume
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, entry)| resume_title_needs_hydration(entry))
-                    .map(|(index, _)| index)
-                    .take(12)
-                    .collect::<Vec<_>>();
-                let hydrated = std::thread::scope(|scope| {
-                    let client_ref = &client;
-                    let handles = missing_indices
-                        .iter()
-                        .filter_map(|index| {
-                            let id = resume.get(*index)?.id.clone();
-                            Some(scope.spawn(move || {
-                                client_ref
-                                    .get_catalog_video_detail(&id)
-                                    .ok()
-                                    .map(TvItem::from)
-                                    .map(|meta| (*index, meta))
-                            }))
-                        })
-                        .collect::<Vec<_>>();
-                    handles
-                        .into_iter()
-                        .filter_map(|handle| handle.join().ok().flatten())
-                        .collect::<Vec<_>>()
-                });
-                for (index, meta) in hydrated {
-                    let Some(entry) = resume.get_mut(index) else {
-                        continue;
-                    };
-                    entry.title = meta.title;
-                    entry.primary_image_tag = meta.primary_image_tag;
-                    entry.runtime_ticks = entry.runtime_ticks.or(meta.runtime_ticks);
-                    entry.source_provider = meta.source_provider;
-                }
+                // and parallel so a slow link cannot stall Home.
+                hydrate_missing_titles(&client, &mut resume, 12);
 
                 let mut history = local_store
                     .get_watch_history(16)
@@ -2022,6 +2040,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     .into_iter()
                     .filter_map(|json| serde_json::from_str::<TvItem>(&json).ok())
                     .collect::<Vec<_>>();
+                hydrate_missing_titles(&client, &mut history, 12);
 
                 // Try to map legacy hash ids to canonical catalog items. If a
                 // title no longer exists in the catalog, hide the stale shelf
