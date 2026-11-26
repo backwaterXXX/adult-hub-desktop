@@ -186,6 +186,21 @@ fn random_pages_cover_the_catalog_in_bounded_steps() {
 }
 
 #[test]
+fn performer_sort_defaults_to_a_to_z_and_maps_to_server_params() {
+    assert_eq!(
+        CatalogFilters::default().performer_sort,
+        PerformerSort::NameAsc
+    );
+    assert_eq!(PerformerSort::NameAsc.query(), ("name", "asc"));
+    assert_eq!(PerformerSort::NameDesc.query(), ("name", "desc"));
+    assert_eq!(PerformerSort::VideoCount.query(), ("video_count", "desc"));
+
+    assert_eq!(PerformerSort::NameAsc.index(), 0);
+    assert_eq!(PerformerSort::NameDesc.index(), 1);
+    assert_eq!(PerformerSort::VideoCount.index(), 2);
+}
+
+#[test]
 fn quality_tier_maps_to_the_server_filter_and_counts_once() {
     assert_eq!(QualityTier::All.query(), None);
     assert_eq!(QualityTier::Low.query(), Some("low"));

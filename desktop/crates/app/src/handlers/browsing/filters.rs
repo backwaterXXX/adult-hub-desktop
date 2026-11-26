@@ -42,6 +42,34 @@ impl QualityTier {
     }
 }
 
+/// Sort order for the performer list. The server owns name/video-count sorting.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum PerformerSort {
+    #[default]
+    NameAsc,
+    NameDesc,
+    VideoCount,
+}
+
+impl PerformerSort {
+    /// `(sort, direction)` parameters for `/api/v1/catalog/performers`.
+    pub(super) fn query(self) -> (&'static str, &'static str) {
+        match self {
+            Self::NameAsc => ("name", "asc"),
+            Self::NameDesc => ("name", "desc"),
+            Self::VideoCount => ("video_count", "desc"),
+        }
+    }
+
+    pub(super) fn index(self) -> i32 {
+        match self {
+            Self::NameAsc => 0,
+            Self::NameDesc => 1,
+            Self::VideoCount => 2,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct CatalogFilters {
     pub(super) sort: u8,
@@ -58,6 +86,7 @@ pub(super) struct CatalogFilters {
     pub(super) performer_id: String,
     pub(super) performer_letter: String,
     pub(super) performer_photo_only: bool,
+    pub(super) performer_sort: PerformerSort,
 }
 
 #[derive(Clone)]
@@ -84,6 +113,7 @@ impl Default for CatalogFilters {
             performer_id: String::new(),
             performer_letter: String::new(),
             performer_photo_only: false,
+            performer_sort: PerformerSort::NameAsc,
         }
     }
 }
@@ -211,6 +241,7 @@ pub(super) fn sync_catalog_filters_to_ui(
     if category == "Performers" {
         ui.set_performer_letter(filters.performer_letter.clone().into());
         ui.set_performers_photo_only(filters.performer_photo_only);
+        ui.set_performer_sort_index(filters.performer_sort.index());
     }
     let (sort, duration) = catalog_filter_labels(filters);
     ui.set_catalog_sort_label(sort.into());

@@ -687,6 +687,7 @@ fn get_adult_hub_catalog_page(
         let q_term = (!query.trim().is_empty()).then(|| query.trim());
         let letter_term =
             (!filters.performer_letter.trim().is_empty()).then(|| filters.performer_letter.trim());
+        let (performer_sort, performer_direction) = filters.performer_sort.query();
         let perf_resp = client
             .get_performers(&adult_hub_client::CatalogPerformersQuery {
                 offset: Some(start_index as u64),
@@ -694,8 +695,8 @@ fn get_adult_hub_catalog_page(
                 q: q_term,
                 letter: letter_term,
                 photo_only: filters.performer_photo_only.then_some(true),
-                sort: Some("name"),
-                direction: filters.descending.then_some("desc"),
+                sort: Some(performer_sort),
+                direction: Some(performer_direction),
             })
             .map_err(|err| {
                 if err.is_unauthorized() {
@@ -2136,6 +2137,9 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 "quality-medium" => value.quality = value.quality.toggled(QualityTier::Medium),
                 "quality-high" => value.quality = value.quality.toggled(QualityTier::High),
                 "quality-clear" => value.quality = QualityTier::All,
+                "performer-sort-az" => value.performer_sort = PerformerSort::NameAsc,
+                "performer-sort-za" => value.performer_sort = PerformerSort::NameDesc,
+                "performer-sort-videos" => value.performer_sort = PerformerSort::VideoCount,
                 "duration" => value.duration = (value.duration + 1) % 4,
                 _ => return,
             }
