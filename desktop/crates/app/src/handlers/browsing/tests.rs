@@ -186,6 +186,48 @@ fn random_pages_cover_the_catalog_in_bounded_steps() {
 }
 
 #[test]
+fn quality_tier_maps_to_the_server_filter_and_counts_once() {
+    assert_eq!(QualityTier::All.query(), None);
+    assert_eq!(QualityTier::Low.query(), Some("low"));
+    assert_eq!(QualityTier::Medium.query(), Some("medium"));
+    assert_eq!(QualityTier::High.query(), Some("high"));
+
+    assert_eq!(
+        QualityTier::All.toggled(QualityTier::High),
+        QualityTier::High
+    );
+    assert_eq!(
+        QualityTier::High.toggled(QualityTier::High),
+        QualityTier::All
+    );
+
+    let filters = CatalogFilters {
+        quality: QualityTier::High,
+        ..Default::default()
+    };
+    assert_eq!(filters.active_filter_count("Latest"), 1);
+    assert_eq!(filters.active_filter_count("Performers"), 0);
+}
+
+#[test]
+fn accepts_never_re_derives_quality_from_file_size() {
+    let mut item = TvItem::new("vid", "Title");
+    item.file_size_bytes = Some(4 * 1024 * 1024 * 1024);
+    item.width = None;
+    item.height = None;
+
+    // The server already decided the tier; a large file is not local evidence.
+    assert!(CatalogFilters::default().accepts(&item));
+    assert!(
+        CatalogFilters {
+            quality: QualityTier::High,
+            ..Default::default()
+        }
+        .accepts(&item)
+    );
+}
+
+#[test]
 fn test_catalog_filter_sorts_and_labels() {
     let mut filters = CatalogFilters::default();
     assert_eq!(filters.sort_by(), "DateCreated");
