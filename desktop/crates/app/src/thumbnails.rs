@@ -451,7 +451,7 @@ thread_local! {
     static MEMORY_IMAGES: RefCell<MemoryImageCache> = RefCell::new(MemoryImageCache::new());
 }
 
-struct CountPermit {
+pub(crate) struct CountPermit {
     semaphore: &'static (Mutex<usize>, Condvar),
 }
 
@@ -832,14 +832,6 @@ fn send_image_request(
         current = next;
     }
     Err(ImageRequestError::RedirectLimit)
-}
-
-/// Return a cached, already decoded image for this URL.
-///
-/// Card builders run on the UI thread; they must never decode artwork there.
-/// Only images decoded earlier by the worker pipeline are returned.
-pub fn load_cached_image(url: &str) -> Option<slint::Image> {
-    cached_memory_image(url, CARD_ARTWORK_WIDTH)
 }
 
 fn discard_corrupt_cache_entry(url: &str, path: &std::path::Path) {
