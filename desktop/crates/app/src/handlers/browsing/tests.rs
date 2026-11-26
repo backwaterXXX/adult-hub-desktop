@@ -201,6 +201,17 @@ fn performer_sort_defaults_to_a_to_z_and_maps_to_server_params() {
 }
 
 #[test]
+fn continue_watching_legacy_categories_route_to_history() {
+    assert_eq!(
+        legacy_catalog_category("Continue Watching"),
+        "Watch History"
+    );
+    assert_eq!(legacy_catalog_category("Resume"), "Watch History");
+    assert_eq!(legacy_catalog_category("Watch History"), "Watch History");
+    assert_eq!(legacy_catalog_category("Favorites"), "Favorites");
+}
+
+#[test]
 fn quality_tier_maps_to_the_server_filter_and_counts_once() {
     assert_eq!(QualityTier::All.query(), None);
     assert_eq!(QualityTier::Low.query(), Some("low"));

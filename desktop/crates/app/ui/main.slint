@@ -3462,22 +3462,6 @@ export component MainWindow inherits Window {
 
                     TvNavSubButton {
                         width: 100%;
-                        text: "Continue Watching";
-                        compact: root.compact-layout;
-                        active: root.active-screen == "browse" && (root.active-category == "Continue Watching" || root.active-category == "Resume");
-                        clicked => {
-                            root.active-category = "Continue Watching";
-                            root.catalog-category-drilldown = false;
-                            root.catalog-genre-query = "";
-                            root.search-query = "";
-                            root.search-applied-query = "";
-                            root.switch-screen("browse");
-                            root.filter-category("Continue Watching");
-                        }
-                    }
-
-                    TvNavSubButton {
-                        width: 100%;
                         text: "Favorites";
                         compact: root.compact-layout;
                         active: root.active-screen == "browse" && root.active-category == "Favorites";
@@ -3903,20 +3887,6 @@ export component MainWindow inherits Window {
                         has-item: true;
                         play(id) => { root.play-item(id); }
                         open-detail(id) => { root.open-item-detail(id); }
-                    }
-
-                    if root.is-logged-in && root.home-resume-items.length > 0 : DashboardShelf {
-                        title: "Continue Watching";
-                        items: root.home-resume-items;
-                        loading: root.home-is-loading;
-                        error-message: root.home-resume-error;
-                        viewport-width: home-content.content-width;
-                        play-item(id) => { root.play-item(id); }
-                        open-item(id) => { root.open-item-detail(id); }
-                        thumbnail-retry(item) => { root.retry-thumbnail(item); }
-                        open-performer(name) => { root.open-performer-profile(name); }
-                        show-all(category-name) => { root.active-category = "Continue Watching"; root.switch-screen("browse"); root.filter-category("Continue Watching"); }
-                        retry => { root.refresh-home(); }
                     }
 
                     if root.is-logged-in && root.home-history-items.length > 0 : DashboardShelf {

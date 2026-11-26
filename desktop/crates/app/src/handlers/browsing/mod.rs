@@ -428,6 +428,15 @@ fn restore_catalog_view(
 /// and the chips show. Outside search, each category owns its filters. Keeping
 /// one scope for display and application is what makes query, filters, the
 /// active-filter counter and the rendered results describe one state.
+/// Continue Watching duplicated the local Watch History list, so saved or
+/// restored navigation entries for it land on History instead of a dead view.
+fn legacy_catalog_category(category: &str) -> &str {
+    match category {
+        "Continue Watching" | "Resume" => "Watch History",
+        other => other,
+    }
+}
+
 fn catalog_filter_scope(ui: &MainWindow) -> String {
     if ui.get_is_catalog_search_results() || ui.get_catalog_category_drilldown() {
         "Latest".to_string()
@@ -3188,6 +3197,11 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
         let filter_category = move |ui: MainWindow,
                                     cat: slint::SharedString,
                                     save_current_view: bool| {
+            let normalized = legacy_catalog_category(cat.as_str()).to_string();
+            if normalized != cat.as_str() {
+                ui.set_active_category(normalized.clone().into());
+            }
+            let cat = slint::SharedString::from(normalized);
             if cat != "Latest" {
                 ui.set_catalog_category_drilldown(false);
             } else if !ui.get_catalog_category_drilldown() {
