@@ -3351,6 +3351,9 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             let drilldown = target_page.drilldown;
             sync_catalog_filters_to_ui(&ui, &cat, &filters);
 
+            // Clone per call: the worker consumes its own copy, which keeps the
+            // enclosing callback an `Fn` instead of `FnOnce`.
+            let ctx = ctx.clone();
             std::thread::spawn(move || {
                 let started = std::time::Instant::now();
                 let cat_label = cat.clone();
