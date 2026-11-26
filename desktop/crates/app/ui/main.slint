@@ -3023,7 +3023,7 @@ export component MainWindow inherits Window {
                 return accept;
             }
 
-            // Global Refresh: F5 or Ctrl+R
+            // Global Refresh: F5 or Ctrl+R reloads whatever the current screen shows.
             if (event.text == Key.F5 || (event.modifiers.control && (event.text == "r" || event.text == "R"))) {
                 if (root.active-screen == "home") {
                     root.refresh-home();
@@ -3032,6 +3032,27 @@ export component MainWindow inherits Window {
                 if (root.active-screen == "browse") {
                     root.filter-category(root.active-category);
                     return accept;
+                }
+                if (root.active-screen == "channels") {
+                    root.refresh-channel-categories();
+                    return accept;
+                }
+                if (root.active-screen == "video-details" && root.detail-id != "") {
+                    root.open-item-detail(root.detail-id);
+                    return accept;
+                }
+                if (root.active-screen == "performer-details" && root.performer-id != "") {
+                    root.open-performer-profile(root.performer-id);
+                    return accept;
+                }
+                if (root.active-screen == "studio-details" && root.studio-name != "") {
+                    root.open-studio-profile(root.studio-name);
+                    return accept;
+                }
+                // The player owns F5 while it is open; refreshing underneath it
+                // would only disturb playback.
+                if (root.active-screen != "player") {
+                    return reject;
                 }
             }
 

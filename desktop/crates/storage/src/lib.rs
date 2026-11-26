@@ -149,6 +149,24 @@ pub struct LocalStore {
     conn: Mutex<Connection>,
 }
 
+/// Tune the SQLite connection for a desktop app that reads on the UI thread
+/// while background workers write progress and history.
+///
+/// Defaults are `journal_mode=DELETE` with `synchronous=FULL`: every commit
+/// fsyncs and takes a write lock that blocks readers. WAL + NORMAL keeps reads
+/// non-blocking, and the busy timeout turns an unlucky overlap into a short wait
+/// instead of an immediate `SQLITE_BUSY`.
+fn tune_connection(conn: &Connection) -> Result<()> {
+    conn.busy_timeout(std::time::Duration::from_millis(5_000))?;
+    conn.execute_batch(
+        "PRAGMA temp_store=MEMORY;
+         PRAGMA cache_size=-8192;",
+    )?;
+    let _ = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get::<_, String>(0));
+    conn.execute_batch("PRAGMA synchronous=NORMAL;")?;
+    Ok(())
+}
+
 impl LocalStore {
     fn conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
         self.conn
@@ -158,6 +176,7 @@ impl LocalStore {
 
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
+        tune_connection(&conn)?;
         let store = Self {
             conn: Mutex::new(conn),
         };
@@ -174,6 +193,7 @@ impl LocalStore {
         // gives its journal and WAL files the database file's permissions.
         ensure_private_file(path)?;
         let conn = Connection::open(path)?;
+        tune_connection(&conn)?;
         let store = Self {
             conn: Mutex::new(conn),
         };

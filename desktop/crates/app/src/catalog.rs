@@ -26,7 +26,7 @@ pub struct ThumbnailRequest {
 #[derive(Clone)]
 pub struct FetchedThumbnail {
     pub url: String,
-    pub bytes: Vec<u8>,
+    pub artwork: crate::thumbnails::DecodedArtwork,
 }
 
 /// A card artwork fetch result plus whether every attempt that failed did so
@@ -44,36 +44,8 @@ struct ThumbnailFlight {
 }
 
 static THUMBNAIL_FLIGHTS: OnceLock<Mutex<HashMap<String, Arc<ThumbnailFlight>>>> = OnceLock::new();
-static THUMBNAIL_DOWNLOADS: OnceLock<(Mutex<usize>, Condvar)> = OnceLock::new();
 
-struct ThumbnailDownloadPermit;
-
-impl ThumbnailDownloadPermit {
-    fn acquire() -> Option<Self> {
-        const MAX_CONCURRENT_DOWNLOADS: usize = 4;
-        let (active, available) =
-            THUMBNAIL_DOWNLOADS.get_or_init(|| (Mutex::new(0), Condvar::new()));
-        let mut count = active.lock().ok()?;
-        while *count >= MAX_CONCURRENT_DOWNLOADS {
-            count = available.wait(count).ok()?;
-        }
-        *count += 1;
-        Some(Self)
-    }
-}
-
-impl Drop for ThumbnailDownloadPermit {
-    fn drop(&mut self) {
-        if let Some((active, available)) = THUMBNAIL_DOWNLOADS.get()
-            && let Ok(mut count) = active.lock()
-        {
-            *count = count.saturating_sub(1);
-            available.notify_one();
-        }
-    }
-}
-
-fn thumbnail_flight_key(request: &ThumbnailRequest, token: Option<&str>) -> String {
+fn thumbnail_flight_key(request: &ThumbnailRequest, token: Option<&str>, max_width: u32) -> String {
     let mut key_context = ring::digest::Context::new(&ring::digest::SHA256);
     for value in [
         request.id.as_str(),
@@ -86,6 +58,7 @@ fn thumbnail_flight_key(request: &ThumbnailRequest, token: Option<&str>) -> Stri
         key_context.update(&[0]);
     }
     key_context.update(&request.progress.to_bits().to_le_bytes());
+    key_context.update(&max_width.to_le_bytes());
     if let Some(token) = token {
         let token_digest = ring::digest::digest(&ring::digest::SHA256, token.as_bytes());
         key_context.update(token_digest.as_ref());
@@ -118,29 +91,22 @@ pub(crate) fn thumbnail_request_matches_card(
     if card.id != request.id || card.provider != request.provider {
         return false;
     }
-    let mut requested_urls = [
+    // Compare the three URL slots without allocating: this runs for every
+    // row while thumbnails arrive.
+    fn sorted(urls: [&str; 3]) -> [&str; 3] {
+        let mut urls = urls;
+        urls.sort_unstable();
+        urls
+    }
+    sorted([
         request.primary_url.as_str(),
         request.fallback_url.as_str(),
         request.alternate_url.as_str(),
-    ]
-    .into_iter()
-    .filter(|url| !url.is_empty())
-    .map(str::to_owned)
-    .collect::<Vec<_>>();
-    let mut current_urls = [
+    ]) == sorted([
         card.thumbnail_url.as_str(),
         card.fallback_thumbnail_url.as_str(),
         card.alternate_thumbnail_url.as_str(),
-    ]
-    .into_iter()
-    .filter(|url| !url.is_empty())
-    .map(str::to_owned)
-    .collect::<Vec<_>>();
-    requested_urls.sort_unstable();
-    requested_urls.dedup();
-    current_urls.sort_unstable();
-    current_urls.dedup();
-    requested_urls == current_urls
+    ])
 }
 
 pub(crate) fn card_index_by_request(
@@ -653,24 +619,45 @@ fn update_catalog_thumbnail(
     thumbnail: &FetchedThumbnail,
 ) {
     let items = ui.get_catalog_items();
+    let rows = ui.get_catalog_rows();
+    update_catalog_thumbnail_at(
+        ui,
+        &items,
+        &rows,
+        ui.get_catalog_column_count(),
+        index,
+        request,
+        thumbnail,
+    );
+}
+
+fn update_catalog_thumbnail_at(
+    ui: &MainWindow,
+    items: &slint::ModelRc<VideoCardData>,
+    rows: &slint::ModelRc<VideoCardRowData>,
+    column_count: i32,
+    index: usize,
+    request: &ThumbnailRequest,
+    thumbnail: &FetchedThumbnail,
+) {
     let Some(mut card) = items.row_data(index) else {
         return;
     };
     if !thumbnail_request_matches_card(request, &card) {
         return;
     }
-    let Some(image) = crate::thumbnails::image_from_bytes(&thumbnail.bytes) else {
-        update_thumbnail_state(ui, index, &request.id, "failed", false);
-        return;
-    };
+    let image = crate::thumbnails::remember_artwork_image(
+        &thumbnail.url,
+        crate::thumbnails::CARD_ARTWORK_WIDTH,
+        &thumbnail.artwork,
+    );
     card.thumbnail = image;
     card.thumbnail_state = "ready".into();
     card.has_thumbnail = true;
     items.set_row_data(index, card.clone());
     sync_search_section_card(ui, &card);
 
-    let rows = ui.get_catalog_rows();
-    let columns = ui.get_catalog_column_count().max(1) as usize;
+    let columns = column_count.max(1) as usize;
     let row_index = index / columns;
     if let Some(mut row) = rows.row_data(row_index) {
         match index % columns {
@@ -694,23 +681,44 @@ fn update_channel_thumbnail(
     thumbnail: &FetchedThumbnail,
 ) {
     let items = ui.get_channel_items();
+    let rows = ui.get_channel_rows();
+    update_channel_thumbnail_at(
+        ui,
+        &items,
+        &rows,
+        ui.get_channel_column_count(),
+        index,
+        request,
+        thumbnail,
+    );
+}
+
+fn update_channel_thumbnail_at(
+    _ui: &MainWindow,
+    items: &slint::ModelRc<VideoCardData>,
+    rows: &slint::ModelRc<VideoCardRowData>,
+    column_count: i32,
+    index: usize,
+    request: &ThumbnailRequest,
+    thumbnail: &FetchedThumbnail,
+) {
     let Some(mut card) = items.row_data(index) else {
         return;
     };
     if !thumbnail_request_matches_card(request, &card) {
         return;
     }
-    let Some(image) = crate::thumbnails::image_from_bytes(&thumbnail.bytes) else {
-        update_thumbnail_state(ui, index, &request.id, "failed", true);
-        return;
-    };
+    let image = crate::thumbnails::remember_artwork_image(
+        &thumbnail.url,
+        crate::thumbnails::CARD_ARTWORK_WIDTH,
+        &thumbnail.artwork,
+    );
     card.thumbnail = image;
     card.thumbnail_state = "ready".into();
     card.has_thumbnail = true;
     items.set_row_data(index, card.clone());
 
-    let rows = ui.get_channel_rows();
-    let columns = ui.get_channel_column_count().max(1) as usize;
+    let columns = column_count.max(1) as usize;
     let row_index = index / columns;
     if let Some(mut row) = rows.row_data(row_index) {
         match index % columns {
@@ -910,13 +918,13 @@ pub fn retry_home_thumbnail_async(
                         continue;
                     }
                     if let Some(thumbnail) = thumbnail.as_ref() {
-                        if let Some(image) = crate::thumbnails::image_from_bytes(&thumbnail.bytes) {
-                            card.thumbnail = image;
-                            card.thumbnail_state = "ready".into();
-                            card.has_thumbnail = true;
-                        } else {
-                            card.thumbnail_state = "failed".into();
-                        }
+                        card.thumbnail = crate::thumbnails::remember_artwork_image(
+                            &thumbnail.url,
+                            crate::thumbnails::CARD_ARTWORK_WIDTH,
+                            &thumbnail.artwork,
+                        );
+                        card.thumbnail_state = "ready".into();
+                        card.has_thumbnail = true;
                     } else {
                         card.thumbnail_state = "failed".into();
                     }
@@ -924,6 +932,88 @@ pub fn retry_home_thumbnail_async(
                 }
             }
         });
+    });
+}
+
+fn apply_home_thumbnail(ui: &MainWindow, request: &ThumbnailRequest, thumbnail: &FetchedThumbnail) {
+    let image = crate::thumbnails::remember_artwork_image(
+        &thumbnail.url,
+        crate::thumbnails::CARD_ARTWORK_WIDTH,
+        &thumbnail.artwork,
+    );
+    for model in home_thumbnail_models(ui) {
+        for index in 0..model.row_count() {
+            let Some(mut card) = model.row_data(index) else {
+                continue;
+            };
+            if !thumbnail_request_matches_card(request, &card) {
+                continue;
+            }
+            card.thumbnail = image.clone();
+            card.thumbnail_state = "ready".into();
+            card.has_thumbnail = true;
+            model.set_row_data(index, card);
+        }
+    }
+}
+
+/// Fill the Home shelves in batches on a worker thread. Card builders no longer
+/// decode artwork, so this is the only path that attaches artwork to Home.
+pub fn refresh_home_thumbnails_async(ui: slint::Weak<MainWindow>, token: Option<String>) {
+    let Some(handle) = ui.upgrade() else { return };
+    let mut requests = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for model in home_thumbnail_models(&handle) {
+        for index in 0..model.row_count() {
+            let Some(card) = model.row_data(index) else {
+                continue;
+            };
+            if card.has_thumbnail {
+                continue;
+            }
+            let request = ThumbnailRequest::from(&card);
+            if request.primary_url.is_empty()
+                && request.fallback_url.is_empty()
+                && request.alternate_url.is_empty()
+            {
+                continue;
+            }
+            if seen.insert(request_thumbnail_key(&request)) {
+                requests.push(request);
+            }
+        }
+    }
+    if requests.is_empty() {
+        return;
+    }
+    log_records_without_thumbnail_source(&requests);
+    std::thread::spawn(move || {
+        for start in (0..requests.len()).step_by(THUMBNAIL_BATCH_SIZE) {
+            let end = (start + THUMBNAIL_BATCH_SIZE).min(requests.len());
+            let outcomes = fetch_thumbnail_batch_outcomes(&requests[start..end], token.as_deref());
+            let batch = requests[start..end].to_vec();
+            let ui = ui.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = ui.upgrade() else { return };
+                for (offset, outcome) in outcomes {
+                    let Some(request) = batch.get(offset) else {
+                        continue;
+                    };
+                    match outcome.thumbnail {
+                        Some(thumbnail) => apply_home_thumbnail(&ui, request, &thumbnail),
+                        None => update_home_thumbnail_state(
+                            &ui,
+                            request,
+                            if outcome.transient {
+                                "loading"
+                            } else {
+                                "failed"
+                            },
+                        ),
+                    }
+                }
+            });
+        }
     });
 }
 
@@ -1206,8 +1296,13 @@ pub fn tv_item_to_card(item: &TvItem) -> VideoCardData {
     } else {
         None
     };
+    // Never decode artwork here: card builders run inside UI callbacks. Only an
+    // image decoded earlier by the worker pipeline is attached immediately;
+    // everything else shows the placeholder until the batch arrives.
     let (has_thumbnail, thumbnail) = if let Some(cache_key) = cache_key {
-        if let Some(img) = crate::thumbnails::load_cached_image(cache_key) {
+        if let Some(img) =
+            crate::thumbnails::cached_memory_image(cache_key, crate::thumbnails::CARD_ARTWORK_WIDTH)
+        {
             (true, img)
         } else {
             (false, slint::Image::default())
@@ -1333,7 +1428,9 @@ pub fn tv_item_to_card_for_server(item: &TvItem, server_url: &str) -> VideoCardD
             card.fallback_thumbnail_url = fallback_image_url.unwrap_or_default().into();
             card.alternate_thumbnail_url = alternate_image_url.unwrap_or_default().into();
         }
-        if let Some(image) = crate::thumbnails::load_cached_image(&url) {
+        if let Some(image) =
+            crate::thumbnails::cached_memory_image(&url, crate::thumbnails::CARD_ARTWORK_WIDTH)
+        {
             card.has_thumbnail = true;
             card.thumbnail_state = "ready".into();
             card.thumbnail = image;
@@ -1348,23 +1445,24 @@ fn attempt_image_url(
     candidate: &str,
     token: Option<&str>,
     transient: &mut bool,
-) -> Option<(String, Vec<u8>)> {
-    if let Some(bytes) = crate::thumbnails::load_cached_image_bytes(candidate) {
-        return Some((candidate.to_owned(), bytes));
+    max_width: u32,
+) -> Option<(String, crate::thumbnails::DecodedArtwork)> {
+    match crate::thumbnails::fetch_and_cache_artwork(candidate, token, max_width) {
+        Ok(artwork) => Some((candidate.to_owned(), artwork)),
+        Err(failure) => {
+            *transient = *transient || failure.is_transient();
+            None
+        }
     }
-    let (bytes, failure) = crate::thumbnails::fetch_and_cache_image_bytes_checked(candidate, token);
-    if let Some(failure) = failure {
-        *transient = *transient || failure.is_transient();
-    }
-    bytes.map(|bytes| (candidate.to_owned(), bytes))
 }
 
 fn ensure_thumbnail_variant_detail(
     url: &str,
     token: Option<&str>,
-) -> (Option<(String, Vec<u8>)>, bool) {
+    max_width: u32,
+) -> (Option<(String, crate::thumbnails::DecodedArtwork)>, bool) {
     let mut transient = false;
-    if let Some(found) = attempt_image_url(url, token, &mut transient) {
+    if let Some(found) = attempt_image_url(url, token, &mut transient, max_width) {
         return (Some(found), transient);
     }
     let tagged_failed_transient = transient;
@@ -1373,7 +1471,7 @@ fn ensure_thumbnail_variant_detail(
     transient = false;
     let mut untagged_found = None;
     if let Some(candidate) = untagged_image_url(url) {
-        untagged_found = attempt_image_url(&candidate, token, &mut transient);
+        untagged_found = attempt_image_url(&candidate, token, &mut transient, max_width);
     }
     match untagged_found {
         Some(found) => (Some(found), transient),
@@ -1419,18 +1517,22 @@ fn indexed_backdrop_url(url: &str) -> Option<String> {
     }
 }
 
-fn ensure_thumbnail_detail(url: &str, token: Option<&str>) -> (Option<(String, Vec<u8>)>, bool) {
+fn ensure_thumbnail_detail(
+    url: &str,
+    token: Option<&str>,
+    max_width: u32,
+) -> (Option<(String, crate::thumbnails::DecodedArtwork)>, bool) {
     if url.is_empty() {
         return (None, false);
     }
-    let (found, transient) = ensure_thumbnail_variant_detail(url, token);
+    let (found, transient) = ensure_thumbnail_variant_detail(url, token, max_width);
     if found.is_some() {
         return (found, false);
     }
     match indexed_backdrop_url(url) {
         Some(indexed) => {
             let (indexed_found, indexed_transient) =
-                ensure_thumbnail_variant_detail(&indexed, token);
+                ensure_thumbnail_variant_detail(&indexed, token, max_width);
             if indexed_found.is_some() {
                 (indexed_found, false)
             } else {
@@ -1441,25 +1543,41 @@ fn ensure_thumbnail_detail(url: &str, token: Option<&str>) -> (Option<(String, V
     }
 }
 
-/// Fetches and caches artwork on workers, returning only plain URLs. Slint
-/// images are created later on the UI thread, so its non-thread-safe image
-/// handles never cross the event loop boundary.
+/// Fetches and caches artwork on workers, returning decoded RGBA instead of a
+/// Slint image. Slint image handles are not `Send`, so the UI thread only turns
+/// the finished pixels into an image (a copy, never a decode).
 pub fn fetch_card_thumbnail(
     request: &ThumbnailRequest,
     token: Option<&str>,
 ) -> Option<FetchedThumbnail> {
-    fetch_card_thumbnail_outcome(request, token).thumbnail
+    fetch_card_thumbnail_sized(request, token, crate::thumbnails::CARD_ARTWORK_WIDTH)
+}
+
+pub fn fetch_card_thumbnail_sized(
+    request: &ThumbnailRequest,
+    token: Option<&str>,
+    max_width: u32,
+) -> Option<FetchedThumbnail> {
+    fetch_card_thumbnail_outcome_sized(request, token, max_width).thumbnail
 }
 
 pub fn fetch_card_thumbnail_outcome(
     request: &ThumbnailRequest,
     token: Option<&str>,
 ) -> CardFetchOutcome {
+    fetch_card_thumbnail_outcome_sized(request, token, crate::thumbnails::CARD_ARTWORK_WIDTH)
+}
+
+fn fetch_card_thumbnail_outcome_sized(
+    request: &ThumbnailRequest,
+    token: Option<&str>,
+    max_width: u32,
+) -> CardFetchOutcome {
     let no_outcome = || CardFetchOutcome {
         thumbnail: None,
         transient: false,
     };
-    let key = thumbnail_flight_key(request, token);
+    let key = thumbnail_flight_key(request, token, max_width);
     let flights = THUMBNAIL_FLIGHTS.get_or_init(|| Mutex::new(HashMap::new()));
     let (flight, is_leader) = {
         let Ok(mut flights) = flights.lock() else {
@@ -1490,12 +1608,11 @@ pub fn fetch_card_thumbnail_outcome(
         return result.clone().unwrap_or_else(no_outcome);
     }
 
-    // The permit caps concurrent network/decode work across all screens.
+    // Network and decode concurrency is capped inside the artwork pipeline.
     // Catch panics at this worker boundary so every in-flight request still
     // resolves to a terminal Failed result and wakes deduplicated waiters.
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _permit = ThumbnailDownloadPermit::acquire()?;
-        Some(fetch_card_thumbnail_inner(request, token))
+        Some(fetch_card_thumbnail_inner(request, token, max_width))
     }))
     .ok()
     .flatten()
@@ -1511,7 +1628,11 @@ pub fn fetch_card_thumbnail_outcome(
     outcome
 }
 
-fn fetch_card_thumbnail_inner(request: &ThumbnailRequest, token: Option<&str>) -> CardFetchOutcome {
+fn fetch_card_thumbnail_inner(
+    request: &ThumbnailRequest,
+    token: Option<&str>,
+    max_width: u32,
+) -> CardFetchOutcome {
     // Library artwork always wins: the resolver poster (primary) is tried
     // before the generated phash frame (fallback) even for resuming items.
     // A mid-playback frame may be watch-progress flavour, but it must not
@@ -1525,15 +1646,15 @@ fn fetch_card_thumbnail_inner(request: &ThumbnailRequest, token: Option<&str>) -
     let mut last_resort = None;
     let mut transient = false;
     for candidate in candidates {
-        let (fetched, candidate_transient) = ensure_thumbnail_detail(candidate, token);
+        let (fetched, candidate_transient) = ensure_thumbnail_detail(candidate, token, max_width);
         if fetched.is_none() {
             transient |= candidate_transient;
         }
-        let Some((url, bytes)) = fetched else {
+        let Some((url, artwork)) = fetched else {
             continue;
         };
-        let fetched = FetchedThumbnail { url, bytes };
-        if !crate::thumbnails::is_poor_thumbnail_bytes(&fetched.bytes) {
+        let fetched = FetchedThumbnail { url, artwork };
+        if !fetched.artwork.poor {
             return CardFetchOutcome {
                 thumbnail: Some(fetched),
                 transient: false,
@@ -1625,6 +1746,42 @@ fn log_records_without_thumbnail_source(requests: &[ThumbnailRequest]) {
     }
 }
 
+fn thumbnail_url_signature(urls: [&str; 3]) -> String {
+    let mut parts = urls
+        .into_iter()
+        .filter(|url| !url.is_empty())
+        .collect::<Vec<_>>();
+    parts.sort_unstable();
+    parts.dedup();
+    parts.join("\u{1}")
+}
+
+fn card_thumbnail_key(card: &VideoCardData) -> String {
+    format!(
+        "{}\u{2}{}\u{2}{}",
+        card.id,
+        card.provider,
+        thumbnail_url_signature([
+            card.thumbnail_url.as_str(),
+            card.fallback_thumbnail_url.as_str(),
+            card.alternate_thumbnail_url.as_str(),
+        ])
+    )
+}
+
+fn request_thumbnail_key(request: &ThumbnailRequest) -> String {
+    format!(
+        "{}\u{2}{}\u{2}{}",
+        request.id,
+        request.provider,
+        thumbnail_url_signature([
+            request.primary_url.as_str(),
+            request.fallback_url.as_str(),
+            request.alternate_url.as_str(),
+        ])
+    )
+}
+
 pub fn refresh_catalog_thumbnails_async(
     ui: slint::Weak<MainWindow>,
     cards: Vec<VideoCardData>,
@@ -1676,12 +1833,27 @@ pub fn refresh_catalog_thumbnails_async(
                     return;
                 }
                 if let Some(ui) = ui.upgrade() {
+                    // One index map per batch: the previous code cloned the
+                    // whole model and scanned it again for every thumbnail.
+                    let items = ui.get_catalog_items();
+                    let rows = ui.get_catalog_rows();
+                    let columns = ui.get_catalog_column_count();
+                    let mut index_by_key = HashMap::new();
+                    for index in 0..items.row_count() {
+                        if let Some(card) = items.row_data(index) {
+                            index_by_key
+                                .entry(card_thumbnail_key(&card))
+                                .or_insert(index);
+                        }
+                    }
                     for (offset, thumbnail) in thumbnails {
-                        if let Some(request) = batch_requests.get(offset) {
-                            let items = ui.get_catalog_items();
-                            if let Some(index) = card_index_by_request(&items, request) {
-                                update_catalog_thumbnail(&ui, index, request, &thumbnail);
-                            }
+                        if let Some(request) = batch_requests.get(offset)
+                            && let Some(index) =
+                                index_by_key.get(&request_thumbnail_key(request)).copied()
+                        {
+                            update_catalog_thumbnail_at(
+                                &ui, &items, &rows, columns, index, request, &thumbnail,
+                            );
                         }
                     }
                     for offset in 0..(end - start) {
@@ -1692,8 +1864,9 @@ pub fn refresh_catalog_thumbnails_async(
                             let state = no_thumbnail_state(
                                 source_available.get(offset).copied().unwrap_or(false),
                             );
-                            let items = ui.get_catalog_items();
-                            if let Some(index) = card_index_by_request(&items, request) {
+                            if let Some(index) =
+                                index_by_key.get(&request_thumbnail_key(request)).copied()
+                            {
                                 update_thumbnail_state(&ui, index, &request.id, state, false);
                             }
                         }
@@ -1734,6 +1907,17 @@ pub fn refresh_catalog_thumbnails_async(
                         return;
                     }
                     let Some(ui) = ui.upgrade() else { return };
+                    let items = ui.get_catalog_items();
+                    let rows = ui.get_catalog_rows();
+                    let columns = ui.get_catalog_column_count();
+                    let mut index_by_key = HashMap::new();
+                    for index in 0..items.row_count() {
+                        if let Some(card) = items.row_data(index) {
+                            index_by_key
+                                .entry(card_thumbnail_key(&card))
+                                .or_insert(index);
+                        }
+                    }
                     for (offset, outcome) in outcomes {
                         let Some(request) = batch.get(offset) else {
                             continue;
@@ -1741,9 +1925,12 @@ pub fn refresh_catalog_thumbnails_async(
                         let Some(thumbnail) = outcome.thumbnail else {
                             continue;
                         };
-                        let items = ui.get_catalog_items();
-                        if let Some(index) = card_index_by_request(&items, request) {
-                            update_catalog_thumbnail(&ui, index, request, &thumbnail);
+                        if let Some(index) =
+                            index_by_key.get(&request_thumbnail_key(request)).copied()
+                        {
+                            update_catalog_thumbnail_at(
+                                &ui, &items, &rows, columns, index, request, &thumbnail,
+                            );
                         }
                     }
                 });
@@ -1789,12 +1976,25 @@ pub fn refresh_channel_thumbnails_async(
                     return;
                 }
                 if let Some(ui) = ui.upgrade() {
+                    let items = ui.get_channel_items();
+                    let rows = ui.get_channel_rows();
+                    let columns = ui.get_channel_column_count();
+                    let mut index_by_key = HashMap::new();
+                    for index in 0..items.row_count() {
+                        if let Some(card) = items.row_data(index) {
+                            index_by_key
+                                .entry(card_thumbnail_key(&card))
+                                .or_insert(index);
+                        }
+                    }
                     for (offset, thumbnail) in thumbnails {
-                        if let Some(request) = batch_requests.get(offset) {
-                            let items = ui.get_channel_items();
-                            if let Some(index) = card_index_by_request(&items, request) {
-                                update_channel_thumbnail(&ui, index, request, &thumbnail);
-                            }
+                        if let Some(request) = batch_requests.get(offset)
+                            && let Some(index) =
+                                index_by_key.get(&request_thumbnail_key(request)).copied()
+                        {
+                            update_channel_thumbnail_at(
+                                &ui, &items, &rows, columns, index, request, &thumbnail,
+                            );
                         }
                     }
                     for offset in 0..(end - start) {
@@ -1805,8 +2005,9 @@ pub fn refresh_channel_thumbnails_async(
                             let state = no_thumbnail_state(
                                 source_available.get(offset).copied().unwrap_or(false),
                             );
-                            let items = ui.get_channel_items();
-                            if let Some(index) = card_index_by_request(&items, request) {
+                            if let Some(index) =
+                                index_by_key.get(&request_thumbnail_key(request)).copied()
+                            {
                                 update_thumbnail_state(&ui, index, &request.id, state, true);
                             }
                         }
@@ -1825,20 +2026,27 @@ pub fn filter_catalog_items(items: Vec<TvItem>, local_store: &LocalStore) -> Vec
         return items;
     }
 
+    let excluded_lower = excluded_tags
+        .iter()
+        .map(|tag| tag.to_lowercase())
+        .collect::<Vec<_>>();
     items
         .into_iter()
         .filter(|item| {
-            let matches_excluded_tag = excluded_tags.iter().any(|excluded| {
-                item.genres
-                    .iter()
-                    .chain(item.tags.iter())
-                    .any(|value| value.eq_ignore_ascii_case(excluded))
-                    || item.title.to_lowercase().contains(&excluded.to_lowercase())
-                    || item
-                        .people
+            let title_lower = item.title.to_lowercase();
+            let matches_excluded_tag = excluded_tags.iter().zip(excluded_lower.iter()).any(
+                |(excluded, excluded_lower)| {
+                    item.genres
                         .iter()
-                        .any(|person| person.name.eq_ignore_ascii_case(excluded))
-            });
+                        .chain(item.tags.iter())
+                        .any(|value| value.eq_ignore_ascii_case(excluded))
+                        || title_lower.contains(excluded_lower.as_str())
+                        || item
+                            .people
+                            .iter()
+                            .any(|person| person.name.eq_ignore_ascii_case(excluded))
+                },
+            );
             if matches_excluded_tag {
                 return false;
             }
@@ -2086,10 +2294,20 @@ mod tests {
     fn request_deduplication_key_is_stable_but_separated_by_credentials() {
         let mut request = ThumbnailRequest::from(&card("telegram:chan:1", "Video"));
         request.primary_url = "https://resolver.example/admin/thumb?id=anonymous".into();
-        let first = thumbnail_flight_key(&request, Some("token-one"));
-        assert_eq!(first, thumbnail_flight_key(&request, Some("token-one")));
-        assert_ne!(first, thumbnail_flight_key(&request, Some("token-two")));
-        assert_ne!(first, thumbnail_flight_key(&request, None));
+        let first = thumbnail_flight_key(&request, Some("token-one"), 480);
+        assert_eq!(
+            first,
+            thumbnail_flight_key(&request, Some("token-one"), 480)
+        );
+        assert_ne!(
+            first,
+            thumbnail_flight_key(&request, Some("token-two"), 480)
+        );
+        assert_ne!(first, thumbnail_flight_key(&request, None, 480));
+        assert_ne!(
+            first,
+            thumbnail_flight_key(&request, Some("token-one"), 1280)
+        );
     }
 
     #[test]
@@ -2097,14 +2315,15 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::time::Duration;
 
+        let limit = crate::thumbnails::network_permit_limit_for_test();
         let active = AtomicUsize::new(0);
         let highest = AtomicUsize::new(0);
         std::thread::scope(|scope| {
-            for _ in 0..12 {
+            for _ in 0..(limit * 3) {
                 let active = &active;
                 let highest = &highest;
                 scope.spawn(move || {
-                    let _permit = ThumbnailDownloadPermit::acquire().unwrap();
+                    let _permit = crate::thumbnails::acquire_network_permit_for_test().unwrap();
                     let current = active.fetch_add(1, Ordering::SeqCst) + 1;
                     highest.fetch_max(current, Ordering::SeqCst);
                     std::thread::sleep(Duration::from_millis(10));
@@ -2112,7 +2331,7 @@ mod tests {
                 });
             }
         });
-        assert!(highest.load(Ordering::SeqCst) <= 4);
+        assert!(highest.load(Ordering::SeqCst) <= limit);
     }
 
     #[test]

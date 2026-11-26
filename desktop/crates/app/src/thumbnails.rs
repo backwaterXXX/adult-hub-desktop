@@ -1,11 +1,25 @@
+use std::cell::RefCell;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Cursor, Read};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock, RwLock};
+use std::sync::{Condvar, Mutex, OnceLock, RwLock};
 use std::time::{Duration, UNIX_EPOCH};
 
 const DEFAULT_CACHE_LIMIT_MB: usize = 256;
 const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+
+/// Width the card grid asks for. Cards are a few hundred logical pixels wide,
+/// so decoding full-resolution artwork for them only wastes CPU and RAM.
+pub const CARD_ARTWORK_WIDTH: u32 = 480;
+/// Width the details screen asks for: its poster fills a large panel.
+pub const DETAIL_ARTWORK_WIDTH: u32 = 1280;
+/// Persistent cache entries are normalised to this width.
+const CACHE_ARTWORK_WIDTH: u32 = 1280;
+const CACHE_JPEG_QUALITY: u8 = 82;
+const MEMORY_CACHE_LIMIT_BYTES: usize = 96 * 1024 * 1024;
+const MEMORY_CACHE_LIMIT_BYTES_LOW_RAM: usize = 32 * 1024 * 1024;
+const MAX_CONCURRENT_IMAGE_DOWNLOADS: usize = 6;
 
 static CACHE_LIMIT_MB: AtomicUsize = AtomicUsize::new(DEFAULT_CACHE_LIMIT_MB);
 static LOW_RAM_MODE: AtomicBool = AtomicBool::new(false);
@@ -354,36 +368,285 @@ fn decode_dynamic_image(bytes: &[u8]) -> Option<image::DynamicImage> {
     reader.decode().ok()
 }
 
-fn decode_image(bytes: &[u8]) -> Option<(slint::Image, Vec<u8>)> {
-    let decoded = decode_dynamic_image(bytes)?;
-    // Low-RAM mode downscales decoded artwork before it reaches the UI and the
-    // disk cache. This keeps poster memory bounded without asking the server
-    // to re-encode images.
-    let decoded = if LOW_RAM_MODE.load(Ordering::Relaxed) && decoded.width() > 320 {
-        decoded.resize(320, u32::MAX, image::imageops::FilterType::Triangle)
+/// Artwork decoded once on a worker thread and handed to the UI as plain RGBA.
+///
+/// `slint::Image` is not `Send`, so the pipeline never moves image handles
+/// between threads: workers decode, resize and report whether the artwork is
+/// usable, and the UI only copies the bytes into a `SharedPixelBuffer`.
+#[derive(Clone, Debug)]
+pub struct DecodedArtwork {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+    pub poor: bool,
+}
+
+impl DecodedArtwork {
+    pub fn byte_len(&self) -> usize {
+        self.rgba.len()
+    }
+}
+
+/// Artwork image kept in this process so returning to a screen does not decode
+/// the same file again. Slint images are bound to the UI thread, so this lives
+/// in a thread-local and is only consulted from card builders on that thread.
+struct MemoryImageCache {
+    entries: HashMap<(String, u32), (slint::Image, usize)>,
+    order: VecDeque<(String, u32)>,
+    total_bytes: usize,
+}
+
+impl MemoryImageCache {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            total_bytes: 0,
+        }
+    }
+
+    fn limit(&self) -> usize {
+        if LOW_RAM_MODE.load(Ordering::Relaxed) {
+            MEMORY_CACHE_LIMIT_BYTES_LOW_RAM
+        } else {
+            MEMORY_CACHE_LIMIT_BYTES
+        }
+    }
+
+    fn get(&mut self, key: &(String, u32)) -> Option<slint::Image> {
+        let image = self.entries.get(key).map(|(image, _)| image.clone());
+        if image.is_some() {
+            if let Some(position) = self.order.iter().position(|entry| entry == key) {
+                if let Some(entry) = self.order.remove(position) {
+                    self.order.push_back(entry);
+                }
+            }
+        }
+        image
+    }
+
+    fn insert(&mut self, key: (String, u32), image: slint::Image, bytes: usize) {
+        if let Some((_, previous)) = self.entries.remove(&key) {
+            self.total_bytes = self.total_bytes.saturating_sub(previous);
+        }
+        if let Some(position) = self.order.iter().position(|entry| entry == &key) {
+            self.order.remove(position);
+        }
+        self.entries.insert(key.clone(), (image, bytes));
+        self.order.push_back(key);
+        self.total_bytes = self.total_bytes.saturating_add(bytes);
+        let limit = self.limit();
+        while self.total_bytes > limit {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some((_, removed)) = self.entries.remove(&oldest) {
+                self.total_bytes = self.total_bytes.saturating_sub(removed);
+            }
+        }
+    }
+}
+
+thread_local! {
+    static MEMORY_IMAGES: RefCell<MemoryImageCache> = RefCell::new(MemoryImageCache::new());
+}
+
+struct CountPermit {
+    semaphore: &'static (Mutex<usize>, Condvar),
+}
+
+impl Drop for CountPermit {
+    fn drop(&mut self) {
+        let (active, available) = self.semaphore;
+        if let Ok(mut count) = active.lock() {
+            *count = count.saturating_sub(1);
+            available.notify_one();
+        }
+    }
+}
+
+fn acquire_count_permit(
+    semaphore: &'static (Mutex<usize>, Condvar),
+    limit: usize,
+) -> Option<CountPermit> {
+    let (active, available) = semaphore;
+    let mut count = active.lock().ok()?;
+    while *count >= limit.max(1) {
+        count = available.wait(count).ok()?;
+    }
+    *count += 1;
+    Some(CountPermit { semaphore })
+}
+
+static NETWORK_PERMITS: OnceLock<(Mutex<usize>, Condvar)> = OnceLock::new();
+static DECODE_PERMITS: OnceLock<(Mutex<usize>, Condvar)> = OnceLock::new();
+
+fn network_permit() -> Option<CountPermit> {
+    acquire_count_permit(
+        NETWORK_PERMITS.get_or_init(|| (Mutex::new(0), Condvar::new())),
+        MAX_CONCURRENT_IMAGE_DOWNLOADS,
+    )
+}
+
+fn decode_limit() -> usize {
+    std::thread::available_parallelism()
+        .map(|threads| threads.get())
+        .unwrap_or(4)
+        .clamp(2, 8)
+}
+
+fn decode_permit() -> Option<CountPermit> {
+    acquire_count_permit(
+        DECODE_PERMITS.get_or_init(|| (Mutex::new(0), Condvar::new())),
+        decode_limit(),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn acquire_network_permit_for_test() -> Option<CountPermit> {
+    network_permit()
+}
+
+#[cfg(test)]
+pub(crate) fn network_permit_limit_for_test() -> usize {
+    MAX_CONCURRENT_IMAGE_DOWNLOADS
+}
+
+fn rgba_from_dynamic(image: image::DynamicImage) -> image::RgbaImage {
+    image.into_rgba8()
+}
+
+fn display_width(requested: u32) -> u32 {
+    if LOW_RAM_MODE.load(Ordering::Relaxed) {
+        requested.min(320)
     } else {
-        decoded
-    };
-    let decoded = decoded.into_rgba8();
-    let pixels = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
-        decoded.as_raw(),
-        decoded.width(),
-        decoded.height(),
+        requested.max(1)
+    }
+}
+
+fn downscale_rgba(image: image::RgbaImage, max_width: u32) -> image::RgbaImage {
+    let max_width = max_width.max(1);
+    if image.width() <= max_width {
+        return image;
+    }
+    let height = ((u64::from(image.height()) * u64::from(max_width)) / u64::from(image.width()))
+        .max(1) as u32;
+    image::imageops::resize(
+        &image,
+        max_width,
+        height,
+        image::imageops::FilterType::Triangle,
+    )
+}
+
+/// Mirrors the Android client check for missing or unhelpfully dark artwork.
+/// Samples a 12x12 grid straight from the decoded pixels, which matches the old
+/// 24x24 NEAREST downscale at even coordinates without a second allocation.
+fn rgba_is_poor(image: &image::RgbaImage) -> bool {
+    let (width, height) = image.dimensions();
+    if (1..320).contains(&width) || (1..160).contains(&height) {
+        return true;
+    }
+    let mut count = 0usize;
+    let mut dark_count = 0usize;
+    let mut luminance_sum = 0.0f64;
+    let mut luminance_squared_sum = 0.0f64;
+    for row in 0..12u32 {
+        let y = ((u64::from(row) * u64::from(height)) / 12) as u32;
+        let y = y.min(height.saturating_sub(1));
+        for column in 0..12u32 {
+            let x = ((u64::from(column) * u64::from(width)) / 12) as u32;
+            let x = x.min(width.saturating_sub(1));
+            let pixel = image.get_pixel(x, y).0;
+            let alpha = f64::from(pixel[3]) / 255.0;
+            let luminance = (0.2126 * f64::from(pixel[0])
+                + 0.7152 * f64::from(pixel[1])
+                + 0.0722 * f64::from(pixel[2]))
+                * alpha;
+            if luminance < 18.0 {
+                dark_count += 1;
+            }
+            luminance_sum += luminance;
+            luminance_squared_sum += luminance * luminance;
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return false;
+    }
+    let average = luminance_sum / count as f64;
+    let variance = (luminance_squared_sum / count as f64 - average * average).max(0.0);
+    let nearly_all_black = dark_count as f64 / count as f64 >= 0.88 && average < 55.0;
+    nearly_all_black || (average < 32.0 && variance < 180.0)
+}
+
+fn artwork_from_rgba(image: image::RgbaImage, max_width: u32, poor: bool) -> DecodedArtwork {
+    let image = downscale_rgba(image, display_width(max_width));
+    let (width, height) = image.dimensions();
+    DecodedArtwork {
+        width,
+        height,
+        rgba: image.into_raw(),
+        poor,
+    }
+}
+
+/// Decode artwork once, at most `max_width` pixels wide.
+fn decode_artwork(bytes: &[u8], max_width: u32) -> Option<DecodedArtwork> {
+    let _permit = decode_permit();
+    let image = rgba_from_dynamic(decode_dynamic_image(bytes)?);
+    let poor = rgba_is_poor(&image);
+    Some(artwork_from_rgba(image, max_width, poor))
+}
+
+fn encode_cache_jpeg(image: &image::RgbaImage) -> Option<Vec<u8>> {
+    let image = downscale_rgba(image.clone(), CACHE_ARTWORK_WIDTH);
+    let rgb = image::DynamicImage::ImageRgba8(image).into_rgb8();
+    let mut encoded = Vec::new();
+    let mut encoder =
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut encoded, CACHE_JPEG_QUALITY);
+    encoder.encode_image(&rgb).ok()?;
+    Some(encoded)
+}
+
+/// Build the Slint image from already decoded pixels. Cheap: one copy of the
+/// RGBA buffer, no decoding, safe to call on the UI thread.
+pub fn artwork_to_image(artwork: &DecodedArtwork) -> slint::Image {
+    let buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+        &artwork.rgba,
+        artwork.width,
+        artwork.height,
     );
-    let slint_image = slint::Image::from_rgba8(pixels);
+    slint::Image::from_rgba8(buffer)
+}
 
-    let mut encoded_png = Cursor::new(Vec::new());
-    image::DynamicImage::ImageRgba8(decoded)
-        .write_to(&mut encoded_png, image::ImageFormat::Png)
-        .ok()?;
+/// Return a previously decoded image for this URL, if it is still in memory.
+pub fn cached_memory_image(url: &str, max_width: u32) -> Option<slint::Image> {
+    if url.trim().is_empty() {
+        return None;
+    }
+    let key = (url.to_owned(), display_width(max_width));
+    MEMORY_IMAGES.with(|cache| cache.borrow_mut().get(&key))
+}
 
-    Some((slint_image, encoded_png.into_inner()))
+/// Build the UI image and remember it so the next screen build skips decoding.
+pub fn remember_artwork_image(url: &str, max_width: u32, artwork: &DecodedArtwork) -> slint::Image {
+    let image = artwork_to_image(artwork);
+    if !url.trim().is_empty() {
+        let key = (url.to_owned(), display_width(max_width));
+        MEMORY_IMAGES.with(|cache| {
+            cache
+                .borrow_mut()
+                .insert(key, image.clone(), artwork.byte_len())
+        });
+    }
+    image
 }
 
 pub fn url_to_cache_path(url: &str) -> PathBuf {
     let hash = ring::digest::digest(&ring::digest::SHA256, url.as_bytes());
     let hex: String = hash.as_ref().iter().map(|b| format!("{:02x}", b)).collect();
-    cache_dir().join(format!("{hex}.png"))
+    cache_dir().join(format!("{hex}.jpg"))
 }
 
 fn url_to_cache_path_without_create(url: &str) -> PathBuf {
@@ -393,7 +656,7 @@ fn url_to_cache_path_without_create(url: &str) -> PathBuf {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    cache_dir_path().join(format!("{hex}.png"))
+    cache_dir_path().join(format!("{hex}.jpg"))
 }
 
 fn http_client() -> Option<&'static reqwest::blocking::Client> {
@@ -571,57 +834,12 @@ fn send_image_request(
     Err(ImageRequestError::RedirectLimit)
 }
 
+/// Return a cached, already decoded image for this URL.
+///
+/// Card builders run on the UI thread; they must never decode artwork there.
+/// Only images decoded earlier by the worker pipeline are returned.
 pub fn load_cached_image(url: &str) -> Option<slint::Image> {
-    if url.trim().is_empty() {
-        return None;
-    }
-    let path = url_to_cache_path(url);
-    if path.is_file() {
-        match slint::Image::load_from_path(&path) {
-            Ok(image) => Some(image),
-            Err(_) => {
-                crate::diagnostics::GLOBAL_LOG.w(
-                    "Thumbnail",
-                    &format!(
-                        "{}: cached image could not be decoded; a background fetch will replace it",
-                        diagnostic_subject(url)
-                    ),
-                );
-                None
-            }
-        }
-    } else {
-        None
-    }
-}
-
-/// Retrieve an already persisted thumbnail as Send-safe bytes.
-pub fn load_cached_image_bytes(url: &str) -> Option<Vec<u8>> {
-    if url.trim().is_empty() {
-        return None;
-    }
-    let path = url_to_cache_path(url);
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(error) => {
-            crate::diagnostics::GLOBAL_LOG.w(
-                "Thumbnail",
-                &format!(
-                    "{}: cached image could not be read ({})",
-                    diagnostic_subject(url),
-                    error.kind()
-                ),
-            );
-            return None;
-        }
-    };
-    if decode_dynamic_image(&bytes).is_some() {
-        Some(bytes)
-    } else {
-        discard_corrupt_cache_entry(url, &path);
-        None
-    }
+    cached_memory_image(url, CARD_ARTWORK_WIDTH)
 }
 
 fn discard_corrupt_cache_entry(url: &str, path: &std::path::Path) {
@@ -643,111 +861,34 @@ fn discard_corrupt_cache_entry(url: &str, path: &std::path::Path) {
     );
 }
 
-/// Create a Slint image from encoded bytes. Call this on the UI thread; Slint
-/// image handles are deliberately not sent across worker threads.
-pub fn image_from_bytes(bytes: &[u8]) -> Option<slint::Image> {
-    decode_image(bytes).map(|(image, _)| image)
-}
-
-/// Mirrors the Android client check for missing or unhelpfully dark artwork.
-pub fn is_poor_thumbnail(url: &str) -> bool {
-    let path = url_to_cache_path(url);
-    let Ok(bytes) = std::fs::read(path) else {
-        return false;
+fn load_cached_artwork(url: &str, max_width: u32) -> Option<DecodedArtwork> {
+    let path = url_to_cache_path_without_create(url);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            crate::diagnostics::GLOBAL_LOG.w(
+                "Thumbnail",
+                &format!(
+                    "{}: cached image could not be read ({})",
+                    diagnostic_subject(url),
+                    error.kind()
+                ),
+            );
+            return None;
+        }
     };
-    is_poor_thumbnail_bytes(&bytes)
-}
-
-pub fn is_poor_thumbnail_bytes(bytes: &[u8]) -> bool {
-    let Some(image) = decode_dynamic_image(bytes) else {
-        return false;
-    };
-    if (1..320).contains(&image.width()) || (1..160).contains(&image.height()) {
-        return true;
-    }
-
-    let pixels = image
-        .resize_exact(24, 24, image::imageops::FilterType::Nearest)
-        .to_rgba8();
-    let mut count = 0usize;
-    let mut dark_count = 0usize;
-    let mut luminance_sum = 0.0f64;
-    let mut luminance_squared_sum = 0.0f64;
-    for y in (0..24).step_by(2) {
-        for x in (0..24).step_by(2) {
-            let pixel = pixels.get_pixel(x, y).0;
-            let alpha = f64::from(pixel[3]) / 255.0;
-            let luminance = (0.2126 * f64::from(pixel[0])
-                + 0.7152 * f64::from(pixel[1])
-                + 0.0722 * f64::from(pixel[2]))
-                * alpha;
-            if luminance < 18.0 {
-                dark_count += 1;
-            }
-            luminance_sum += luminance;
-            luminance_squared_sum += luminance * luminance;
-            count += 1;
+    match decode_artwork(&bytes, max_width) {
+        Some(artwork) => Some(artwork),
+        None => {
+            discard_corrupt_cache_entry(url, &path);
+            None
         }
     }
-    if count == 0 {
-        return false;
-    }
-    let average = luminance_sum / count as f64;
-    let variance = (luminance_squared_sum / count as f64 - average * average).max(0.0);
-    let nearly_all_black = dark_count as f64 / count as f64 >= 0.88 && average < 55.0;
-    nearly_all_black || (average < 32.0 && variance < 180.0)
 }
 
-/// Fetch an image and return its normalized PNG bytes for worker-to-UI transfer.
-/// This works even when persistent caching is disabled.
-pub fn fetch_and_cache_image_bytes(url: &str, token: Option<&str>) -> Option<Vec<u8>> {
-    fetch_and_cache_image_data(url, token, true).map(|(_, bytes)| bytes)
-}
-
-/// Same fetch for card workers, but with the failure classification attached:
-/// callers use the transient flag to decide whether a background re-check is
-/// worthwhile instead of leaving a card permanently blank.
-pub fn fetch_and_cache_image_bytes_checked(
-    url: &str,
-    token: Option<&str>,
-) -> (Option<Vec<u8>>, Option<ThumbnailFailure>) {
-    match fetch_image_result(url, token, true) {
-        Ok((_, bytes)) => (Some(bytes), None),
-        Err(failure) => (None, Some(failure)),
-    }
-}
-
-/// Connection diagnostic fetch: fresh download, failure reported by category,
-/// HTTP code and stage instead of a bare success flag.
-pub fn probe_image(url: &str, token: Option<&str>) -> Result<(), ThumbnailFailure> {
-    fetch_image_result(url, token, false).map(|_| ())
-}
-
-fn fetch_and_cache_image_data(
-    url: &str,
-    token: Option<&str>,
-    allow_cached_image: bool,
-) -> Option<(slint::Image, Vec<u8>)> {
-    fetch_image_result(url, token, allow_cached_image).ok()
-}
-
-fn fetch_image_result(
-    url: &str,
-    token: Option<&str>,
-    allow_cached_image: bool,
-) -> Result<(slint::Image, Vec<u8>), ThumbnailFailure> {
-    let url = url.trim();
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
-        return Err(ThumbnailFailure::InvalidUrl);
-    }
-    let path = url_to_cache_path(url);
-    if allow_cached_image
-        && let Some(cached_bytes) = load_cached_image_bytes(url)
-        && let Some((image, normalized_bytes)) = decode_image(&cached_bytes)
-    {
-        return Ok((image, normalized_bytes));
-    }
-
+fn download_image_bytes(url: &str, token: Option<&str>) -> Result<Vec<u8>, ThumbnailFailure> {
+    let _network = network_permit();
     let mut downloaded_bytes = None;
     let mut final_failure = ThumbnailFailure::Request;
     for attempt in 0..2 {
@@ -876,19 +1017,81 @@ fn fetch_image_result(
         }
         return Err(final_failure);
     };
-    let (image, cache_bytes) = decode_image(&bytes).ok_or_else(|| {
-        crate::log_debug("thumbnail decode failed");
-        crate::diagnostics::GLOBAL_LOG.w(
-            "Thumbnail",
-            &format!(
-                "{}: decode failed: {detail}",
-                diagnostic_subject(url),
-                detail = ThumbnailFailure::Decode.label()
-            ),
-        );
-        ThumbnailFailure::Decode
-    })?;
+    Ok(bytes)
+}
 
+fn store_cached_artwork(url: &str, image: &image::RgbaImage) {
+    let Ok(_guard) = CACHE_WRITE_LOCK.lock() else {
+        return;
+    };
+    let limit_mb = CACHE_LIMIT_MB.load(Ordering::Relaxed);
+    if limit_mb == 0 {
+        return;
+    }
+    let Some(encoded) = encode_cache_jpeg(image) else {
+        return;
+    };
+    let limit_bytes = limit_mb.saturating_mul(1024 * 1024);
+    if encoded.len() > limit_bytes {
+        return;
+    }
+    let path = url_to_cache_path(url);
+    prune_cache(limit_bytes.saturating_sub(encoded.len()), Some(&path));
+    if write_cache_atomically(&path, &encoded) {
+        prune_cache(limit_bytes, Some(&path));
+    }
+}
+
+/// Fetch (or reuse from disk) artwork and return it decoded once, at most
+/// `max_width` pixels wide, together with the "poor artwork" verdict.
+pub fn fetch_and_cache_artwork(
+    url: &str,
+    token: Option<&str>,
+    max_width: u32,
+) -> Result<DecodedArtwork, ThumbnailFailure> {
+    fetch_image_artwork(url, token, max_width, true)
+}
+
+/// Connection diagnostic fetch: fresh download, failure reported by category,
+/// HTTP code and stage instead of a bare success flag.
+pub fn probe_image(url: &str, token: Option<&str>) -> Result<(), ThumbnailFailure> {
+    fetch_image_artwork(url, token, CARD_ARTWORK_WIDTH, false).map(|_| ())
+}
+
+fn fetch_image_artwork(
+    url: &str,
+    token: Option<&str>,
+    max_width: u32,
+    allow_cached_image: bool,
+) -> Result<DecodedArtwork, ThumbnailFailure> {
+    let url = url.trim();
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err(ThumbnailFailure::InvalidUrl);
+    }
+    if allow_cached_image && let Some(artwork) = load_cached_artwork(url, max_width) {
+        return Ok(artwork);
+    }
+
+    let bytes = download_image_bytes(url, token)?;
+    let image = {
+        let _permit = decode_permit();
+        rgba_from_dynamic(decode_dynamic_image(&bytes).ok_or_else(|| {
+            crate::log_debug("thumbnail decode failed");
+            crate::diagnostics::GLOBAL_LOG.w(
+                "Thumbnail",
+                &format!(
+                    "{}: decode failed: {detail}",
+                    diagnostic_subject(url),
+                    detail = ThumbnailFailure::Decode.label()
+                ),
+            );
+            ThumbnailFailure::Decode
+        })?)
+    };
+    let poor = rgba_is_poor(&image);
+    if allow_cached_image {
+        store_cached_artwork(url, &image);
+    }
     crate::diagnostics::GLOBAL_LOG.i(
         "Thumbnail",
         &format!(
@@ -897,25 +1100,7 @@ fn fetch_image_result(
             bytes.len()
         ),
     );
-
-    let Ok(_guard) = CACHE_WRITE_LOCK.lock() else {
-        return Ok((image, cache_bytes));
-    };
-    let limit_mb = CACHE_LIMIT_MB.load(Ordering::Relaxed);
-    if limit_mb == 0 {
-        return Ok((image, cache_bytes));
-    }
-
-    let limit_bytes = limit_mb.saturating_mul(1024 * 1024);
-    if cache_bytes.len() > limit_bytes {
-        return Ok((image, cache_bytes));
-    }
-
-    prune_cache(limit_bytes.saturating_sub(cache_bytes.len()), Some(&path));
-    if write_cache_atomically(&path, &cache_bytes) {
-        prune_cache(limit_bytes, Some(&path));
-    }
-    Ok((image, cache_bytes))
+    Ok(artwork_from_rgba(image, max_width, poor))
 }
 
 /// Persist a cache entry via a temporary file and a rename. A direct

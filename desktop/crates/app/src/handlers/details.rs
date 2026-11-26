@@ -284,10 +284,9 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
             } else {
                 None
             };
-            let cached_backdrop = backdrop_url
-                .as_deref()
-                .filter(|url| !crate::thumbnails::is_poor_thumbnail(url))
-                .and_then(crate::thumbnails::load_cached_image);
+            let cached_backdrop = backdrop_url.as_deref().and_then(|url| {
+                crate::thumbnails::cached_memory_image(url, crate::thumbnails::DETAIL_ARTWORK_WIDTH)
+            });
 
             // Calculate resume information
             let duration_ms = target_item
@@ -407,9 +406,12 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                     } else {
                         None
                     };
-                    let cached_image = direct_url
-                        .as_deref()
-                        .and_then(crate::thumbnails::load_cached_image);
+                    let cached_image = direct_url.as_deref().and_then(|url| {
+                        crate::thumbnails::cached_memory_image(
+                            url,
+                            crate::thumbnails::CARD_ARTWORK_WIDTH,
+                        )
+                    });
                     if cached_image.is_none() && artwork_server.is_some() {
                         performer_image_jobs.push((
                             person.id.clone(),
@@ -628,9 +630,12 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(ui) = weak.upgrade()
                                 && ui.get_detail_id() == detail_id.as_str()
-                                && let Some(image) =
-                                    crate::thumbnails::image_from_bytes(&thumbnail.bytes)
                             {
+                                let image = crate::thumbnails::remember_artwork_image(
+                                    &thumbnail.url,
+                                    crate::thumbnails::CARD_ARTWORK_WIDTH,
+                                    &thumbnail.artwork,
+                                );
                                 let model = ui.get_detail_similar_items();
                                 let mut cards = (0..model.row_count())
                                     .filter_map(|row| model.row_data(row))
@@ -664,22 +669,28 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                 let item_id = target_item.id.clone();
                 let token = artwork_token.clone();
                 std::thread::spawn(move || {
-                    let Some(image_bytes) = crate::thumbnails::fetch_and_cache_image_bytes(
+                    let Ok(artwork) = crate::thumbnails::fetch_and_cache_artwork(
                         &backdrop_url,
                         token.as_deref(),
+                        crate::thumbnails::DETAIL_ARTWORK_WIDTH,
                     ) else {
                         return;
                     };
                     // Reject empty/black artwork just like Android TV. The
                     // detail poster remains visible underneath as the fallback.
-                    if crate::thumbnails::is_poor_thumbnail_bytes(&image_bytes) {
+                    if artwork.poor {
                         return;
                     }
+                    let backdrop_url = backdrop_url.clone();
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak.upgrade()
                             && ui.get_detail_id() == item_id.as_str()
-                            && let Some(image) = crate::thumbnails::image_from_bytes(&image_bytes)
                         {
+                            let image = crate::thumbnails::remember_artwork_image(
+                                &backdrop_url,
+                                crate::thumbnails::DETAIL_ARTWORK_WIDTH,
+                                &artwork,
+                            );
                             ui.set_detail_backdrop(image);
                             ui.set_detail_has_backdrop(true);
                         }
@@ -696,17 +707,22 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                 let token = artwork_token.clone();
                 let thumbnail_request = crate::catalog::ThumbnailRequest::from(&detail_card);
                 std::thread::spawn(move || {
-                    let Some(thumbnail) =
-                        crate::catalog::fetch_card_thumbnail(&thumbnail_request, token.as_deref())
-                    else {
+                    let Some(thumbnail) = crate::catalog::fetch_card_thumbnail_sized(
+                        &thumbnail_request,
+                        token.as_deref(),
+                        crate::thumbnails::DETAIL_ARTWORK_WIDTH,
+                    ) else {
                         return;
                     };
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak.upgrade()
                             && ui.get_detail_id() == item_id.as_str()
-                            && let Some(image) =
-                                crate::thumbnails::image_from_bytes(&thumbnail.bytes)
                         {
+                            let image = crate::thumbnails::remember_artwork_image(
+                                &thumbnail.url,
+                                crate::thumbnails::DETAIL_ARTWORK_WIDTH,
+                                &thumbnail.artwork,
+                            );
                             ui.set_detail_thumbnail(image);
                             ui.set_detail_has_thumbnail(true);
                         }
@@ -724,12 +740,14 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                     };
                     let token = session.access_token.as_str();
                     for (person_id, direct_url, _name) in performer_image_jobs {
-                        let bytes = direct_url.as_deref().and_then(|url| {
-                            crate::thumbnails::load_cached_image_bytes(url).or_else(|| {
-                                crate::thumbnails::fetch_and_cache_image_bytes(url, Some(token))
-                            })
-                        });
-                        let Some(image_bytes) = bytes else {
+                        let Some(url) = direct_url else {
+                            continue;
+                        };
+                        let Ok(artwork) = crate::thumbnails::fetch_and_cache_artwork(
+                            &url,
+                            Some(token),
+                            crate::thumbnails::CARD_ARTWORK_WIDTH,
+                        ) else {
                             continue;
                         };
                         let weak = weak.clone();
@@ -737,9 +755,12 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(ui) = weak.upgrade()
                                 && ui.get_detail_id() == item_id.as_str()
-                                && let Some(image) =
-                                    crate::thumbnails::image_from_bytes(&image_bytes)
                             {
+                                let image = crate::thumbnails::remember_artwork_image(
+                                    &url,
+                                    crate::thumbnails::CARD_ARTWORK_WIDTH,
+                                    &artwork,
+                                );
                                 let model = ui.get_detail_performer_cards();
                                 let mut cards = (0..model.row_count())
                                     .filter_map(|row| model.row_data(row))
