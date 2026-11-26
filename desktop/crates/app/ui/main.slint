@@ -3443,6 +3443,22 @@ export component MainWindow inherits Window {
 
                     TvNavSubButton {
                         width: 100%;
+                        text: "Random";
+                        compact: root.compact-layout;
+                        active: root.active-screen == "browse" && root.active-category == "Random";
+                        clicked => {
+                            root.active-category = "Random";
+                            root.catalog-category-drilldown = false;
+                            root.catalog-genre-query = "";
+                            root.search-query = "";
+                            root.search-applied-query = "";
+                            root.switch-screen("browse");
+                            root.filter-category("Random");
+                        }
+                    }
+
+                    TvNavSubButton {
+                        width: 100%;
                         text: "Continue Watching";
                         compact: root.compact-layout;
                         active: root.active-screen == "browse" && (root.active-category == "Continue Watching" || root.active-category == "Resume");
@@ -4331,17 +4347,22 @@ export component MainWindow inherits Window {
                         padding-top: 4px;
                         padding-bottom: 4px;
 
-                        TvSecondaryButton {
+                        if root.active-category != "Random" : TvSecondaryButton {
                             text: "Sort: " + root.catalog-sort-label;
                             custom-height: 32px;
                             clicked => { root.update-catalog-filter("sort"); }
                         }
-                        TvSecondaryButton {
+                        if root.active-category != "Random" : TvSecondaryButton {
                             text: root.catalog-sort-label == "Date added"
                                 ? (root.catalog-sort-descending ? "Newest first" : "Oldest first")
                                 : (root.catalog-sort-descending ? "Descending" : "Ascending");
                             custom-height: 32px;
                             clicked => { root.update-catalog-filter("direction"); }
+                        }
+                        if root.active-category == "Random" : TvSecondaryButton {
+                            text: "Shuffle";
+                            custom-height: 32px;
+                            clicked => { root.filter-category("Random"); }
                         }
                         TvChoiceChip {
                             text: "Unwatched";

@@ -1038,6 +1038,10 @@ fn get_adult_hub_catalog_page(
         });
     }
 
+    if category == "Random" {
+        return random_catalog_page(&client, &filters, start_index);
+    }
+
     let sort_str = match filters.sort {
         1 => "title",
         2 => "duration",
@@ -1125,6 +1129,88 @@ fn get_adult_hub_catalog_page(
         has_more,
         supplemental_total: 0,
     })
+}
+
+/// Random tab pages sample the catalog instead of walking it in order.
+///
+/// Each call asks the server for a page at a random offset, applies the same
+/// local filters as the other video tabs, then shuffles the page. `next_start`
+/// is therefore a page counter, not a server offset.
+fn random_catalog_page(
+    client: &adult_hub_client::AdultHubClient,
+    filters: &CatalogFilters,
+    page_index: usize,
+) -> std::result::Result<CatalogPage, CatalogError> {
+    let limit = CATALOG_PAGE_SIZE as u64;
+    let map_error = |err: adult_hub_client::AdultHubError| {
+        if err.is_unauthorized() {
+            CatalogError::Unauthorized
+        } else {
+            CatalogError::Api(err.to_string())
+        }
+    };
+    let build_query = |offset: u64| adult_hub_client::CatalogVideosQuery {
+        offset: Some(offset),
+        limit: Some(limit),
+        // Ordering is discarded; a deterministic server order is required only
+        // so pagination has an offset to sample from.
+        sort: Some("latest"),
+        direction: Some("desc"),
+        channel_id: None,
+        q: None,
+        category: (!filters.genre.is_empty()).then_some(filters.genre.as_str()),
+        tag: None,
+        studio: (!filters.studio.is_empty()).then_some(filters.studio.as_str()),
+        performer: (!filters.performer.is_empty()).then_some(filters.performer.as_str()),
+        performer_id: None,
+        min_duration: None,
+        is_favorite: filters.favorites_only.then_some(true),
+    };
+
+    let probe = client.get_videos(&build_query(0)).map_err(map_error)?;
+    let total_count = probe.total_count as usize;
+    let offset = random_page_offset(total_count, CATALOG_PAGE_SIZE);
+    let response = if offset == 0 {
+        probe
+    } else {
+        client.get_videos(&build_query(offset)).map_err(map_error)?
+    };
+
+    let mut items = response
+        .items
+        .into_iter()
+        .map(TvItem::from)
+        .filter(|item| filters.accepts(item))
+        .collect::<Vec<_>>();
+    fastrand::shuffle(&mut items);
+
+    let next_page = page_index + 1;
+    // An empty page after the caller's retries means the active filters found
+    // nothing in three random slices; stop rather than offer endless retries.
+    let has_more =
+        !items.is_empty() && random_page_has_more(next_page, total_count, CATALOG_PAGE_SIZE);
+    Ok(CatalogPage {
+        items,
+        next_start: next_page,
+        total_count,
+        has_more,
+        supplemental_total: 0,
+    })
+}
+
+/// Largest offset the server can satisfy with one full random page.
+fn random_page_offset(total_count: usize, limit: usize) -> u64 {
+    let max_offset = total_count.saturating_sub(limit);
+    if max_offset == 0 {
+        0
+    } else {
+        fastrand::u64(0..=max_offset as u64)
+    }
+}
+
+fn random_page_has_more(next_page: usize, total_count: usize, limit: usize) -> bool {
+    let pages = total_count.div_ceil(limit.max(1)).max(1);
+    next_page < pages
 }
 
 fn get_catalog_page(
@@ -3482,10 +3568,11 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     }
                 }
             }
-            let is_reclick_refresh = ui.get_active_screen() == "browse"
-                && ui.get_active_category() == cat
-                && !ui.get_catalog_category_drilldown()
-                && ui.get_search_query().is_empty();
+            let is_reclick_refresh = cat == "Random"
+                || (ui.get_active_screen() == "browse"
+                    && ui.get_active_category() == cat
+                    && !ui.get_catalog_category_drilldown()
+                    && ui.get_search_query().is_empty());
             if is_reclick_refresh {
                 catalog_views
                     .borrow_mut()
@@ -3579,6 +3666,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             set_search_sections(&ui, &[]);
             let loading_msg = match cat.as_str() {
                 "Performers" => "Loading performers…",
+                "Random" => "Loading random titles…",
                 "Studios" => "Loading studios…",
                 "Categories" => "Loading categories…",
                 "Continue Watching" | "Resume" => "Loading continue watching…",
@@ -4364,6 +4452,25 @@ mod tests {
         assert_eq!(studios, 1);
         assert_eq!(tags, 1);
         assert_eq!(channels, 1);
+    }
+
+    #[test]
+    fn random_pages_cover_the_catalog_in_bounded_steps() {
+        // A catalog that fits in one page always samples offset 0.
+        assert_eq!(random_page_offset(10, 50), 0);
+        assert_eq!(random_page_offset(0, 50), 0);
+        assert!(!random_page_has_more(1, 10, 50));
+
+        // Three pages allow exactly three load-more steps.
+        assert!(random_page_has_more(1, 120, 50));
+        assert!(random_page_has_more(2, 120, 50));
+        assert!(!random_page_has_more(3, 120, 50));
+
+        // Offsets never point past the last full page.
+        for _ in 0..100 {
+            let offset = random_page_offset(120, 50);
+            assert!(offset <= 70);
+        }
     }
 
     #[test]
