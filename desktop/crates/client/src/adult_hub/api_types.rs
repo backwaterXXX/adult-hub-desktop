@@ -6,15 +6,15 @@ use std::fmt;
 #[derive(Debug, Deserialize)]
 pub(super) struct ProblemDetails {
     #[serde(default)]
-    title: Option<String>,
+    pub(super) title: Option<String>,
     #[serde(default)]
-    detail: Option<String>,
+    pub(super) detail: Option<String>,
     #[serde(default)]
-    error: Option<String>,
+    pub(super) error: Option<String>,
     #[serde(default)]
-    message: Option<String>,
+    pub(super) message: Option<String>,
     #[serde(default)]
-    code: Option<String>,
+    pub(super) code: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
