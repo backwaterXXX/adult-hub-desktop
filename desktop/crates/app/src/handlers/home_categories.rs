@@ -73,6 +73,22 @@ pub(super) fn resume_title_needs_hydration(item: &TvItem) -> bool {
         || title
             .strip_prefix("Telegram ")
             .is_some_and(looks_like_telegram_ref)
+        // Older rows can carry the bare provider reference as the title
+        // (`channel:message:file`) while the id has the `telegram:` prefix.
+        || looks_like_telegram_ref(title)
+}
+
+/// Catalog ids for Telegram material carry the `telegram:` prefix; local rows
+/// sometimes stored only the bare provider reference.
+pub(super) fn catalog_lookup_id(id: &str) -> String {
+    let trimmed = id.trim();
+    if trimmed.starts_with("telegram:") {
+        trimmed.to_string()
+    } else if looks_like_telegram_ref(trimmed) {
+        format!("telegram:{trimmed}")
+    } else {
+        trimmed.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -130,6 +146,29 @@ mod tests {
         assert_eq!(second.len(), 1);
         let _ = server.join();
         clear_home_categories_cache();
+    }
+
+    #[test]
+    fn bare_provider_reference_needs_hydration_and_gets_the_prefix() {
+        let mut item = TvItem::new(
+            "telegram:mencompremium:11612:5967464115529057997",
+            "mencompremium:11612:5967464115529057997",
+        );
+        assert!(resume_title_needs_hydration(&item));
+        assert_eq!(
+            catalog_lookup_id(&item.id),
+            "telegram:mencompremium:11612:5967464115529057997"
+        );
+        assert_eq!(
+            catalog_lookup_id("mencompremium:11612:5967464115529057997"),
+            "telegram:mencompremium:11612:5967464115529057997"
+        );
+        assert_eq!(
+            catalog_lookup_id("864d93c2-630d-5cfc-9022-a20ec78a352e"),
+            "864d93c2-630d-5cfc-9022-a20ec78a352e"
+        );
+        item.title = "Real Title".into();
+        assert!(!resume_title_needs_hydration(&item));
     }
 
     #[test]
