@@ -106,7 +106,12 @@ fn fetch_cards_thumbnails(
                 if !matches_name {
                     return;
                 }
-                if let Some(image) = crate::thumbnails::image_from_bytes(&thumbnail.bytes) {
+                {
+                    let image = crate::thumbnails::remember_artwork_image(
+                        &thumbnail.url,
+                        crate::thumbnails::CARD_ARTWORK_WIDTH,
+                        &thumbnail.artwork,
+                    );
                     let model = if target_kind == "performer" {
                         ui.get_performer_items()
                     } else {
@@ -181,7 +186,7 @@ fn load_performer_profile_data(ui: &MainWindow, ctx: &AppContext, p_key: String)
     let token = session.as_ref().map(|s| s.access_token.clone());
 
     std::thread::spawn(move || {
-        let mut person_image_bytes = None;
+        let mut person_artwork: Option<(String, crate::thumbnails::DecodedArtwork)> = None;
         let mut person_child_count = None;
         let mut person_overview = None;
         let mut bio_info = None;
@@ -206,14 +211,14 @@ fn load_performer_profile_data(ui: &MainWindow, ctx: &AppContext, p_key: String)
                                 });
                                 if let Some(photo_url) = detail.photo_url.as_deref() {
                                     if let Ok(resolved) = client.resolve_artwork_url(photo_url) {
-                                        person_image_bytes =
-                                            crate::thumbnails::load_cached_image_bytes(&resolved)
-                                                .or_else(|| {
-                                                    crate::thumbnails::fetch_and_cache_image_bytes(
-                                                        &resolved,
-                                                        Some(&session.access_token),
-                                                    )
-                                                });
+                                        person_artwork =
+                                            crate::thumbnails::fetch_and_cache_artwork(
+                                                &resolved,
+                                                Some(&session.access_token),
+                                                crate::thumbnails::DETAIL_ARTWORK_WIDTH,
+                                            )
+                                            .ok()
+                                            .map(|artwork| (resolved, artwork));
                                     }
                                 }
                             }
@@ -269,9 +274,12 @@ fn load_performer_profile_data(ui: &MainWindow, ctx: &AppContext, p_key: String)
             ui.set_performer_loading(false);
 
             // Update photo
-            if let Some(bytes) = person_image_bytes.as_deref()
-                && let Some(image) = crate::thumbnails::image_from_bytes(bytes)
-            {
+            if let Some((url, artwork)) = person_artwork.as_ref() {
+                let image = crate::thumbnails::remember_artwork_image(
+                    url,
+                    crate::thumbnails::DETAIL_ARTWORK_WIDTH,
+                    artwork,
+                );
                 ui.set_performer_image(image);
                 ui.set_performer_has_image(true);
             }

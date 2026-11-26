@@ -272,6 +272,7 @@ pub fn restore_saved_home_data(
         })
         .collect::<Vec<_>>();
     ui.set_home_category_shelves(Rc::new(slint::VecModel::from(ui_category_shelves)).into());
+    crate::catalog::refresh_home_thumbnails_async(ui.as_weak(), None);
     true
 }
 
@@ -2394,6 +2395,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                         ui.set_home_category_shelves(
                             Rc::new(slint::VecModel::from(ui_category_shelves)).into(),
                         );
+                        crate::catalog::refresh_home_thumbnails_async(ui.as_weak(), None);
                     }
                 })
                 .ok();
