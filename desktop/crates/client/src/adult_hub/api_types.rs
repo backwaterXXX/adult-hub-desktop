@@ -448,6 +448,7 @@ impl From<PerformerItemDto> for TvItem {
             id: item.id,
             title: item.name,
             genres: vec!["__adult_hub_performer".into()],
+            source_provider: Some("adult_hub".into()),
             primary_image_tag: item.photo_url,
             child_count: item.video_count.map(|c| c as u32),
             ..Default::default()
