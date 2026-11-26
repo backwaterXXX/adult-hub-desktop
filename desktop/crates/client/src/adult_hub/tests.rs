@@ -1696,6 +1696,25 @@ fn test_wire_error_mapping_401_403_502() {
 }
 
 #[test]
+fn performer_item_carries_the_artwork_provider() {
+    let item: TvItem = PerformerItemDto {
+        id: "perf-1".to_string(),
+        name: "Performer One".to_string(),
+        photo_url: Some("/api/v1/artwork/performer/perf-1/photo".to_string()),
+        video_count: Some(12),
+    }
+    .into();
+
+    assert_eq!(item.source_provider.as_deref(), Some("adult_hub"));
+    assert_eq!(
+        item.primary_image_tag.as_deref(),
+        Some("/api/v1/artwork/performer/perf-1/photo")
+    );
+    assert!(item.genres.iter().any(|tag| tag == "__adult_hub_performer"));
+    assert_eq!(item.child_count, Some(12));
+}
+
+#[test]
 fn test_catalog_video_item_to_tv_item_mapping() {
     let video_item = CatalogVideoItem {
         id: "telegram:chan_1:msg_42:uid_abc".to_string(),
