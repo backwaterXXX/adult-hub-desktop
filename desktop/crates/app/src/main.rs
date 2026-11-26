@@ -463,31 +463,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             q: None,
                         })
                     });
-                let unauthorized = matches!(
-                    &check,
-                    Err(adult_hub_client::AdultHubError::Unauthorized { .. })
-                );
-                let invalid = matches!(&check, Err(adult_hub_client::AdultHubError::NotFound(_)));
-                if unauthorized {
-                    // Prefer the refresh token over a forced logout: access
-                    // tokens are expected to expire while the refresh token
-                    // remains valid.
-                    if crate::download::refresh_adult_hub_session_if_current(
-                        &ctx_refresh,
-                        &access_token,
-                    )
-                    .is_ok()
-                    {
-                        let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(ui) = weak.upgrade() {
-                                ui.invoke_refresh_home();
-                            }
-                        });
-                        return;
+                match saved_session_action(&check) {
+                    SavedSessionAction::Keep => return,
+                    SavedSessionAction::Refresh => {
+                        // Prefer the refresh token over a forced logout: access
+                        // tokens are expected to expire while the refresh token
+                        // remains valid. A failed refresh falls through to the
+                        // sign-out path below.
+                        if crate::download::refresh_adult_hub_session_if_current(
+                            &ctx_refresh,
+                            &access_token,
+                        )
+                        .is_ok()
+                        {
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(ui) = weak.upgrade() {
+                                    ui.invoke_refresh_home();
+                                }
+                            });
+                            return;
+                        }
                     }
-                }
-                if !invalid && !unauthorized {
-                    return;
+                    SavedSessionAction::SignOut => {}
                 }
                 let _ = credential_store.clear();
                 let _ = local_store.clear_session();
@@ -2063,6 +2060,30 @@ pub(crate) fn apply_session_thumbnail_urls(session: &Session, resolver_url: &str
     crate::thumbnails::set_resolver_auth_token(Some(&session.access_token));
 }
 
+/// What startup should do with a session saved by an earlier build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SavedSessionAction {
+    /// The server accepted the token (or failed transiently): stay signed in.
+    Keep,
+    /// The access token expired: try the refresh token before signing out.
+    Refresh,
+    /// The server does not know this session at all (old Jellyfin server).
+    SignOut,
+}
+
+fn saved_session_action<T>(
+    check: &Result<T, adult_hub_client::AdultHubError>,
+) -> SavedSessionAction {
+    match check {
+        Ok(_) => SavedSessionAction::Keep,
+        Err(adult_hub_client::AdultHubError::Unauthorized { .. }) => SavedSessionAction::Refresh,
+        Err(adult_hub_client::AdultHubError::NotFound(_)) => SavedSessionAction::SignOut,
+        // Timeouts, connection failures and 5xx responses must never log the
+        // user out; the next request can still succeed.
+        Err(_) => SavedSessionAction::Keep,
+    }
+}
+
 fn activate_session(
     ui: &MainWindow,
     session: &Session,
@@ -2098,6 +2119,48 @@ fn activate_session(
 
 #[cfg(test)]
 mod tests {
+    use super::SavedSessionAction;
+    use super::saved_session_action;
+    use adult_hub_client::AdultHubError;
+
+    #[test]
+    fn startup_session_decisions_keep_transient_failures_signed_in() {
+        let ok: Result<(), AdultHubError> = Ok(());
+        assert_eq!(saved_session_action(&ok), SavedSessionAction::Keep);
+
+        let timeout: Result<(), AdultHubError> = Err(AdultHubError::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "timeout",
+        )));
+        assert_eq!(saved_session_action(&timeout), SavedSessionAction::Keep);
+
+        let server_error: Result<(), AdultHubError> = Err(AdultHubError::Api {
+            status: 503,
+            message: "unavailable".into(),
+            code: None,
+        });
+        assert_eq!(
+            saved_session_action(&server_error),
+            SavedSessionAction::Keep
+        );
+    }
+
+    #[test]
+    fn startup_session_decisions_refresh_expired_tokens_and_drop_unknown_sessions() {
+        let expired: Result<(), AdultHubError> = Err(AdultHubError::Unauthorized {
+            status: 401,
+            message: "expired".into(),
+        });
+        assert_eq!(saved_session_action(&expired), SavedSessionAction::Refresh);
+
+        let old_server: Result<(), AdultHubError> =
+            Err(AdultHubError::NotFound("not an Adult Hub server".into()));
+        assert_eq!(
+            saved_session_action(&old_server),
+            SavedSessionAction::SignOut
+        );
+    }
+
     use super::*;
     use crate::catalog::sample_catalog_items;
     use adult_hub_client::TvItem;

@@ -1708,6 +1708,45 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
+    fn png_bytes(width: u32, height: u32, color: [u8; 4]) -> Vec<u8> {
+        use image::ImageEncoder;
+        let pixels = vec![color; (width * height) as usize]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<u8>>();
+        let mut encoded = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut encoded)
+            .write_image(&pixels, width, height, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        encoded
+    }
+
+    #[test]
+    fn artwork_is_decoded_once_at_the_requested_width() {
+        let artwork = super::decode_artwork(&png_bytes(800, 1200, [200, 100, 50, 255]), 400)
+            .expect("decoded artwork");
+        assert_eq!((artwork.width, artwork.height), (400, 600));
+        assert!(!artwork.poor);
+    }
+
+    #[test]
+    fn tiny_or_black_artwork_is_flagged_as_poor() {
+        let tiny = super::decode_artwork(&png_bytes(100, 150, [200, 200, 200, 255]), 480)
+            .expect("tiny artwork");
+        assert!(tiny.poor);
+
+        let black = super::decode_artwork(&png_bytes(800, 1200, [0, 0, 0, 255]), 480)
+            .expect("black artwork");
+        assert!(black.poor);
+    }
+
+    #[test]
+    fn artwork_is_never_upscaled() {
+        let artwork = super::decode_artwork(&png_bytes(320, 480, [120, 180, 200, 255]), 960)
+            .expect("decoded artwork");
+        assert_eq!((artwork.width, artwork.height), (320, 480));
+    }
+
     #[test]
     fn artwork_width_is_only_added_to_artwork_routes() {
         assert_eq!(

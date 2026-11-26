@@ -119,6 +119,11 @@ titles, paths and identifiers are redacted before they reach the file.
 | `Ctrl+wheel` | Zoom cards in the same grids |
 | `Ctrl+Shift+Q` | Panic exit |
 
+## Security Notes
+
+- Playback hands authentication headers to libmpv over IPC, never through process arguments.
+- HLS **downloads** pass the header to `ffmpeg -headers`, so the token is visible in the process list of the same user (and root) while the download runs. This is the accepted F-01 trade-off recorded in the security audit; a loopback proxy would remove it if the threat model changes.
+
 ## Privacy and Account Data
 
 The app connects to the Adult Hub and Resolver addresses you configure and checks GitHub Releases for updates. It does not bundle an Adult Hub or Resolver server. Credentials and account settings are stored locally; the app uses Windows Credential Manager or Linux Secret Service for protected storage when available.
