@@ -48,7 +48,7 @@ impl Options {
                     println!("  -h, --help                Show this help message and exit");
                     println!("  -v, --version             Show application version and exit");
                     println!(
-                        "      --debug               Write detailed diagnostics to the log file"
+                        "      --debug               Write detailed debug diagnostics to startup.log"
                     );
                     println!(
                         "      --renderer <MODE>     Force the UI renderer for this run: gl | software"

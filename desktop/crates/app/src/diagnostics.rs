@@ -229,6 +229,13 @@ impl log::Log for AppLogger {
             .unwrap_or_default()
             .as_secs();
         eprintln!("[{stamp}] [{}] [{target}] {message}", record.level());
+        if crate::debug_logging_enabled() {
+            crate::log_startup(&format!(
+                "[{}] [{target}] {}",
+                record.level(),
+                redact(&message)
+            ));
+        }
     }
 
     fn flush(&self) {}

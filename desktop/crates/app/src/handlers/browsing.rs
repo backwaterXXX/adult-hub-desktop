@@ -2306,20 +2306,38 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
 
                 // Older local rows may not have a title at all. Hydrate the
                 // visible resume cards directly by canonical id instead of
-                // showing a raw Telegram reference. Keep the lookup bounded.
-                let mut detail_budget = 12usize;
-                for entry in resume.iter_mut() {
-                    if !resume_title_needs_hydration(entry) {
-                        continue;
-                    }
-                    if detail_budget == 0 {
-                        break;
-                    }
-                    detail_budget -= 1;
-                    let Ok(detail) = client.get_catalog_video_detail(&entry.id) else {
+                // showing a raw Telegram reference. Keep the lookup bounded
+                // and run it in parallel so a slow link cannot stall Home.
+                let missing_indices = resume
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, entry)| resume_title_needs_hydration(entry))
+                    .map(|(index, _)| index)
+                    .take(12)
+                    .collect::<Vec<_>>();
+                let hydrated = std::thread::scope(|scope| {
+                    let handles = missing_indices
+                        .iter()
+                        .filter_map(|index| {
+                            let id = resume.get(*index)?.id.clone();
+                            Some(scope.spawn(move || {
+                                client
+                                    .get_catalog_video_detail(&id)
+                                    .ok()
+                                    .map(TvItem::from)
+                                    .map(|meta| (*index, meta))
+                            }))
+                        })
+                        .collect::<Vec<_>>();
+                    handles
+                        .into_iter()
+                        .filter_map(|handle| handle.join().ok().flatten())
+                        .collect::<Vec<_>>()
+                });
+                for (index, meta) in hydrated {
+                    let Some(entry) = resume.get_mut(index) else {
                         continue;
                     };
-                    let meta = TvItem::from(detail);
                     entry.title = meta.title;
                     entry.primary_image_tag = meta.primary_image_tag;
                     entry.runtime_ticks = entry.runtime_ticks.or(meta.runtime_ticks);
