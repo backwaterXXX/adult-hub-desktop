@@ -113,6 +113,13 @@ pub fn invalidate_cached_image(url: &str) {
     for variant in cache_url_variants(url) {
         let path = url_to_cache_path_without_create(&variant);
         let _ = std::fs::remove_file(path);
+        // Fetches store the resolver derivative keyed by the `w` URL.
+        for width in [CARD_ARTWORK_WIDTH, DETAIL_ARTWORK_WIDTH] {
+            let widened = with_artwork_width(&variant, width);
+            if widened != variant {
+                let _ = std::fs::remove_file(url_to_cache_path_without_create(&widened));
+            }
+        }
     }
 }
 
@@ -524,6 +531,53 @@ fn display_width(requested: u32) -> u32 {
     }
 }
 
+/// Ask the resolver for a pre-rendered derivative of this width.
+///
+/// Only artwork routes understand ``w``; anything else (Telegram CDN, phash
+/// frames, a resolver that predates derivatives) keeps its original URL. An
+/// older server ignores the unknown parameter, so this stays backward
+/// compatible.
+fn with_artwork_width(url: &str, width: u32) -> String {
+    if width == 0 {
+        return url.to_owned();
+    }
+    let Ok(mut parsed) = url::Url::parse(url) else {
+        return url.to_owned();
+    };
+    if !parsed.path().contains("/artwork/") {
+        return url.to_owned();
+    }
+    if parsed.query_pairs().any(|(key, _)| key == "w") {
+        return url.to_owned();
+    }
+    parsed
+        .query_pairs_mut()
+        .append_pair("w", &display_width(width).to_string());
+    parsed.to_string()
+}
+
+/// Memory entries are shared across widths; the width bucket already keeps
+/// sizes apart, and the request URL may carry a ``w`` the card never had.
+fn memory_cache_key(url: &str, max_width: u32) -> (String, u32) {
+    let clean = url::Url::parse(url)
+        .ok()
+        .filter(|parsed| parsed.query_pairs().any(|(key, _)| key == "w"))
+        .map(|mut parsed| {
+            let pairs = parsed
+                .query_pairs()
+                .filter(|(key, _)| key != "w")
+                .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                .collect::<Vec<_>>();
+            parsed.set_query(None);
+            if !pairs.is_empty() {
+                parsed.query_pairs_mut().extend_pairs(pairs);
+            }
+            parsed.to_string()
+        })
+        .unwrap_or_else(|| url.to_owned());
+    (clean, display_width(max_width))
+}
+
 fn downscale_rgba(image: image::RgbaImage, max_width: u32) -> image::RgbaImage {
     let max_width = max_width.max(1);
     if image.width() <= max_width {
@@ -625,7 +679,7 @@ pub fn cached_memory_image(url: &str, max_width: u32) -> Option<slint::Image> {
     if url.trim().is_empty() {
         return None;
     }
-    let key = (url.to_owned(), display_width(max_width));
+    let key = memory_cache_key(url, max_width);
     MEMORY_IMAGES.with(|cache| cache.borrow_mut().get(&key))
 }
 
@@ -633,7 +687,7 @@ pub fn cached_memory_image(url: &str, max_width: u32) -> Option<slint::Image> {
 pub fn remember_artwork_image(url: &str, max_width: u32, artwork: &DecodedArtwork) -> slint::Image {
     let image = artwork_to_image(artwork);
     if !url.trim().is_empty() {
-        let key = (url.to_owned(), display_width(max_width));
+        let key = memory_cache_key(url, max_width);
         MEMORY_IMAGES.with(|cache| {
             cache
                 .borrow_mut()
@@ -1041,13 +1095,13 @@ pub fn fetch_and_cache_artwork(
     token: Option<&str>,
     max_width: u32,
 ) -> Result<DecodedArtwork, ThumbnailFailure> {
-    fetch_image_artwork(url, token, max_width, true)
+    fetch_image_artwork(url, token, max_width, true, true)
 }
 
 /// Connection diagnostic fetch: fresh download, failure reported by category,
 /// HTTP code and stage instead of a bare success flag.
 pub fn probe_image(url: &str, token: Option<&str>) -> Result<(), ThumbnailFailure> {
-    fetch_image_artwork(url, token, CARD_ARTWORK_WIDTH, false).map(|_| ())
+    fetch_image_artwork(url, token, CARD_ARTWORK_WIDTH, false, false).map(|_| ())
 }
 
 fn fetch_image_artwork(
@@ -1055,16 +1109,22 @@ fn fetch_image_artwork(
     token: Option<&str>,
     max_width: u32,
     allow_cached_image: bool,
+    request_derivative: bool,
 ) -> Result<DecodedArtwork, ThumbnailFailure> {
     let url = url.trim();
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err(ThumbnailFailure::InvalidUrl);
     }
-    if allow_cached_image && let Some(artwork) = load_cached_artwork(url, max_width) {
+    let request_url = if request_derivative {
+        with_artwork_width(url, max_width)
+    } else {
+        url.to_owned()
+    };
+    if allow_cached_image && let Some(artwork) = load_cached_artwork(&request_url, max_width) {
         return Ok(artwork);
     }
 
-    let bytes = download_image_bytes(url, token)?;
+    let bytes = download_image_bytes(&request_url, token)?;
     let image = {
         let _permit = decode_permit();
         rgba_from_dynamic(decode_dynamic_image(&bytes).ok_or_else(|| {
@@ -1073,7 +1133,7 @@ fn fetch_image_artwork(
                 "Thumbnail",
                 &format!(
                     "{}: decode failed: {detail}",
-                    diagnostic_subject(url),
+                    diagnostic_subject(&request_url),
                     detail = ThumbnailFailure::Decode.label()
                 ),
             );
@@ -1082,13 +1142,13 @@ fn fetch_image_artwork(
     };
     let poor = rgba_is_poor(&image);
     if allow_cached_image {
-        store_cached_artwork(url, &image);
+        store_cached_artwork(&request_url, &image);
     }
     crate::diagnostics::GLOBAL_LOG.i(
         "Thumbnail",
         &format!(
             "{}: image downloaded and decoded successfully ({} bytes)",
-            diagnostic_subject(url),
+            diagnostic_subject(&request_url),
             bytes.len()
         ),
     );
@@ -1605,5 +1665,39 @@ mod tests {
             .count();
         assert_eq!(leftovers, 0);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn artwork_width_is_only_added_to_artwork_routes() {
+        assert_eq!(
+            super::with_artwork_width("https://hub.example/api/v1/artwork/video/abc/primary", 480),
+            "https://hub.example/api/v1/artwork/video/abc/primary?w=480"
+        );
+        assert_eq!(
+            super::with_artwork_width("https://cdn.example/media/foo.jpg", 480),
+            "https://cdn.example/media/foo.jpg"
+        );
+        assert_eq!(
+            super::with_artwork_width(
+                "https://hub.example/api/v1/artwork/video/abc/primary?w=1280",
+                480
+            ),
+            "https://hub.example/api/v1/artwork/video/abc/primary?w=1280"
+        );
+    }
+
+    #[test]
+    fn memory_cache_entry_is_shared_across_width_requests() {
+        assert_eq!(
+            super::memory_cache_key(
+                "https://hub.example/api/v1/artwork/video/a/primary?w=480",
+                480
+            ),
+            super::memory_cache_key("https://hub.example/api/v1/artwork/video/a/primary", 480)
+        );
+        assert_ne!(
+            super::memory_cache_key("https://hub.example/api/v1/artwork/video/a/primary", 480),
+            super::memory_cache_key("https://hub.example/api/v1/artwork/video/a/primary", 1280)
+        );
     }
 }
