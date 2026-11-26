@@ -1,12 +1,15 @@
 use crate::MainWindow;
 use adult_hub_client::TvItem;
+use adult_hub_storage::LocalStore;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 /// Server-side quality tier requested from the catalog API.
 ///
 /// The backend owns the definition (resolution and bitrate); the client must
 /// never re-derive quality from file size.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) enum QualityTier {
     #[default]
     All,
@@ -43,7 +46,7 @@ impl QualityTier {
 }
 
 /// Sort order for the performer list. The server owns name/video-count sorting.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) enum PerformerSort {
     #[default]
     NameAsc,
@@ -70,7 +73,8 @@ impl PerformerSort {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub(super) struct CatalogFilters {
     pub(super) sort: u8,
     pub(super) descending: bool,
@@ -124,7 +128,6 @@ impl CatalogFilters {
         match self.sort {
             1 => "SortName",
             2 => "Runtime",
-            3 => "CommunityRating",
             _ => "DateCreated",
         }
     }
@@ -260,7 +263,6 @@ pub(super) fn catalog_filter_labels(filters: &CatalogFilters) -> (String, String
     let sort = match filters.sort {
         1 => "Title",
         2 => "Duration",
-        3 => "Rating",
         _ => "Date added",
     };
     let duration = match filters.duration {
@@ -270,4 +272,34 @@ pub(super) fn catalog_filter_labels(filters: &CatalogFilters) -> (String, String
         _ => "Any length",
     };
     (sort.into(), duration.into())
+}
+
+/// Key holding the per-category filter map in the local settings store.
+pub(super) const CATALOG_FILTERS_SETTING: &str = "catalog_filters_v1";
+
+/// Load the per-category filters saved by the previous run.
+pub(super) fn load_catalog_filters(store: &LocalStore) -> HashMap<String, CatalogFilters> {
+    store
+        .get_setting(CATALOG_FILTERS_SETTING)
+        .ok()
+        .flatten()
+        .and_then(|json| serde_json::from_str::<HashMap<String, CatalogFilters>>(&json).ok())
+        .unwrap_or_default()
+}
+
+/// Persist the per-category filter map; failures are not worth interrupting a click.
+pub(super) fn save_catalog_filters(store: &LocalStore, filters: &HashMap<String, CatalogFilters>) {
+    if let Ok(json) = serde_json::to_string(filters) {
+        let _ = store.set_setting(CATALOG_FILTERS_SETTING, &json);
+    }
+}
+
+/// Next sort option in the UI cycle, with the direction that order implies.
+///
+/// 0 = date added (newest first), 1 = title (A-Z), 2 = duration (longest
+/// first). There is no rating sort: the API does not expose one, so offering it
+/// only produced a silent fallback to "latest".
+pub(super) fn next_catalog_sort(current: u8) -> (u8, bool) {
+    let next = (current + 1) % 3;
+    (next, next != 1)
 }
