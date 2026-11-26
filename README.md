@@ -97,6 +97,17 @@ The Resolver URL follows the Adult Hub server by default. If your Resolver is ho
 
 Older desktop versions could keep a saved Jellyfin session and library item IDs locally. After upgrading, sign in again to your Adult Hub server. Local resume/history entries whose old Telegram hash no longer exists are matched by title when possible; entries that cannot be matched are hidden from the Home shelves instead of failing during playback.
 
+## Debug Logging
+
+Run the app with `--debug` to write detailed, redacted diagnostics to the
+startup log:
+
+- Windows: `%APPDATA%\AdultHubDesktop\startup.log`
+- Linux: `~/.local/share/adult-hub-desktop/startup.log`
+
+The log rotates at 512 KB. Account tokens, authorization headers, URLs,
+titles, paths and identifiers are redacted before they reach the file.
+
 ## Privacy and Account Data
 
 The app connects to the Adult Hub and Resolver addresses you configure and checks GitHub Releases for updates. It does not bundle an Adult Hub or Resolver server. Credentials and account settings are stored locally; the app uses Windows Credential Manager or Linux Secret Service for protected storage when available.

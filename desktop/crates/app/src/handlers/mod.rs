@@ -2,6 +2,7 @@ pub mod browsing;
 pub mod channels;
 pub mod controls;
 pub mod details;
+mod home_categories;
 pub mod htpc;
 pub mod polling;
 pub mod profiles;

@@ -634,15 +634,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     {
         let weak = ui.as_weak();
+        let local_store = local_store.clone();
         ui.on_toast_action_clicked(move || {
             let Some(ui) = weak.upgrade() else { return };
             let action = ui.get_toast_action_text().to_string();
+            let remove_id = ui.get_toast_remove_item_id().to_string();
             ui.set_toast_visible(false);
+            ui.set_toast_remove_item_id("".into());
             if action == "Configure" {
                 ui.set_resolver_prompt_dialog_visible(false);
                 ui.set_active_screen("settings".into());
             } else if action == "Sign In" {
                 ui.set_login_modal_visible(true);
+            } else if action == "Remove" && !remove_id.is_empty() {
+                if let Err(error) = local_store.forget_item(&remove_id) {
+                    ui.set_status(format!("Could not remove unavailable item: {error}").into());
+                    ui.set_status_color(slint::Color::from_rgb_u8(244, 67, 54));
+                } else {
+                    ui.set_status("Unavailable item removed from history".into());
+                    ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
+                    ui.invoke_refresh_home();
+                }
             }
         });
     }
@@ -652,6 +664,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.on_toast_dismiss(move || {
             let Some(ui) = weak.upgrade() else { return };
             ui.set_toast_visible(false);
+            ui.set_toast_remove_item_id("".into());
         });
     }
 

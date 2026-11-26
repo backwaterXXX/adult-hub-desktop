@@ -1,3 +1,6 @@
+use super::home_categories::{
+    cached_home_categories, clear_home_categories_cache, resume_title_needs_hydration,
+};
 use crate::catalog::{
     append_catalog_page, filter_catalog_items, refresh_catalog_thumbnails_async,
     sample_catalog_tv_items, set_catalog, tv_item_to_card, tv_item_to_card_for_server,
@@ -15,62 +18,11 @@ use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 const CATALOG_PAGE_SIZE: usize = 50;
 const CHANNEL_SEARCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
-const HOME_CATEGORIES_TTL: Duration = Duration::from_secs(60);
-
-type HomeCategoriesCache = Mutex<std::collections::HashMap<String, (Instant, Vec<TvItem>)>>;
-
-static HOME_CATEGORIES_CACHE: OnceLock<HomeCategoriesCache> = OnceLock::new();
-
-fn clear_home_categories_cache() {
-    if let Some(cache) = HOME_CATEGORIES_CACHE.get() {
-        cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
-    }
-}
-
-fn cached_home_categories(
-    client: &AdultHubClient,
-    session: &Session,
-) -> std::result::Result<Vec<TvItem>, String> {
-    let cache = HOME_CATEGORIES_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
-    let cached = {
-        let guard = cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard
-            .get(&session.server_url)
-            .filter(|(cached_at, _)| cached_at.elapsed() < HOME_CATEGORIES_TTL)
-            .map(|(_, items)| items.clone())
-    };
-    if let Some(items) = cached {
-        return Ok(items);
-    }
-    let response = client
-        .get_categories(&CatalogTaxonomyQuery {
-            offset: Some(0),
-            limit: Some(200),
-            q: None,
-        })
-        .map_err(|error| error.to_string())?;
-    let items = response
-        .items
-        .into_iter()
-        .map(|item| item.to_category_tv_item())
-        .collect::<Vec<_>>();
-    cache
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(session.server_url.clone(), (Instant::now(), items.clone()));
-    Ok(items)
-}
-
 #[derive(Debug)]
 enum CatalogError {
     Unauthorized,
@@ -913,27 +865,6 @@ fn resume_item_id(video_id: &str) -> Option<String> {
         return Some(format!("telegram:{bare}"));
     }
     Some(raw.to_string())
-}
-
-fn looks_like_telegram_ref(value: &str) -> bool {
-    let raw = value.trim().trim_start_matches("telegram:");
-    let mut parts = raw.split(':');
-    let _channel = parts.next();
-    let message = parts.next();
-    let file = parts.next();
-    parts.next().is_none()
-        && message.is_some_and(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
-        && file.is_some_and(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
-}
-
-fn resume_title_needs_hydration(item: &TvItem) -> bool {
-    let title = item.title.trim();
-    title.is_empty()
-        || title.eq_ignore_ascii_case(item.id.as_str())
-        || title.starts_with("telegram:")
-        || title
-            .strip_prefix("Telegram ")
-            .is_some_and(looks_like_telegram_ref)
 }
 
 fn item_matches_query(item: &TvItem, query: &str) -> bool {
@@ -4721,34 +4652,5 @@ mod legacy_id_tests {
         assert!(!is_legacy_telegram_hash_id(
             "864d93c2-630d-5cfc-9022-a20ec78a352e"
         ));
-    }
-
-    #[test]
-    fn resume_title_hydration_detects_ids_but_keeps_real_titles() {
-        let mut item = TvItem::new(
-            "telegram:-1001618765010:141:5337054953330449443",
-            "Telegram -1001618765010:141:5337054953330449443",
-        );
-        assert!(resume_title_needs_hydration(&item));
-        item.title = "telegram:-1001618765010:141:5337054953330449443".into();
-        assert!(resume_title_needs_hydration(&item));
-        item.title = "".into();
-        assert!(resume_title_needs_hydration(&item));
-        item.title = "Screwed 1".into();
-        assert!(!resume_title_needs_hydration(&item));
-    }
-
-    #[test]
-    fn telegram_reference_detection_requires_three_numeric_parts() {
-        assert!(looks_like_telegram_ref(
-            "-1001618765010:141:5337054953330449443"
-        ));
-        assert!(looks_like_telegram_ref(
-            "telegram:-1001618765010:141:5337054953330449443"
-        ));
-        assert!(!looks_like_telegram_ref(
-            "telegram:5c23c503c114b8a273fd6ec9fbe0a031"
-        ));
-        assert!(!looks_like_telegram_ref("Movie: Part 1"));
     }
 }

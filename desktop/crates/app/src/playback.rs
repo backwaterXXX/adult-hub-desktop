@@ -375,11 +375,9 @@ pub fn start_item_playback_with_resume(
             Ok(d) => d,
             Err(err) => {
                 let not_found = matches!(&err, adult_hub_client::AdultHubError::NotFound(_));
-                if not_found {
-                    let _ = local_store.forget_item(&item.id);
-                }
                 let safe_msg = if not_found {
-                    "This item is no longer in the Adult Hub catalog. It was removed from Continue Watching and history.".to_string()
+                    "This item is no longer in the Adult Hub catalog. Remove it from history?"
+                        .to_string()
                 } else {
                     format!(
                         "Could not resolve Adult Hub playback: {}",
@@ -387,7 +385,14 @@ pub fn start_item_playback_with_resume(
                     )
                 };
                 ui.set_player_state("failed".into());
-                show_error(ui, safe_msg);
+                show_error(ui, safe_msg.clone());
+                if not_found {
+                    ui.set_toast_remove_item_id(item.id.clone().into());
+                    ui.set_toast_message(safe_msg.into());
+                    ui.set_toast_type("warning".into());
+                    ui.set_toast_action_text("Remove".into());
+                    ui.set_toast_visible(true);
+                }
                 return;
             }
         };
@@ -920,12 +925,11 @@ pub fn start_item_playback_with_resume_ctx(
                 Err(err) => {
                     let is_unauth = err.is_unauthorized();
                     let not_found = matches!(&err, adult_hub_client::AdultHubError::NotFound(_));
-                    if not_found {
-                        let _ = ctx_clone.local_store.forget_item(&item.id);
-                    }
+                    let failed_item_id = item.id.clone();
                     let safe_err = format_safe_adult_hub_error(&err);
                     let msg = if not_found {
-                        "This item is no longer in the Adult Hub catalog. It was removed from Continue Watching and history.".to_string()
+                        "This item is no longer in the Adult Hub catalog. Remove it from history?"
+                            .to_string()
                     } else {
                         format!("Could not resolve Adult Hub playback: {safe_err}")
                     };
@@ -948,6 +952,12 @@ pub fn start_item_playback_with_resume_ctx(
                                 ui.set_toast_message("Session expired. Please reconnect.".into());
                                 ui.set_toast_type("warning".into());
                                 ui.set_toast_action_text("Sign In".into());
+                                ui.set_toast_visible(true);
+                            } else if not_found {
+                                ui.set_toast_remove_item_id(failed_item_id.into());
+                                ui.set_toast_message(msg.into());
+                                ui.set_toast_type("warning".into());
+                                ui.set_toast_action_text("Remove".into());
                                 ui.set_toast_visible(true);
                             } else {
                                 ui.set_toast_message(msg.into());
