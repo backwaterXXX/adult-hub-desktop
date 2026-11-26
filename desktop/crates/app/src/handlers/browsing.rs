@@ -2039,12 +2039,53 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     }
                 };
 
-                let latest_res = client.get_catalog_videos(&adult_hub_client::CatalogVideosQuery {
-                    offset: Some(0),
-                    limit: Some(16),
-                    sort: Some("latest"),
-                    ..Default::default()
-                });
+                // Fetch the independent Home shelves concurrently; a slow
+                // performers or taxonomy request must not delay Recently Added.
+                let (latest_res, random_res, performer_res, categories_result) =
+                    std::thread::scope(|scope| {
+                        let latest_task = scope.spawn(|| {
+                            client.get_catalog_videos(&adult_hub_client::CatalogVideosQuery {
+                                offset: Some(0),
+                                limit: Some(16),
+                                sort: Some("latest"),
+                                ..Default::default()
+                            })
+                        });
+                        let random_task = scope.spawn(|| {
+                            client.get_catalog_videos(&adult_hub_client::CatalogVideosQuery {
+                                offset: Some(0),
+                                limit: Some(50),
+                                sort: Some("latest"),
+                                ..Default::default()
+                            })
+                        });
+                        let performer_task = scope.spawn(|| {
+                            client.get_performers(&adult_hub_client::CatalogPerformersQuery {
+                                offset: Some(0),
+                                limit: Some(100),
+                                q: None,
+                                letter: None,
+                                photo_only: Some(true),
+                                sort: Some("video_count"),
+                                direction: Some("desc"),
+                            })
+                        });
+                        let categories_task =
+                            scope.spawn(|| cached_home_categories(&client, &session));
+                        let task_error = || adult_hub_client::AdultHubError::Api {
+                            status: 0,
+                            message: "home shelf worker panicked".into(),
+                            code: None,
+                        };
+                        (
+                            latest_task.join().unwrap_or_else(|_| Err(task_error())),
+                            random_task.join().unwrap_or_else(|_| Err(task_error())),
+                            performer_task.join().unwrap_or_else(|_| Err(task_error())),
+                            categories_task
+                                .join()
+                                .unwrap_or_else(|_| Err("category worker panicked".into())),
+                        )
+                    });
 
                 let latest_items = match latest_res {
                     Ok(resp) => resp.items.into_iter().map(TvItem::from).collect::<Vec<_>>(),
@@ -2095,12 +2136,6 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     }
                 };
 
-                let random_res = client.get_catalog_videos(&adult_hub_client::CatalogVideosQuery {
-                    offset: Some(0),
-                    limit: Some(50),
-                    sort: Some("latest"),
-                    ..Default::default()
-                });
                 let (mut random_items, random_error) = match random_res {
                     Ok(resp) => (
                         resp.items.into_iter().map(TvItem::from).collect::<Vec<_>>(),
@@ -2115,16 +2150,6 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 fastrand::shuffle(&mut random_items);
                 random_items.truncate(4);
 
-                let performer_res =
-                    client.get_performers(&adult_hub_client::CatalogPerformersQuery {
-                        offset: Some(0),
-                        limit: Some(100),
-                        q: None,
-                        letter: None,
-                        photo_only: Some(true),
-                        sort: Some("video_count"),
-                        direction: Some("desc"),
-                    });
                 let (mut performers, performer_error) = match performer_res {
                     Ok(resp) => (
                         resp.items.into_iter().map(TvItem::from).collect::<Vec<_>>(),
@@ -2141,8 +2166,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 fastrand::shuffle(&mut performers);
                 performers.truncate(12);
 
-                let (categories, categories_error) = match cached_home_categories(&client, &session)
-                {
+                let (categories, categories_error) = match categories_result {
                     Ok(categories) => (categories, String::new()),
                     Err(err) => (Vec::new(), format!("Couldn't load categories: {err}")),
                 };

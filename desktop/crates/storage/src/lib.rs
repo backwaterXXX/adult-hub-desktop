@@ -344,6 +344,20 @@ impl LocalStore {
             )?;
         }
 
+        if current_version < 7 {
+            conn.execute_batch(
+                "
+                BEGIN;
+                CREATE INDEX IF NOT EXISTS idx_local_progress_updated_at
+                    ON local_progress (updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_watch_history_watched_at
+                    ON watch_history (watched_at DESC);
+                INSERT INTO schema_version (version) VALUES (7);
+                COMMIT;
+                ",
+            )?;
+        }
+
         Ok(())
     }
 
