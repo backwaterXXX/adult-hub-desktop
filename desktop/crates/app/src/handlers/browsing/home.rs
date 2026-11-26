@@ -2,6 +2,7 @@ use crate::catalog::tv_item_to_card_for_server;
 use crate::{HomeCategoryOption, HomeCategoryShelfData, MainWindow, VideoCardData};
 use adult_hub_client::TvItem;
 use adult_hub_storage::LocalStore;
+use slint::ComponentHandle;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
