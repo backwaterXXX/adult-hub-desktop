@@ -1797,7 +1797,7 @@ pub fn log_artwork_stats(label: &str, images: usize) {
     ));
 }
 
-fn refresh_catalog_thumbnails_async(
+pub fn refresh_catalog_thumbnails_async(
     ui: slint::Weak<MainWindow>,
     cards: Vec<VideoCardData>,
     token: String,
