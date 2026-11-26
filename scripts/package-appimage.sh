@@ -45,11 +45,10 @@ cp "${ROOT_DIR}/desktop/assets/adult-hub-desktop.svg" "${APPDIR}/"
 cp "${ROOT_DIR}/desktop/assets/adult-hub-desktop.svg" "${APPDIR}/usr/share/icons/hicolor/scalable/apps/"
 
 # AppStream metadata
+# Keep the canonical reverse-DNS filename: appimagetool warns when it only
+# finds this name, but a compatibility copy fails its stricter validation with
+# metainfo-filename-cid-mismatch.
 cp "${ROOT_DIR}/desktop/assets/io.github.backwaterxxx.adulthubdesktop.appdata.xml" "${APPDIR}/usr/share/metainfo/"
-# appimagetool also looks for an appdata file named after the AppImage; ship a
-# copy so it stops warning while AppStream tools keep using the reverse-DNS ID.
-cp "${APPDIR}/usr/share/metainfo/io.github.backwaterxxx.adulthubdesktop.appdata.xml" \
-    "${APPDIR}/usr/share/metainfo/adult-hub-desktop.appdata.xml"
 
 # Copy license and notices
 cp "${ROOT_DIR}/LICENSE" "${APPDIR}/"
