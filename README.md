@@ -21,6 +21,7 @@ The app is a client. You provide the Adult Hub server and, when needed, a separa
 ### 🎬 Your Media Collection, Organized
 
 - **Full library browsing**: Browse movies, categories, performers, and studios, with search and filters.
+- **Random**: shuffle the catalog at random and narrow it with the same filters (genre, studio, performer, length, HD, unwatched, favorites).
 - **Detailed profiles**: Explore performer and studio pages and related titles.
 - **Watch progress and history**: Resume playback from server progress and keep a local playback history.
 - **Download queue**: Queue downloads, pause or resume them, and review completed items.
@@ -107,6 +108,16 @@ startup log:
 
 The log rotates at 512 KB. Account tokens, authorization headers, URLs,
 titles, paths and identifiers are redacted before they reach the file.
+
+## Keyboard Shortcuts
+
+| Shortcut | Action |
+|---|---|
+| `F5` / `Ctrl+R` | Refresh the current screen (Home, Browse, Channels, video/performer/studio details) |
+| `Ctrl+F` | Focus catalog search |
+| `Ctrl++` / `Ctrl+-` / `Ctrl+0` | Zoom cards in Browse, Channels, performer and studio grids |
+| `Ctrl+wheel` | Zoom cards in the same grids |
+| `Ctrl+Shift+Q` | Panic exit |
 
 ## Privacy and Account Data
 

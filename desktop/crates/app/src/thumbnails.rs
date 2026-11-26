@@ -488,6 +488,38 @@ fn acquire_count_permit(
 static NETWORK_PERMITS: OnceLock<(Mutex<usize>, Condvar)> = OnceLock::new();
 static DECODE_PERMITS: OnceLock<(Mutex<usize>, Condvar)> = OnceLock::new();
 
+static STAT_CACHE_HITS: AtomicUsize = AtomicUsize::new(0);
+static STAT_DOWNLOADS: AtomicUsize = AtomicUsize::new(0);
+static STAT_DECODES: AtomicUsize = AtomicUsize::new(0);
+static STAT_DECODE_MICROS: AtomicUsize = AtomicUsize::new(0);
+
+/// Work performed by the artwork pipeline since the last call, for `--debug`.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ArtworkStats {
+    pub cache_hits: usize,
+    pub downloads: usize,
+    pub decodes: usize,
+    pub decode_micros: usize,
+}
+
+/// Return the counters collected since the previous call.
+pub fn take_artwork_stats() -> ArtworkStats {
+    ArtworkStats {
+        cache_hits: STAT_CACHE_HITS.swap(0, Ordering::Relaxed),
+        downloads: STAT_DOWNLOADS.swap(0, Ordering::Relaxed),
+        decodes: STAT_DECODES.swap(0, Ordering::Relaxed),
+        decode_micros: STAT_DECODE_MICROS.swap(0, Ordering::Relaxed),
+    }
+}
+
+fn record_decode(started: std::time::Instant) {
+    STAT_DECODES.fetch_add(1, Ordering::Relaxed);
+    STAT_DECODE_MICROS.fetch_add(
+        started.elapsed().as_micros().min(usize::MAX as u128) as usize,
+        Ordering::Relaxed,
+    );
+}
+
 fn network_permit() -> Option<CountPermit> {
     acquire_count_permit(
         NETWORK_PERMITS.get_or_init(|| (Mutex::new(0), Condvar::new())),
@@ -648,7 +680,9 @@ fn artwork_from_rgba(image: image::RgbaImage, max_width: u32, poor: bool) -> Dec
 /// Decode artwork once, at most `max_width` pixels wide.
 fn decode_artwork(bytes: &[u8], max_width: u32) -> Option<DecodedArtwork> {
     let _permit = decode_permit();
+    let started = std::time::Instant::now();
     let image = rgba_from_dynamic(decode_dynamic_image(bytes)?);
+    record_decode(started);
     let poor = rgba_is_poor(&image);
     Some(artwork_from_rgba(image, max_width, poor))
 }
@@ -925,7 +959,10 @@ fn load_cached_artwork(url: &str, max_width: u32) -> Option<DecodedArtwork> {
         }
     };
     match decode_artwork(&bytes, max_width) {
-        Some(artwork) => Some(artwork),
+        Some(artwork) => {
+            STAT_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+            Some(artwork)
+        }
         None => {
             discard_corrupt_cache_entry(url, &path);
             None
@@ -1124,10 +1161,12 @@ fn fetch_image_artwork(
         return Ok(artwork);
     }
 
+    STAT_DOWNLOADS.fetch_add(1, Ordering::Relaxed);
     let bytes = download_image_bytes(&request_url, token)?;
     let image = {
         let _permit = decode_permit();
-        rgba_from_dynamic(decode_dynamic_image(&bytes).ok_or_else(|| {
+        let started = std::time::Instant::now();
+        let decoded = rgba_from_dynamic(decode_dynamic_image(&bytes).ok_or_else(|| {
             crate::log_debug("thumbnail decode failed");
             crate::diagnostics::GLOBAL_LOG.w(
                 "Thumbnail",
@@ -1138,7 +1177,9 @@ fn fetch_image_artwork(
                 ),
             );
             ThumbnailFailure::Decode
-        })?)
+        })?);
+        record_decode(started);
+        decoded
     };
     let poor = rgba_is_poor(&image);
     if allow_cached_image {

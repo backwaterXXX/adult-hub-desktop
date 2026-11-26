@@ -2260,17 +2260,36 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 let selected_categories = resolve_home_category_ids(&categories, &local_store);
                 let mut category_items = Vec::new();
                 let mut category_shelves = Vec::new();
-                for category in categories
+                // Category shelves are independent; fetch them concurrently so
+                // three slow requests do not add up before Home can render.
+                let selected_shelves = categories
                     .iter()
                     .filter(|category| selected_categories.iter().any(|id| id == &category.id))
-                {
-                    let result = client.get_videos(&adult_hub_client::CatalogVideosQuery {
-                        offset: Some(0),
-                        limit: Some(16),
-                        sort: Some("latest"),
-                        category: Some(category.title.as_str()),
-                        ..Default::default()
-                    });
+                    .collect::<Vec<_>>();
+                let fetched_shelves = std::thread::scope(|scope| {
+                    let client_ref = &client;
+                    let handles = selected_shelves
+                        .iter()
+                        .map(|category| {
+                            scope.spawn(move || {
+                                let result =
+                                    client_ref.get_videos(&adult_hub_client::CatalogVideosQuery {
+                                        offset: Some(0),
+                                        limit: Some(16),
+                                        sort: Some("latest"),
+                                        category: Some(category.title.as_str()),
+                                        ..Default::default()
+                                    });
+                                (category.title.clone(), result)
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    handles
+                        .into_iter()
+                        .filter_map(|handle| handle.join().ok())
+                        .collect::<Vec<_>>()
+                });
+                for (title, result) in fetched_shelves {
                     let (items, error) = match result {
                         Ok(response) => (
                             response
@@ -2280,15 +2299,12 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                                 .collect::<Vec<_>>(),
                             String::new(),
                         ),
-                        Err(err) => (
-                            Vec::new(),
-                            format!("Couldn't load {}: {err}", category.title),
-                        ),
+                        Err(err) => (Vec::new(), format!("Couldn't load {title}: {err}")),
                     };
                     let items = filter_catalog_items(items, &local_store);
                     category_items.extend(items.iter().cloned());
                     category_shelves.push((
-                        category.title.clone(),
+                        title,
                         items.into_iter().take(4).collect::<Vec<_>>(),
                         error,
                     ));
@@ -3687,6 +3703,8 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             sync_catalog_filters_to_ui(&ui, &cat, &filters);
 
             std::thread::spawn(move || {
+                let started = std::time::Instant::now();
+                let cat_label = cat.clone();
                 let mut is_unauth = false;
                 let mut image_auth = None;
                 let mut catalog_error_message: Option<String> = None;
@@ -3775,6 +3793,11 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                         ui.set_catalog_total_count(reported_total as i32);
                         ui.set_is_loading_more(false);
                         ui.set_is_loading_catalog(false);
+                        crate::log_debug(&format!(
+                            "catalog [{cat_label}]: {} card(s), {reported_total} reported total in {} ms",
+                            cards.len(),
+                            started.elapsed().as_millis()
+                        ));
                         if let Some(ref err_msg) = catalog_error_message {
                             ui.set_status(format!("Catalog error: {err_msg}").into());
                             ui.set_status_color(slint::Color::from_rgb_u8(240, 100, 100));
