@@ -2580,7 +2580,8 @@ export component MainWindow inherits Window {
     in-out property <bool> catalog-sort-descending: true;
     in-out property <bool> catalog-unwatched-only: false;
     in-out property <bool> catalog-favorites-only: false;
-    in-out property <bool> catalog-hd-only: false;
+    // 0 = no quality filter, 1 = SD (low), 2 = HD (medium), 3 = HQ (high).
+    in-out property <int> catalog-quality-index: 0;
     in-out property <bool> catalog-surprise-loading: false;
     in-out property <bool> catalog-category-drilldown: false;
     in-out property <bool> catalog-filter-picker-visible: false;
@@ -4375,9 +4376,19 @@ export component MainWindow inherits Window {
                             clicked => { root.update-catalog-filter("favorites"); }
                         }
                         TvChoiceChip {
+                            text: "SD";
+                            selected: root.catalog-quality-index == 1;
+                            clicked => { root.update-catalog-filter("quality-low"); }
+                        }
+                        TvChoiceChip {
                             text: "HD";
-                            selected: root.catalog-hd-only;
-                            clicked => { root.update-catalog-filter("hd"); }
+                            selected: root.catalog-quality-index == 2;
+                            clicked => { root.update-catalog-filter("quality-medium"); }
+                        }
+                        TvChoiceChip {
+                            text: "HQ";
+                            selected: root.catalog-quality-index == 3;
+                            clicked => { root.update-catalog-filter("quality-high"); }
                         }
                         TvSecondaryButton {
                             text: "Length: " + root.catalog-duration-label;
@@ -4524,11 +4535,13 @@ export component MainWindow inherits Window {
                             clicked => { root.update-catalog-filter("favorites"); }
                         }
 
-                        if root.catalog-hd-only : TvChoiceChip {
-                            text: "HD";
+                        if root.catalog-quality-index != 0 : TvChoiceChip {
+                            text: root.catalog-quality-index == 1
+                                ? "SD"
+                                : (root.catalog-quality-index == 2 ? "HD" : "HQ");
                             selected: true;
                             removable: true;
-                            clicked => { root.update-catalog-filter("hd"); }
+                            clicked => { root.update-catalog-filter("quality-clear"); }
                         }
 
                         if root.catalog-duration-label != "Any length" : TvChoiceChip {
