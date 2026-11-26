@@ -1,6 +1,6 @@
 use super::home_categories::{
     cached_home_categories, catalog_lookup_id, clear_home_categories_cache,
-    resume_title_needs_hydration,
+    has_unresolved_raw_title, resume_title_needs_hydration,
 };
 use crate::catalog::{
     append_catalog_page, filter_catalog_items, refresh_catalog_thumbnails_async,
@@ -667,6 +667,7 @@ fn get_adult_hub_catalog_page(
             .take(CATALOG_PAGE_SIZE)
             .collect::<Vec<_>>();
         hydrate_missing_titles(&client, &mut items, 20);
+        items.retain(|item| !has_unresolved_raw_title(item));
         let next_start = start_index + items.len();
         return Ok(CatalogPage {
             items,
@@ -2033,6 +2034,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 // showing a raw Telegram reference. Keep the lookup bounded
                 // and parallel so a slow link cannot stall Home.
                 hydrate_missing_titles(&client, &mut resume, 12);
+                resume.retain(|item| !has_unresolved_raw_title(item));
 
                 let mut history = local_store
                     .get_watch_history(16)
@@ -2041,6 +2043,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     .filter_map(|json| serde_json::from_str::<TvItem>(&json).ok())
                     .collect::<Vec<_>>();
                 hydrate_missing_titles(&client, &mut history, 12);
+                history.retain(|item| !has_unresolved_raw_title(item));
 
                 // Try to map legacy hash ids to canonical catalog items. If a
                 // title no longer exists in the catalog, hide the stale shelf
@@ -3206,6 +3209,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
         let catalog_paging = catalog_paging.clone();
         let catalog_views = catalog_views.clone();
         let catalog_filters = catalog_filters.clone();
+        let ctx = ctx.clone();
         let filter_category = move |ui: MainWindow,
                                     cat: slint::SharedString,
                                     save_current_view: bool| {
@@ -3354,10 +3358,10 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 let mut image_auth = None;
                 let mut catalog_error_message: Option<String> = None;
                 let (raw_items, next_start, total_count, has_more, supplemental_total) =
-                    if let Some(session) = credential_store.get().ok().flatten() {
+                    if let Some(mut session) = credential_store.get().ok().flatten() {
                         image_auth =
                             Some((session.server_url.clone(), session.access_token.clone()));
-                        match get_catalog_page_with_empty_page_fetch(
+                        let mut result = get_catalog_page_with_empty_page_fetch(
                             &session,
                             &local_store,
                             &cat,
@@ -3365,7 +3369,34 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                             0,
                             filters.clone(),
                             performers_photo_only,
-                        ) {
+                        );
+                        // The access token lives 15 minutes. Refresh it once and
+                        // retry before showing the login modal.
+                        if result
+                            .as_ref()
+                            .err()
+                            .is_some_and(CatalogError::is_unauthorized)
+                            && crate::download::refresh_adult_hub_session_if_current(
+                                &ctx,
+                                &session.access_token,
+                            )
+                            .is_ok()
+                            && let Some(updated) = credential_store.get().ok().flatten()
+                        {
+                            session = updated;
+                            image_auth =
+                                Some((session.server_url.clone(), session.access_token.clone()));
+                            result = get_catalog_page_with_empty_page_fetch(
+                                &session,
+                                &local_store,
+                                &cat,
+                                &query,
+                                0,
+                                filters.clone(),
+                                performers_photo_only,
+                            );
+                        }
+                        match result {
                             Ok(page) => (
                                 page.items,
                                 page.next_start,
