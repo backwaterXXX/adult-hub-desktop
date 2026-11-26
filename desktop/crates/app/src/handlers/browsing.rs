@@ -2316,12 +2316,13 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     .take(12)
                     .collect::<Vec<_>>();
                 let hydrated = std::thread::scope(|scope| {
+                    let client_ref = &client;
                     let handles = missing_indices
                         .iter()
                         .filter_map(|index| {
                             let id = resume.get(*index)?.id.clone();
                             Some(scope.spawn(move || {
-                                client
+                                client_ref
                                     .get_catalog_video_detail(&id)
                                     .ok()
                                     .map(TvItem::from)
