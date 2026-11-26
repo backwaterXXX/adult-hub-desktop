@@ -256,13 +256,33 @@ fn test_catalog_filter_sorts_and_labels() {
     assert_eq!(filters.sort_by(), "Runtime");
     assert_eq!(catalog_filter_labels(&filters).0, "Duration");
 
-    filters.sort = 3;
-    assert_eq!(filters.sort_by(), "CommunityRating");
-    assert_eq!(catalog_filter_labels(&filters).0, "Rating");
+    // Only the three sorts the API actually honours remain in the cycle.
+    assert_eq!(next_catalog_sort(0), (1, false));
+    assert_eq!(next_catalog_sort(1), (2, true));
+    assert_eq!(next_catalog_sort(2), (0, true));
+}
 
-    // Cycle through all 4
-    filters.sort = (filters.sort + 1) % 4;
-    assert_eq!(filters.sort_by(), "DateCreated");
+#[test]
+fn catalog_filters_round_trip_through_the_local_store() {
+    let store = adult_hub_storage::LocalStore::open_in_memory().expect("store");
+    let filters = CatalogFilters {
+        quality: QualityTier::High,
+        performer_sort: PerformerSort::VideoCount,
+        genre: "Anal".into(),
+        descending: false,
+        ..Default::default()
+    };
+    let mut map = std::collections::HashMap::new();
+    map.insert("Latest".to_string(), filters);
+
+    save_catalog_filters(&store, &map);
+    let loaded = load_catalog_filters(&store);
+
+    let restored = loaded.get("Latest").expect("restored filters");
+    assert_eq!(restored.quality, QualityTier::High);
+    assert_eq!(restored.performer_sort, PerformerSort::VideoCount);
+    assert_eq!(restored.genre, "Anal");
+    assert!(!restored.descending);
 }
 
 #[test]
