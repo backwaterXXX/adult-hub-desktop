@@ -30,6 +30,7 @@ pub(super) fn random_catalog_page(
         performer_id: None,
         min_duration: None,
         is_favorite: filters.favorites_only.then_some(true),
+        quality: filters.quality.query(),
     };
 
     let probe = client.get_videos(&build_query(0)).map_err(map_error)?;

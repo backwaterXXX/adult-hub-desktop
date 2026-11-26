@@ -788,6 +788,7 @@ fn get_adult_hub_catalog_page(
         performer_id: None,
         min_duration: None,
         is_favorite: is_fav_filter.then_some(true),
+        quality: filters.quality.query(),
     };
 
     let resp = client.get_videos(&req).map_err(|err| {
@@ -1046,6 +1047,7 @@ fn get_search_movies_page_at(
             studio: (!filters.studio.is_empty()).then_some(filters.studio.as_str()),
             performer: (!filters.performer.is_empty()).then_some(filters.performer.as_str()),
             is_favorite: filters.favorites_only.then_some(true),
+            quality: filters.quality.query(),
             ..Default::default()
         })
         .map_err(|err| {
@@ -2130,7 +2132,10 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 }
                 "unwatched" => value.unwatched = !value.unwatched,
                 "favorites" => value.favorites_only = !value.favorites_only,
-                "hd" => value.hd_only = !value.hd_only,
+                "quality-low" => value.quality = value.quality.toggled(QualityTier::Low),
+                "quality-medium" => value.quality = value.quality.toggled(QualityTier::Medium),
+                "quality-high" => value.quality = value.quality.toggled(QualityTier::High),
+                "quality-clear" => value.quality = QualityTier::All,
                 "duration" => value.duration = (value.duration + 1) % 4,
                 _ => return,
             }
@@ -2372,6 +2377,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                             studio: (!filters.studio.is_empty()).then_some(filters.studio.as_str()),
                             performer: (!filters.performer.is_empty())
                                 .then_some(filters.performer.as_str()),
+                            quality: filters.quality.query(),
                             ..Default::default()
                         })
                     });

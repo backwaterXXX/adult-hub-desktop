@@ -2,13 +2,63 @@ use crate::MainWindow;
 use adult_hub_client::TvItem;
 use std::sync::{Arc, Mutex};
 
+/// Server-side quality tier requested from the catalog API.
+///
+/// The backend owns the definition (resolution and bitrate); the client must
+/// never re-derive quality from file size.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum QualityTier {
+    #[default]
+    All,
+    Low,
+    Medium,
+    High,
+}
+
+impl QualityTier {
+    /// Value for the `quality` query parameter; `None` means no filter.
+    pub(super) fn query(self) -> Option<&'static str> {
+        match self {
+            Self::All => None,
+            Self::Low => Some("low"),
+            Self::Medium => Some("medium"),
+            Self::High => Some("high"),
+        }
+    }
+
+    /// Clicking the active chip clears the filter.
+    pub(super) fn toggled(self, tier: Self) -> Self {
+        if self == tier { Self::All } else { tier }
+    }
+
+    /// Index used by the UI chips (0 = no filter).
+    pub(super) fn index(self) -> i32 {
+        match self {
+            Self::All => 0,
+            Self::Low => 1,
+            Self::Medium => 2,
+            Self::High => 3,
+        }
+    }
+
+    /// Short label for the removable filter chip.
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::All => "",
+            Self::Low => "SD",
+            Self::Medium => "HD",
+            Self::High => "HQ",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct CatalogFilters {
     pub(super) sort: u8,
     pub(super) descending: bool,
     pub(super) unwatched: bool,
     pub(super) favorites_only: bool,
-    pub(super) hd_only: bool,
+    pub(super) quality: QualityTier,
     pub(super) duration: u8,
     pub(super) genre: String,
     pub(super) genre_id: String,
@@ -34,7 +84,7 @@ impl Default for CatalogFilters {
             descending: true,
             unwatched: false,
             favorites_only: false,
-            hd_only: false,
+            quality: QualityTier::All,
             duration: 0,
             genre: String::new(),
             genre_id: String::new(),
@@ -74,7 +124,7 @@ impl CatalogFilters {
         if self.favorites_only && category != "Favorites" {
             count += 1;
         }
-        if self.hd_only {
+        if self.quality != QualityTier::All {
             count += 1;
         }
         if self.duration > 0 {
@@ -107,14 +157,8 @@ impl CatalogFilters {
                 return false;
             }
         }
-        let is_hd = item.width.is_some_and(|width| width >= 1280)
-            || item.height.is_some_and(|height| height >= 720)
-            || item
-                .file_size_bytes
-                .is_some_and(|size| size >= 300 * 1024 * 1024);
-        if self.hd_only && !is_hd {
-            return false;
-        }
+        // Quality is resolved by the server (resolution or bitrate); deriving it
+        // from the file size here is exactly the bug the server filter replaced.
         if self.unwatched && item.is_played {
             return false;
         }
@@ -183,7 +227,7 @@ pub(super) fn sync_catalog_filters_to_ui(
     ui.set_catalog_sort_descending(filters.descending);
     ui.set_catalog_unwatched_only(filters.unwatched);
     ui.set_catalog_favorites_only(filters.favorites_only);
-    ui.set_catalog_hd_only(filters.hd_only);
+    ui.set_catalog_quality_index(filters.quality.index());
     ui.set_catalog_duration_label(duration.into());
     ui.set_catalog_genre_query(filters.genre.clone().into());
     ui.set_catalog_studio_query(filters.studio.clone().into());
