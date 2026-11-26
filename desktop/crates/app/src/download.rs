@@ -762,6 +762,34 @@ pub fn prompt_save_file_destination(suggested_name: &str, ext: &str) -> Option<P
     }
 }
 
+/// Arguments for downloading an HLS stream with ffmpeg.
+///
+/// The accepted F-01 trade-off in the audit: ffmpeg only reads headers from
+/// its command line, so a Bearer token is visible to processes of the same
+/// user (and root) while the download runs. Playback avoids this because mpv
+/// receives headers over IPC. A loopback proxy would remove it at the cost of
+/// another moving part; see the audit report.
+fn ffmpeg_hls_args(
+    download_url: &str,
+    temp_path: &std::path::Path,
+    headers: &[(String, String)],
+) -> Vec<std::ffi::OsString> {
+    let mut args = vec![std::ffi::OsString::from("-y")];
+    if !headers.is_empty() {
+        let header_str = headers
+            .iter()
+            .map(|(key, value)| format!("{key}: {value}\r\n"))
+            .collect::<String>();
+        args.push("-headers".into());
+        args.push(header_str.into());
+    }
+    for value in ["-i", download_url, "-c", "copy", "-bsf:a", "aac_adtstoasc"] {
+        args.push(value.into());
+    }
+    args.push(temp_path.as_os_str().to_owned());
+    args
+}
+
 /// Check if ffmpeg executable is available on PATH
 pub fn is_ffmpeg_available() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("ADULT_HUB_FFMPEG") {
@@ -1454,16 +1482,11 @@ fn run_download_task(
     if is_m3u8 {
         if let Some(ffmpeg_bin) = is_ffmpeg_available() {
             let mut cmd = Command::new(&ffmpeg_bin);
-            cmd.arg("-y");
-            if !download_headers.is_empty() {
-                let header_str = download_headers
-                    .iter()
-                    .map(|(k, v)| format!("{k}: {v}\r\n"))
-                    .collect::<String>();
-                cmd.args(["-headers", &header_str]);
-            }
-            cmd.args(["-i", &download_url, "-c", "copy", "-bsf:a", "aac_adtstoasc"]);
-            cmd.arg(&task.temp_path);
+            cmd.args(ffmpeg_hls_args(
+                &download_url,
+                &task.temp_path,
+                &download_headers,
+            ));
             cmd.stdout(Stdio::null());
             cmd.stderr(Stdio::null());
 
@@ -1744,6 +1767,44 @@ fn finalize_download(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hls_ffmpeg_args_carry_headers_only_when_present() {
+        let headers = vec![("Authorization".to_string(), "Bearer secret".to_string())];
+        let args = ffmpeg_hls_args(
+            "https://example.test/stream.m3u8",
+            std::path::Path::new("/tmp/out.mp4"),
+            &headers,
+        );
+        let rendered = args
+            .iter()
+            .map(|value| value.to_string_lossy())
+            .collect::<Vec<_>>();
+        let header_index = rendered
+            .iter()
+            .position(|value| value == "-headers")
+            .expect("headers flag");
+        assert_eq!(
+            rendered[header_index + 1].as_ref(),
+            "Authorization: Bearer secret\r\n"
+        );
+        assert!(rendered.iter().any(|value| value.as_ref() == "-i"));
+        assert_eq!(
+            rendered.last().map(|value| value.as_ref()),
+            Some("/tmp/out.mp4")
+        );
+
+        let without_headers = ffmpeg_hls_args(
+            "https://example.test/stream.m3u8",
+            std::path::Path::new("/tmp/out.mp4"),
+            &[],
+        );
+        assert!(
+            !without_headers
+                .iter()
+                .any(|value| value.to_string_lossy() == "-headers")
+        );
+    }
 
     #[test]
     fn test_sanitize_filename() {
