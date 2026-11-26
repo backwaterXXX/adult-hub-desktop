@@ -40,16 +40,6 @@ impl QualityTier {
             Self::High => 3,
         }
     }
-
-    /// Short label for the removable filter chip.
-    pub(super) fn label(self) -> &'static str {
-        match self {
-            Self::All => "",
-            Self::Low => "SD",
-            Self::Medium => "HD",
-            Self::High => "HQ",
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
