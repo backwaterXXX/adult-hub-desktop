@@ -1718,6 +1718,8 @@ fn test_catalog_video_item_to_tv_item_mapping() {
         width: Some(1920),
         height: Some(1080),
         is_hd: Some(true),
+        bitrate_kbps: Some(12034),
+        quality: Some("high".to_string()),
         user_state: Some(CatalogVideoUserStateDto {
             is_favorite: Some(true),
             position_seconds: Some(60),
@@ -1824,6 +1826,35 @@ fn test_catalog_videos_sort_query_construction_and_supported_values() {
     handle.join().unwrap();
     assert_eq!(resp.total_count, 0);
     assert_eq!(resp.items.len(), 0);
+}
+
+#[test]
+fn test_catalog_videos_quality_query_and_response_fields() {
+    let (server_url, handle) = spawn_mock_server(|line, _headers, _body| {
+        assert!(line.starts_with("GET /api/v1/catalog/videos?offset=0&limit=16&quality=high "));
+        (
+            200,
+            vec![("Content-Type", "application/json")],
+            r#"{"items":[{"id":"vid-hq","title":"HQ title","duration_seconds":60,"quality":"high","bitrate_kbps":12034,"width":3840,"height":2160,"is_hd":true}],"total_count":1,"offset":0,"limit":16,"has_more":false}"#
+                .to_string(),
+        )
+    });
+    let client = AdultHubClient::new(&server_url).expect("init client");
+    let query = CatalogVideosQuery {
+        offset: Some(0),
+        limit: Some(16),
+        quality: Some("high"),
+        ..Default::default()
+    };
+    let response = client.get_videos(&query).expect("query videos");
+    handle.join().unwrap();
+
+    assert_eq!(response.items.len(), 1);
+    let item = &response.items[0];
+    assert_eq!(item.quality.as_deref(), Some("high"));
+    assert_eq!(item.bitrate_kbps, Some(12034));
+    assert_eq!(item.width, Some(3840));
+    assert_eq!(item.is_hd, Some(true));
 }
 
 #[test]
@@ -2160,6 +2191,8 @@ fn test_favorites_wire_auth_crud_and_user_state_mapping() {
         width: None,
         height: None,
         is_hd: None,
+        bitrate_kbps: None,
+        quality: None,
         user_state: Some(CatalogVideoUserStateDto {
             is_favorite: Some(false),
             position_seconds: None,
