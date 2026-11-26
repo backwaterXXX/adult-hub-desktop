@@ -1,20 +1,20 @@
 use super::{CATALOG_PAGE_SIZE, CatalogError, CatalogFilters, CatalogPage};
-use adult_hub_client::{AdultHubClient, CatalogVideosQuery, TvItem};
+use adult_hub_client::{AdultHubClient, AdultHubError, CatalogVideosQuery, TvItem};
 
 pub(super) fn random_catalog_page(
-    client: &adult_hub_client::AdultHubClient,
+    client: &AdultHubClient,
     filters: &CatalogFilters,
     page_index: usize,
 ) -> std::result::Result<CatalogPage, CatalogError> {
     let limit = CATALOG_PAGE_SIZE as u64;
-    let map_error = |err: adult_hub_client::AdultHubError| {
+    let map_error = |err: AdultHubError| {
         if err.is_unauthorized() {
             CatalogError::Unauthorized
         } else {
             CatalogError::Api(err.to_string())
         }
     };
-    let build_query = |offset: u64| adult_hub_client::CatalogVideosQuery {
+    let build_query = |offset: u64| CatalogVideosQuery {
         offset: Some(offset),
         limit: Some(limit),
         // Ordering is discarded; a deterministic server order is required only
