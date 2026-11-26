@@ -1456,6 +1456,11 @@ fn install_window_event_filter(
                 || ui.get_login_modal_visible()
                 || ui.get_confirm_dialog_visible();
             if !browse_surface || modal_open {
+                if ctrl_held {
+                    crate::log_debug(&format!(
+                        "zoom: Ctrl+wheel ignored (screen={screen}, modal={modal_open})"
+                    ));
+                }
                 return EventResult::Propagate;
             }
 
@@ -1496,7 +1501,9 @@ fn install_window_event_filter(
             let winit::event::WindowEvent::MouseWheel { delta, .. } = event else {
                 return EventResult::Propagate;
             };
-            if !ctrl_held || text_input_focused {
+            // Ctrl+wheel is a zoom gesture, not text scrolling: keep it working
+            // while the search field has focus (that focus used to swallow it).
+            if !ctrl_held {
                 return EventResult::Propagate;
             }
 
@@ -1516,6 +1523,7 @@ fn install_window_event_filter(
             // Winit reports wheel lines or high-resolution pixel deltas. Scale
             // linearly so touchpad movement remains smooth and small deltas count.
             let zoom = (f64::from(ui.get_card_zoom()) + delta_y * 0.1).clamp(0.6, 1.6);
+            crate::log_debug(&format!("zoom: Ctrl+wheel -> {zoom:.2}"));
             ui.set_card_zoom(zoom as f32);
             EventResult::PreventDefault
         });

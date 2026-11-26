@@ -1014,6 +1014,7 @@ pub fn refresh_home_thumbnails_async(ui: slint::Weak<MainWindow>, token: Option<
                 }
             });
         }
+        log_artwork_stats("home thumbnails", requests.len());
     });
 }
 
@@ -1782,7 +1783,21 @@ fn request_thumbnail_key(request: &ThumbnailRequest) -> String {
     )
 }
 
-pub fn refresh_catalog_thumbnails_async(
+pub fn log_artwork_stats(label: &str, images: usize) {
+    let stats = crate::thumbnails::take_artwork_stats();
+    if stats.cache_hits + stats.downloads + stats.decodes == 0 {
+        return;
+    }
+    crate::log_debug(&format!(
+        "{label}: {images} image(s): {} cache hit(s), {} download(s), {} decode(s) in {} ms",
+        stats.cache_hits,
+        stats.downloads,
+        stats.decodes,
+        stats.decode_micros / 1000
+    ));
+}
+
+fn refresh_catalog_thumbnails_async(
     ui: slint::Weak<MainWindow>,
     cards: Vec<VideoCardData>,
     token: String,
@@ -1874,6 +1889,8 @@ pub fn refresh_catalog_thumbnails_async(
                 }
             });
         }
+        log_artwork_stats("catalog thumbnails", requests.len());
+
         // Bounded background recovery for transient outages (timeout, 429,
         // 5xx): a few delayed rounds on this worker thread, never on the UI
         // thread, and never persisted as a success when they keep failing.
@@ -2015,6 +2032,7 @@ pub fn refresh_channel_thumbnails_async(
                 }
             });
         }
+        log_artwork_stats("channel thumbnails", requests.len());
     });
 }
 
