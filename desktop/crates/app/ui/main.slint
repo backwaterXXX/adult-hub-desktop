@@ -2600,6 +2600,8 @@ export component MainWindow inherits Window {
     in-out property <string> performer-letter: "";
     in-out property <string> performer-search-query: "";
     in-out property <bool> performers-photo-only: false;
+    // 0 = A-Z, 1 = Z-A, 2 = most videos.
+    in-out property <int> performer-sort-index: 0;
     in-out property <bool> performer-filters-expanded: false;
     in-out property <bool> performer-bio-expanded: false;
     // True when the current biography is long enough to be clamped by the
@@ -4299,6 +4301,28 @@ export component MainWindow inherits Window {
                         has-active-filters: root.performer-letter != "";
                         tooltip-text: root.performer-filters-expanded ? "Hide filters" : (root.performer-letter != "" ? ("Filters (" + root.performer-letter + ")") : "Filters");
                         clicked => { root.performer-filters-expanded = !root.performer-filters-expanded; }
+                    }
+                }
+
+                if !root.is-catalog-search-results && root.active-category == "Performers" : HorizontalLayout {
+                    spacing: 6px;
+                    height: 34px;
+                    alignment: start;
+
+                    TvChoiceChip {
+                        text: "A–Z";
+                        selected: root.performer-sort-index == 0;
+                        clicked => { root.update-catalog-filter("performer-sort-az"); }
+                    }
+                    TvChoiceChip {
+                        text: "Z–A";
+                        selected: root.performer-sort-index == 1;
+                        clicked => { root.update-catalog-filter("performer-sort-za"); }
+                    }
+                    TvChoiceChip {
+                        text: "Most videos";
+                        selected: root.performer-sort-index == 2;
+                        clicked => { root.update-catalog-filter("performer-sort-videos"); }
                     }
                 }
 
