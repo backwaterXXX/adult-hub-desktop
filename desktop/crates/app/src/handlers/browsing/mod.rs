@@ -1580,10 +1580,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
         String,
         CatalogViewSnapshot,
     >::new()));
-    let catalog_filters = Arc::new(Mutex::new(std::collections::HashMap::<
-        String,
-        CatalogFilters,
-    >::new()));
+    let catalog_filters = Arc::new(Mutex::new(load_catalog_filters(&local_store)));
     let catalog_filter_options = Arc::new(Mutex::new(Vec::<CatalogFilterChoice>::new()));
     {
         let weak = ui.as_weak();
@@ -2120,13 +2117,9 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             let mut value = get_category_filters(&filters, &cat);
             match action.as_str() {
                 "sort" => {
-                    if cat == "Studios" {
-                        // Studio entries have no runtime or rating; the control
-                        // only ever cycles the orders the list actually honours.
-                        value.sort = if value.sort == 0 { 1 } else { 0 };
-                    } else {
-                        value.sort = (value.sort + 1) % 4;
-                    }
+                    let (next, descending) = next_catalog_sort(value.sort);
+                    value.sort = next;
+                    value.descending = descending;
                 }
                 "direction" => {
                     value.descending = !value.descending;
@@ -3249,6 +3242,11 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 filters.performer_letter = performer_letter.clone();
                 filters.performer_photo_only = performers_photo_only;
                 set_category_filters(&catalog_filters, &cat, filters.clone());
+            }
+            // The map is the single source of truth for every tab; persist it
+            // whenever a view is (re)built so the next launch restores it.
+            if let Ok(guard) = catalog_filters.lock() {
+                save_catalog_filters(&local_store, &guard);
             }
             let library_id = local_store
                 .get_setting("selected_library_id")
