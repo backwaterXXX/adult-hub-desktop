@@ -78,6 +78,14 @@ pub(super) fn resume_title_needs_hydration(item: &TvItem) -> bool {
         || looks_like_telegram_ref(title)
 }
 
+/// True when a row still shows a raw reference after hydration, which means the
+/// catalog no longer knows this material. Such rows are hidden from Home and
+/// history instead of exposing `channel:message:file`.
+pub(super) fn has_unresolved_raw_title(item: &TvItem) -> bool {
+    let title = item.title.trim();
+    title.eq_ignore_ascii_case(item.id.trim()) || looks_like_telegram_ref(title)
+}
+
 /// Catalog ids for Telegram material carry the `telegram:` prefix; local rows
 /// sometimes stored only the bare provider reference.
 pub(super) fn catalog_lookup_id(id: &str) -> String {
@@ -146,6 +154,20 @@ mod tests {
         assert_eq!(second.len(), 1);
         let _ = server.join();
         clear_home_categories_cache();
+    }
+
+    #[test]
+    fn unresolved_raw_titles_are_recognised_for_hiding() {
+        let mut item = TvItem::new(
+            "telegram:studioarchivez:15408:5868319077583298087",
+            "studioarchivez:15408:5868319077583298087",
+        );
+        assert!(has_unresolved_raw_title(&item));
+        item.title = "Real Title".into();
+        assert!(!has_unresolved_raw_title(&item));
+        let mut bare = TvItem::new("studioarchivez:15408:5868319077583298087", "");
+        bare.title = bare.id.clone();
+        assert!(has_unresolved_raw_title(&bare));
     }
 
     #[test]

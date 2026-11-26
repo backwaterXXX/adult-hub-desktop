@@ -298,6 +298,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         active_quality_id: Arc::new(Mutex::new("original".to_string())),
     };
 
+    let _session_keepalive = install_session_keepalive(&ui, &ctx);
+
     // Synchronize initial settings to UI
     match local_store.export_non_secret_config() {
         Ok(config) => {
@@ -467,21 +469,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     SavedSessionAction::Keep => return,
                     SavedSessionAction::Refresh => {
                         // Prefer the refresh token over a forced logout: access
-                        // tokens are expected to expire while the refresh token
-                        // remains valid. A failed refresh falls through to the
-                        // sign-out path below.
-                        if crate::download::refresh_adult_hub_session_if_current(
+                        // tokens live 15 minutes while the refresh token lives
+                        // 30 days. Only a definitive rejection signs the user
+                        // out; a transient failure keeps the session.
+                        match crate::download::refresh_adult_hub_session_if_current(
                             &ctx_refresh,
                             &access_token,
-                        )
-                        .is_ok()
-                        {
-                            let _ = slint::invoke_from_event_loop(move || {
-                                if let Some(ui) = weak.upgrade() {
-                                    ui.invoke_refresh_home();
-                                }
-                            });
-                            return;
+                        ) {
+                            Ok(_) => {
+                                let _ = slint::invoke_from_event_loop(move || {
+                                    if let Some(ui) = weak.upgrade() {
+                                        ui.invoke_refresh_home();
+                                    }
+                                });
+                                return;
+                            }
+                            Err(error) if refresh_failure_signs_out(&error) => {}
+                            Err(error) => {
+                                crate::log_debug(&format!(
+                                    "auth: startup refresh kept the saved session: {error:?}"
+                                ));
+                                return;
+                            }
                         }
                     }
                     SavedSessionAction::SignOut => {}
@@ -1237,6 +1246,43 @@ fn fatal_startup_error(message: &str) {
     }
     #[cfg(not(target_os = "windows"))]
     eprintln!("{text}");
+}
+
+/// Refresh the 15-minute access token before it expires.
+///
+/// Without this, every browse/details request after the token expired hit a
+/// 401 and forced the login modal even though the 30-day refresh token was
+/// still valid.
+fn install_session_keepalive(ui: &MainWindow, ctx: &AppContext) -> Rc<slint::Timer> {
+    let weak = ui.as_weak();
+    let ctx = ctx.clone();
+    let timer = Rc::new(slint::Timer::default());
+    timer.start(
+        slint::TimerMode::Repeated,
+        Duration::from_secs(8 * 60),
+        move || {
+            let Some(ui) = weak.upgrade() else { return };
+            if !ui.get_is_logged_in() {
+                return;
+            }
+            let ctx = ctx.clone();
+            std::thread::spawn(move || {
+                let Some(session) = ctx.credential_store.get().ok().flatten() else {
+                    return;
+                };
+                match crate::download::refresh_adult_hub_session_if_current(
+                    &ctx,
+                    &session.access_token,
+                ) {
+                    Ok(_) => crate::log_debug("auth: periodic token refresh ok"),
+                    Err(error) => crate::log_debug(&format!(
+                        "auth: periodic refresh kept the saved session: {error:?}"
+                    )),
+                }
+            });
+        },
+    );
+    timer
 }
 
 fn install_card_zoom_persistence(
@@ -2071,6 +2117,20 @@ enum SavedSessionAction {
     SignOut,
 }
 
+/// A failed refresh only signs the user out when the server definitively
+/// rejected the refresh token. Timeouts, connection errors, rate limits and
+/// persistence hiccups must keep the saved session for the next attempt.
+fn refresh_failure_signs_out(err: &crate::download::RefreshSessionError) -> bool {
+    use crate::download::RefreshSessionError;
+    match err {
+        RefreshSessionError::NoSessionOrToken => true,
+        RefreshSessionError::RefreshFailed(category) => {
+            matches!(category.as_str(), "Unauthorized" | "NotFound")
+        }
+        RefreshSessionError::ClientError(_) | RefreshSessionError::PersistenceFailed(_) => false,
+    }
+}
+
 fn saved_session_action<T>(
     check: &Result<T, adult_hub_client::AdultHubError>,
 ) -> SavedSessionAction {
@@ -2122,6 +2182,33 @@ mod tests {
     use super::SavedSessionAction;
     use super::saved_session_action;
     use adult_hub_client::AdultHubError;
+
+    #[test]
+    fn only_definitive_refresh_rejections_sign_out() {
+        use crate::download::RefreshSessionError;
+
+        assert!(refresh_failure_signs_out(
+            &RefreshSessionError::NoSessionOrToken
+        ));
+        assert!(refresh_failure_signs_out(
+            &RefreshSessionError::RefreshFailed("Unauthorized".into())
+        ));
+        assert!(refresh_failure_signs_out(
+            &RefreshSessionError::RefreshFailed("NotFound".into())
+        ));
+        assert!(!refresh_failure_signs_out(
+            &RefreshSessionError::RefreshFailed("Io".into())
+        ));
+        assert!(!refresh_failure_signs_out(
+            &RefreshSessionError::RefreshFailed("Api".into())
+        ));
+        assert!(!refresh_failure_signs_out(
+            &RefreshSessionError::ClientError("x".into())
+        ));
+        assert!(!refresh_failure_signs_out(
+            &RefreshSessionError::PersistenceFailed("x".into())
+        ));
+    }
 
     #[test]
     fn startup_session_decisions_keep_transient_failures_signed_in() {
