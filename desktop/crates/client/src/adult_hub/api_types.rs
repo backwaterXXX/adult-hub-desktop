@@ -194,6 +194,10 @@ pub struct CatalogVideoItem {
     #[serde(default)]
     pub is_hd: Option<bool>,
     #[serde(default)]
+    pub bitrate_kbps: Option<u32>,
+    #[serde(default)]
+    pub quality: Option<String>,
+    #[serde(default)]
     pub user_state: Option<CatalogVideoUserStateDto>,
 }
 
@@ -326,6 +330,7 @@ pub struct CatalogVideosQuery<'a> {
     pub performer_id: Option<&'a str>,
     pub min_duration: Option<u64>,
     pub is_favorite: Option<bool>,
+    pub quality: Option<&'a str>,
 }
 
 fn default_true() -> bool {

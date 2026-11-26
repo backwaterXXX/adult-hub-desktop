@@ -556,6 +556,9 @@ impl AdultHubClient {
             if let Some(is_fav) = query.is_favorite {
                 pairs.append_pair("is_favorite", &is_fav.to_string());
             }
+            if let Some(quality) = query.quality {
+                pairs.append_pair("quality", quality);
+            }
         }
 
         let req = self.attach_auth(self.client.get(url));
