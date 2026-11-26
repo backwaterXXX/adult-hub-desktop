@@ -62,9 +62,6 @@ jobs:
   dependency-audit:
     name: Dependency Audit
     runs-on: ubuntu-24.04
-    # Advisory only at first: report vulnerable dependencies without blocking a
-    # release on advisories that may not apply to a desktop build.
-    continue-on-error: true
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -78,6 +75,10 @@ jobs:
         run: cargo install cargo-audit --locked
 
       - name: Audit dependencies
+        # Advisory only: report vulnerable or unmaintained dependencies in the
+        # log without turning the check red on transitive advisories that have
+        # no fixed release yet.
+        continue-on-error: true
         run: cargo audit --file desktop/Cargo.lock
 
   build-linux:
