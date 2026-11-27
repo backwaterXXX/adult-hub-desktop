@@ -20,7 +20,6 @@ use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 mod filters;
 mod home;
@@ -32,10 +31,23 @@ use random::random_catalog_page;
 
 pub(super) const CATALOG_PAGE_SIZE: usize = 50;
 const CHANNEL_SEARCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+const CATALOG_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+const SEARCH_DEBOUNCE_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
+
 #[derive(Debug)]
 pub(super) enum CatalogError {
     Unauthorized,
     Api(String),
+}
+
+impl From<adult_hub_client::AdultHubError> for CatalogError {
+    fn from(err: adult_hub_client::AdultHubError) -> Self {
+        if err.is_unauthorized() {
+            Self::Unauthorized
+        } else {
+            Self::Api(err.to_string())
+        }
+    }
 }
 
 impl CatalogError {
@@ -365,7 +377,7 @@ fn restore_catalog_view(
     search_generation: &Arc<AtomicU64>,
 ) -> Option<(u64, Vec<VideoCardData>)> {
     let snapshot = views.borrow().get(key).cloned()?;
-    if !snapshot.is_search && snapshot.cached_at.elapsed() > std::time::Duration::from_secs(60) {
+    if !snapshot.is_search && snapshot.cached_at.elapsed() > CATALOG_CACHE_TTL {
         views.borrow_mut().remove(key);
         return None;
     }
@@ -686,13 +698,7 @@ fn get_adult_hub_catalog_page(
                 limit: Some(CATALOG_PAGE_SIZE as u64),
                 q: q_term,
             })
-            .map_err(|err| {
-                if err.is_unauthorized() {
-                    CatalogError::Unauthorized
-                } else {
-                    CatalogError::Api(err.to_string())
-                }
-            })?;
+            .map_err(CatalogError::from)?;
 
         let total_count = cat_resp.total_count as usize;
         let has_more = cat_resp.has_more();
@@ -720,13 +726,7 @@ fn get_adult_hub_catalog_page(
                 limit: Some(CATALOG_PAGE_SIZE as u64),
                 q: q_term,
             })
-            .map_err(|err| {
-                if err.is_unauthorized() {
-                    CatalogError::Unauthorized
-                } else {
-                    CatalogError::Api(err.to_string())
-                }
-            })?;
+            .map_err(CatalogError::from)?;
 
         let total_count = studio_resp.total_count as usize;
         let has_more = studio_resp.has_more();
@@ -761,13 +761,7 @@ fn get_adult_hub_catalog_page(
                 sort: Some(performer_sort),
                 direction: Some(performer_direction),
             })
-            .map_err(|err| {
-                if err.is_unauthorized() {
-                    CatalogError::Unauthorized
-                } else {
-                    CatalogError::Api(err.to_string())
-                }
-            })?;
+            .map_err(CatalogError::from)?;
 
         let total_count = perf_resp.total_count as usize;
         let has_more = perf_resp.has_more();
@@ -816,13 +810,7 @@ fn get_adult_hub_catalog_page(
                 Some(sort_str),
                 Some(direction_str),
             )
-            .map_err(|err| {
-                if err.is_unauthorized() {
-                    CatalogError::Unauthorized
-                } else {
-                    CatalogError::Api(err.to_string())
-                }
-            })?;
+            .map_err(CatalogError::from)?;
 
         let total_count = fav_resp.total_count as usize;
         let has_more = fav_resp.has_more();
@@ -855,13 +843,7 @@ fn get_adult_hub_catalog_page(
         quality: filters.quality.query(),
     };
 
-    let resp = client.get_videos(&req).map_err(|err| {
-        if err.is_unauthorized() {
-            CatalogError::Unauthorized
-        } else {
-            CatalogError::Api(err.to_string())
-        }
-    })?;
+    let resp = client.get_videos(&req).map_err(CatalogError::from)?;
 
     let items: Vec<TvItem> = resp.items.into_iter().map(TvItem::from).collect();
     let total_count = resp.total_count as usize;
@@ -1963,7 +1945,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             set_search_sections(&ui, &[]);
 
             std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(300));
+                std::thread::sleep(SEARCH_DEBOUNCE_DELAY);
                 if search_debounce_generation.load(Ordering::SeqCst) != debounce_id {
                     return;
                 }
@@ -2835,7 +2817,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             let local_store = local_store.clone();
             let weak = weak.clone();
             std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(300));
+                std::thread::sleep(SEARCH_DEBOUNCE_DELAY);
                 if generation.load(Ordering::SeqCst) != request_id {
                     return;
                 }

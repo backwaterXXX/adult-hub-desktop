@@ -1,7 +1,6 @@
 use crate::MainWindow;
 use crate::context::AppContext;
 use slint::ComponentHandle;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub fn install_stage9_handlers(ui: &MainWindow, ctx: &AppContext) {
@@ -9,24 +8,31 @@ pub fn install_stage9_handlers(ui: &MainWindow, ctx: &AppContext) {
 
     // 1. Video Canvas Clicked (Double-click -> Fullscreen, Single-click -> Play/Pause)
     {
+        const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
         let weak = ui.as_weak();
-        let last_click = Arc::new(Mutex::new(
-            std::time::Instant::now() - Duration::from_secs(10),
-        ));
+        let pending_single_click: std::rc::Rc<std::cell::RefCell<Option<slint::Timer>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(None));
         ui.on_video_canvas_clicked(move || {
             let Some(ui) = weak.upgrade() else { return };
-            let now = std::time::Instant::now();
-            let mut last = last_click
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if now.duration_since(*last) < Duration::from_millis(350) {
-                // Double click: toggle fullscreen
-                *last = now - Duration::from_secs(10);
+            if pending_single_click.borrow().is_some() {
+                // Second click within window: cancel pending play/pause and toggle fullscreen.
+                pending_single_click.borrow_mut().take();
                 ui.invoke_toggle_fullscreen();
-                ui.invoke_toggle_play(); // revert single click play toggle so playback state persists
             } else {
-                *last = now;
-                ui.invoke_toggle_play();
+                let timer = slint::Timer::default();
+                let weak_single = ui.as_weak();
+                let pending_ref = pending_single_click.clone();
+                timer.start(
+                    slint::TimerMode::SingleShot,
+                    DOUBLE_CLICK_WINDOW,
+                    move || {
+                        pending_ref.borrow_mut().take();
+                        if let Some(ui) = weak_single.upgrade() {
+                            ui.invoke_toggle_play();
+                        }
+                    },
+                );
+                *pending_single_click.borrow_mut() = Some(timer);
             }
         });
     }
