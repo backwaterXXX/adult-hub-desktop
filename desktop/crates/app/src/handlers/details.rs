@@ -91,13 +91,9 @@ fn install_open_item_detail_handler(ui: &MainWindow, ctx: &AppContext) {
     let local_store = ctx.local_store.clone();
     let credential_store = ctx.credential_store.clone();
     let session_ctrl = ctx.session_ctrl.clone();
-    let cached_catalog = ctx.cached_catalog.clone();
-    let home_catalog = ctx.home_catalog.clone();
 
     {
         let weak = ui.as_weak();
-        let cached_catalog = cached_catalog.clone();
-        let home_catalog = home_catalog.clone();
         let local_store = local_store.clone();
         let credential_store = credential_store.clone();
         let session_ctrl = session_ctrl.clone();
@@ -473,28 +469,12 @@ fn install_open_item_detail_handler(ui: &MainWindow, ctx: &AppContext) {
                 });
             }
 
-            // Load recommendations away from the UI thread, falling back only for older servers.
-            let mut all_items = cached_catalog
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            {
-                let home_items = home_catalog
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                for item in home_items.iter() {
-                    if !all_items.iter().any(|existing| existing.id == item.id) {
-                        all_items.push(item.clone());
-                    }
-                }
-            }
             spawn_similar_items_fetch(
                 &ui,
                 &target_item,
                 artwork_session.as_ref(),
                 artwork_token.clone(),
                 ctx_detail.similar_catalog.clone(),
-                all_items,
             );
 
             ui.set_detail_visible(false);
@@ -1101,21 +1081,17 @@ fn install_detail_profile_handlers(ui: &MainWindow) {
     }
 }
 
-/// Loads "More like this" off the UI thread. Servers with the `similar_videos`
-/// capability rank the list themselves; older ones fall back to the local
-/// ranking over the browse and Home caches.
+/// Loads backend recommendations off the UI thread.
 fn spawn_similar_items_fetch(
     ui: &MainWindow,
     target_item: &TvItem,
     session: Option<&adult_hub_storage::Session>,
     token: Option<String>,
     similar_catalog: Arc<Mutex<Vec<TvItem>>>,
-    all_items: Vec<TvItem>,
 ) {
     ui.set_detail_similar_items(Rc::new(slint::VecModel::from(Vec::<VideoCardData>::new())).into());
     ui.set_detail_similar_loading(true);
     let detail_id = target_item.id.clone();
-    let target_for_similar = target_item.clone();
     let session_for_similar = session.cloned();
     let weak_for_similar = ui.as_weak();
     let catalog_for_similar = similar_catalog;
@@ -1125,19 +1101,10 @@ fn spawn_similar_items_fetch(
             Some(session) => match adult_hub_client::AdultHubClient::new(&session.server_url) {
                 Ok(client) => {
                     let client = client.with_token(&session.access_token);
-                    match client.discover_version() {
-                        Ok(version) if !version.has_capability("similar_videos") => {
-                            rank_similar_items(&target_for_similar, all_items, 8)
-                        }
-                        Ok(_) => match client.get_similar_videos(&detail_id, 8) {
-                            Ok(response) => response.items.into_iter().map(TvItem::from).collect(),
-                            Err(error) => {
-                                log::warn!("Similar videos request failed: {error}");
-                                Vec::new()
-                            }
-                        },
+                    match client.get_similar_videos(&detail_id, 8) {
+                        Ok(response) => response.items.into_iter().map(TvItem::from).collect(),
                         Err(error) => {
-                            log::warn!("Server discovery failed: {error}");
+                            log::warn!("Similar videos request failed: {error}");
                             Vec::new()
                         }
                     }
@@ -1496,42 +1463,6 @@ fn parse_overview_metadata(
     parsed
 }
 
-fn rank_similar_items(target: &TvItem, candidates: Vec<TvItem>, limit: usize) -> Vec<TvItem> {
-    let mut scored: Vec<(i32, TvItem)> = candidates
-        .into_iter()
-        .filter(|i| i.id != target.id)
-        .map(|i| {
-            let mut score = 0;
-            for g in &target.genres {
-                if i.genres.iter().any(|ig| ig.eq_ignore_ascii_case(g)) {
-                    score += 3;
-                }
-            }
-            for s in &target.studios {
-                if i.studios.iter().any(|is| is.eq_ignore_ascii_case(s)) {
-                    score += 5;
-                }
-            }
-            for p in &target.people {
-                if i.people
-                    .iter()
-                    .any(|ip| ip.name.eq_ignore_ascii_case(&p.name))
-                {
-                    score += 4;
-                }
-            }
-            (score, i)
-        })
-        .collect();
-    scored.sort_by_key(|a| std::cmp::Reverse(a.0));
-    scored
-        .into_iter()
-        .filter(|(s, _)| *s > 0)
-        .take(limit)
-        .map(|(_, item)| item)
-        .collect()
-}
-
 /// Extracts the Telegram ID from a `TvItem`.
 /// Inspects `provider_video_id` (stripping any `telegram:` prefix),
 /// then `item.id` if it starts with `telegram:`,
@@ -1632,63 +1563,6 @@ Actual description line 2.
             parsed.clean_overview,
             "Actual description line 1.\nActual description line 2."
         );
-    }
-
-    #[test]
-    fn test_rank_similar_items_scores_studio_performer_and_genre() {
-        use adult_hub_client::TvPersonRole;
-        let target = TvItem {
-            id: "target".into(),
-            title: "Target".into(),
-            genres: vec!["Action".into()],
-            studios: vec!["StudioA".into()],
-            people: vec![TvPersonRole {
-                id: "p1".into(),
-                name: "Alice".into(),
-                role: None,
-                person_type: None,
-                primary_image_tag: None,
-            }],
-            ..Default::default()
-        };
-        let studio_match = TvItem {
-            id: "s".into(),
-            studios: vec!["studioa".into()],
-            ..Default::default()
-        };
-        let performer_match = TvItem {
-            id: "p".into(),
-            people: vec![TvPersonRole {
-                id: "p1".into(),
-                name: "alice".into(),
-                role: None,
-                person_type: None,
-                primary_image_tag: None,
-            }],
-            ..Default::default()
-        };
-        let genre_match = TvItem {
-            id: "g".into(),
-            genres: vec!["action".into()],
-            ..Default::default()
-        };
-        let unrelated = TvItem {
-            id: "u".into(),
-            ..Default::default()
-        };
-        let ranked = rank_similar_items(
-            &target,
-            vec![
-                target.clone(),
-                unrelated,
-                genre_match,
-                performer_match,
-                studio_match,
-            ],
-            8,
-        );
-        let ids: Vec<&str> = ranked.iter().map(|i| i.id.as_str()).collect();
-        assert_eq!(ids, vec!["s", "p", "g"]);
     }
 
     #[test]
