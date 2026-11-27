@@ -235,3 +235,68 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: true
+
+  verify-release-channel:
+    name: Verify Update Channel
+    runs-on: ubuntu-24.04
+    if: startsWith(github.ref, 'refs/tags/desktop-v')
+    needs: [release]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # The release job can succeed while the channel stays broken: a bad
+      # signature, a manifest that is never served, or an asset URL that 404s.
+      # Clients then report "no updates" and nothing fails in CI.
+      - name: Download the manifest clients actually fetch
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF#refs/tags/desktop-v}"
+          DIRECT="https://github.com/${GITHUB_REPOSITORY}/releases/download/desktop-v${VERSION}"
+          LATEST="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download"
+          mkdir -p bin
+          for attempt in $(seq 1 30); do
+            if curl -fsSL --max-time 30 "${DIRECT}/adult-hub-update-manifest.json" -o bin/adult-hub-update-manifest.json \
+               && curl -fsSL --max-time 30 "${DIRECT}/adult-hub-update-manifest.json.sig" -o bin/adult-hub-update-manifest.json.sig; then
+              echo "manifest downloaded on attempt ${attempt}"
+              break
+            fi
+            if [[ "${attempt}" == "30" ]]; then
+              echo "::error::could not download the manifest for desktop-v${VERSION}"
+              exit 1
+            fi
+            sleep 10
+          done
+          curl -fsSL --max-time 30 -o /dev/null "${LATEST}/adult-hub-update-manifest.json" \
+            || { echo "::error::releases/latest/download does not serve the manifest"; exit 1; }
+
+      - name: Verify the manifest against the embedded key
+        env:
+          ADULT_HUB_REQUIRE_REAL_MANIFEST: "1"
+        run: |
+          cargo test --locked --manifest-path desktop/Cargo.toml \
+            --package adult-hub-desktop --bin adult-hub-desktop \
+            test_verify_real_generated_manifest_against_embedded_key -- --nocapture
+
+      - name: Verify the published version and every asset URL
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request
+
+          version = os.environ["GITHUB_REF"].removeprefix("refs/tags/desktop-v")
+          manifest = json.load(open("bin/adult-hub-update-manifest.json"))
+          if manifest["version"] != version:
+              raise SystemExit(f"manifest version {manifest['version']} != tag {version}")
+
+          assets = []
+          for package in manifest["packages"]:
+              assets.append((package["package_type"], package["url"]))
+              if package.get("runtime_dll"):
+                  assets.append(("runtime-dll", package["runtime_dll"]["url"]))
+
+          for kind, url in assets:
+              request = urllib.request.Request(url, method="HEAD")
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  print(f"{kind}: {response.status} {url}")
+          print(f"channel healthy for {version}")
+          PY

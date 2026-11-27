@@ -13,7 +13,16 @@ use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use thiserror::Error;
+
+/// A stalled connection must not leave the progress bar running forever, and a
+/// slow link must still be able to finish a legitimate package.
+const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const DOWNLOAD_TOTAL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// One retry per transient failure: a reset or a dropped connection during a
+/// 170 MB transfer used to end the whole update.
+const DOWNLOAD_ATTEMPTS: u32 = 3;
 
 /// Embedded release verification Ed25519 public key (32 bytes).
 pub const EMBEDDED_RELEASE_PUBLIC_KEY: [u8; 32] = [
@@ -58,6 +67,9 @@ pub enum UpdateError {
 
     #[error("download failed: {0}")]
     DownloadFailed(String),
+
+    #[error("update download cancelled")]
+    Cancelled,
 
     #[error("I/O error during update: {0}")]
     Io(String),
@@ -411,6 +423,14 @@ fn hex_string(bytes: &[u8]) -> String {
     s
 }
 
+impl UpdateError {
+    /// A lost connection or a failed write is worth another attempt; a rejected
+    /// manifest, a cancelled transfer or a digest mismatch is not.
+    fn is_retryable(&self) -> bool {
+        matches!(self, Self::DownloadFailed(_) | Self::Io(_))
+    }
+}
+
 /// The mpv runtime that ships next to the executable.
 fn installed_runtime_library() -> Option<PathBuf> {
     let executable = std::env::current_exe().ok()?;
@@ -432,10 +452,40 @@ fn file_matches_package(path: &Path, package: &UpdatePackage) -> bool {
 }
 
 /// Download package into a temporary staging file and verify SHA-256 & size before returning verified path.
+///
+/// Transient transport failures are retried; `is_cancelled` is polled before the
+/// request and between chunks so the UI can abort a transfer.
 pub fn download_and_verify_package(
     package: &UpdatePackage,
+    is_cancelled: &dyn Fn() -> bool,
     progress_callback: impl Fn(u64, u64),
 ) -> Result<PathBuf, UpdateError> {
+    let progress: &dyn Fn(u64, u64) = &progress_callback;
+    let mut last_error = UpdateError::DownloadFailed("download did not start".into());
+    for attempt in 1..=DOWNLOAD_ATTEMPTS {
+        match download_package_once(package, is_cancelled, progress) {
+            Ok(path) => return Ok(path),
+            Err(error) if error.is_retryable() && attempt < DOWNLOAD_ATTEMPTS => {
+                log::warn!(
+                    "update download attempt {attempt}/{DOWNLOAD_ATTEMPTS} failed ({error}); retrying"
+                );
+                last_error = error;
+                std::thread::sleep(Duration::from_millis(500 * u64::from(attempt)));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_error)
+}
+
+fn download_package_once(
+    package: &UpdatePackage,
+    is_cancelled: &dyn Fn() -> bool,
+    progress_callback: &dyn Fn(u64, u64),
+) -> Result<PathBuf, UpdateError> {
+    if is_cancelled() {
+        return Err(UpdateError::Cancelled);
+    }
     let temp_dir = std::env::temp_dir();
     let unique = uuid::Uuid::new_v4();
     let file_stem = format!("adult-hub-update-{}-{unique}", package.package_type);
@@ -470,8 +520,14 @@ pub fn download_and_verify_package(
                 attempt.follow()
             }
         }))
+        .connect_timeout(DOWNLOAD_CONNECT_TIMEOUT)
+        .timeout(DOWNLOAD_TOTAL_TIMEOUT)
         .build()
         .map_err(|e| UpdateError::DownloadFailed(e.to_string()))?;
+
+    if is_cancelled() {
+        return Err(UpdateError::Cancelled);
+    }
 
     let mut response = client
         .get(&package.url)
@@ -497,6 +553,11 @@ pub fn download_and_verify_package(
         })?;
         if count == 0 {
             break;
+        }
+        if is_cancelled() {
+            drop(file);
+            let _ = std::fs::remove_file(&staging_path);
+            return Err(UpdateError::Cancelled);
         }
         // The manifest's size is signed, so a body larger than it is never valid.
         // Stop before writing it instead of filling the disk.
@@ -1186,6 +1247,55 @@ mod tests {
                 return;
             }
         }
+        // `bin/` only holds a manifest after scripts/sign-release.sh has run, so
+        // this used to return without asserting anything and looked like
+        // coverage. The release gate sets the variable with the published files.
+        assert!(
+            std::env::var_os("ADULT_HUB_REQUIRE_REAL_MANIFEST").is_none(),
+            "ADULT_HUB_REQUIRE_REAL_MANIFEST is set but no generated manifest was found in bin/"
+        );
+        println!("skipping: no generated manifest in bin/");
+    }
+
+    fn update_package(url: &str, size_bytes: u64) -> UpdatePackage {
+        UpdatePackage {
+            platform: "windows".into(),
+            arch: "x86_64".into(),
+            package_type: "exe".into(),
+            url: url.into(),
+            sha256: "0".repeat(64),
+            size_bytes,
+            runtime_dll: None,
+        }
+    }
+
+    #[test]
+    fn test_cancelled_download_never_reaches_the_network() {
+        let package = update_package(
+            "https://github.com/adult-hub/adult-hub-desktop/releases/download/desktop-v0.0.0/adult-hub-desktop.exe",
+            1024,
+        );
+        let result = download_and_verify_package(&package, &|| true, |_, _| {});
+        assert!(
+            matches!(result, Err(UpdateError::Cancelled)),
+            "an already-cancelled download must not open a connection"
+        );
+    }
+
+    #[test]
+    fn test_only_transport_failures_are_retried() {
+        assert!(UpdateError::DownloadFailed("connection reset".into()).is_retryable());
+        assert!(UpdateError::Io("disk full".into()).is_retryable());
+        assert!(!UpdateError::Cancelled.is_retryable());
+        assert!(
+            !UpdateError::HashMismatch {
+                expected: "a".repeat(64),
+                actual: "b".repeat(64),
+            }
+            .is_retryable(),
+            "a digest mismatch means the release or the CDN is wrong, not the link"
+        );
+        assert!(!UpdateError::InvalidSignature.is_retryable());
     }
 
     #[test]

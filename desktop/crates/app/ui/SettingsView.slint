@@ -680,6 +680,7 @@ export component SettingsView inherits Rectangle {
     callback toggle-auto-update();
     callback check-for-updates();
     callback start-update-download();
+    callback cancel-update-download();
     callback install-update();
     callback view-licenses();
 
@@ -2427,6 +2428,14 @@ export component SettingsView inherits Rectangle {
                                                 root.check-for-updates();
                                             }
                                         }
+                                    }
+
+                                    if root.update-downloading : SettingsButton {
+                                        text: "Cancel";
+                                        custom-height: 40px;
+                                        custom-width: 110px;
+                                        horizontal-stretch: 0;
+                                        clicked => { root.cancel-update-download(); }
                                     }
                                 }
 

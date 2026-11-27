@@ -2783,6 +2783,7 @@ export component MainWindow inherits Window {
     callback toggle-auto-update();
     callback check-for-updates();
     callback start-update-download();
+    callback cancel-update-download();
     callback install-update();
 
     // Stage 6 Item Detail & Discovery State
@@ -8058,6 +8059,7 @@ export component MainWindow inherits Window {
                 toggle-auto-update => { root.toggle-auto-update(); }
                 check-for-updates => { root.check-for-updates(); }
                 start-update-download => { root.start-update-download(); }
+                cancel-update-download => { root.cancel-update-download(); }
                 install-update => { root.install-update(); }
                 view-licenses => { root.licenses-visible = true; }
             }

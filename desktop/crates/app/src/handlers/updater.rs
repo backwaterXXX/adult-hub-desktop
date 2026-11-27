@@ -50,6 +50,7 @@ pub fn install_stage5_handlers(ui: &MainWindow, ctx: &AppContext) {
         None::<(updater::UpdateManifest, updater::UpdatePackage)>,
     ));
     let downloaded_installer = Arc::new(Mutex::new(None::<(PathBuf, Option<PathBuf>)>));
+    let cancel_download = Arc::new(AtomicBool::new(false));
 
     // Callback: Toggle Auto Update
     {
@@ -119,7 +120,11 @@ pub fn install_stage5_handlers(ui: &MainWindow, ctx: &AppContext) {
                 }
                 let sig_url = format!("{release_url}.sig");
 
-                let client = match reqwest::blocking::Client::builder().build() {
+                let client = match reqwest::blocking::Client::builder()
+                    .connect_timeout(Duration::from_secs(15))
+                    .timeout(Duration::from_secs(30))
+                    .build()
+                {
                     Ok(c) => c,
                     Err(e) => {
                         check_in_flight_thread.store(false, Ordering::Release);
@@ -277,6 +282,7 @@ pub fn install_stage5_handlers(ui: &MainWindow, ctx: &AppContext) {
         let weak = ui.as_weak();
         let pending = pending_update.clone();
         let downloaded = downloaded_installer.clone();
+        let cancel = cancel_download.clone();
         ui.on_start_update_download(move || {
             let pkg_opt = pending
                 .lock()
@@ -284,95 +290,85 @@ pub fn install_stage5_handlers(ui: &MainWindow, ctx: &AppContext) {
                 .as_ref()
                 .map(|(_, p)| p.clone());
             if let Some(package) = pkg_opt {
-                // The pinned mpv build is byte-identical between releases, so the
-                // runtime only has to be downloaded when the installed copy is
-                // missing or stale. The update then stays the size of the EXE.
-                let runtime_dll = package
-                    .runtime_dll
-                    .as_deref()
-                    .cloned()
-                    .filter(|dll| !updater::installed_runtime_matches(dll));
-                let keeps_installed_runtime =
-                    runtime_dll.is_none() && package.runtime_dll.is_some();
+                cancel.store(false, Ordering::SeqCst);
                 if let Some(ui) = weak.upgrade() {
                     ui.set_update_downloading(true);
-                    let status = if keeps_installed_runtime {
-                        "Downloading the application (libmpv runtime is up to date)..."
-                    } else {
-                        "Downloading update package..."
-                    };
-                    ui.set_update_status(status.into());
+                    ui.set_update_ready(false);
+                    ui.set_update_progress(0.0);
+                    ui.set_update_status("Preparing update...".into());
                 }
                 let weak_thread = weak.clone();
                 let downloaded_thread = downloaded.clone();
+                let cancel_thread = cancel.clone();
                 std::thread::spawn(move || {
-                    let weak_prog = weak_thread.clone();
-                    let runtime_for_download = runtime_dll.clone();
+                    // Deciding whether the runtime is current reads 120 MB, so it
+                    // runs here instead of between the click and the download.
+                    let runtime_dll = package
+                        .runtime_dll
+                        .as_deref()
+                        .cloned()
+                        .filter(|dll| !updater::installed_runtime_matches(dll));
+                    let keeps_installed_runtime =
+                        runtime_dll.is_none() && package.runtime_dll.is_some();
                     let main_size = package.size_bytes;
-                    let combined_size = main_size
-                        + runtime_for_download
-                            .as_ref()
-                            .map_or(0, |dll| dll.size_bytes);
-                    let res =
-                        updater::download_and_verify_package(&package, move |bytes, total| {
-                            if total > 0 {
-                                let prog = (bytes as f32) / (combined_size.max(1) as f32);
-                                let mb_down = (bytes as f64) / (1024.0 * 1024.0);
-                                let mb_total = (combined_size as f64) / (1024.0 * 1024.0);
-                                let weak_cb = weak_prog.clone();
-                                let _ = slint::invoke_from_event_loop(move || {
-                                    if let Some(ui) = weak_cb.upgrade() {
-                                        ui.set_update_progress(prog);
-                                        ui.set_update_status(
-                                            format!(
-                                                "Downloading: {:.1}% ({:.1} MB / {:.1} MB)",
-                                                prog * 100.0,
-                                                mb_down,
-                                                mb_total
-                                            )
-                                            .into(),
-                                        );
-                                    }
-                                });
+                    let combined_size =
+                        main_size + runtime_dll.as_ref().map_or(0, |dll| dll.size_bytes);
+                    let total_mb = (combined_size as f64) / (1024.0 * 1024.0);
+                    if keeps_installed_runtime {
+                        let weak_status = weak_thread.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = weak_status.upgrade() {
+                                ui.set_update_status(
+                                    "Downloading the application (libmpv runtime is up to date)..."
+                                        .into(),
+                                );
                             }
-                        })
-                        .and_then(|exe_path| {
-                            let dll_path = runtime_dll
-                                .as_ref()
-                                .map(|dll| {
-                                    let weak_runtime_progress = weak_thread.clone();
-                                    updater::download_and_verify_package(
-                                        dll,
-                                        move |bytes, total| {
-                                            if total > 0 {
-                                                let prog = ((main_size + bytes) as f32)
-                                                    / (combined_size.max(1) as f32);
-                                                let mb_down = ((main_size + bytes) as f64)
-                                                    / (1024.0 * 1024.0);
-                                                let mb_total =
-                                                    (combined_size as f64) / (1024.0 * 1024.0);
-                                                let weak_cb = weak_runtime_progress.clone();
-                                                let _ = slint::invoke_from_event_loop(move || {
-                                                    if let Some(ui) = weak_cb.upgrade() {
-                                                        ui.set_update_progress(prog);
-                                                        ui.set_update_status(
-                                                    format!(
-                                                        "Downloading: {:.1}% ({:.1} MB / {:.1} MB)",
-                                                        prog * 100.0,
-                                                        mb_down,
-                                                        mb_total
-                                                    )
-                                                    .into(),
-                                                );
-                                                    }
-                                                });
-                                            }
-                                        },
-                                    )
-                                })
-                                .transpose()?;
-                            Ok((exe_path, dll_path))
                         });
+                    }
+                    let is_cancelled = {
+                        let cancel = cancel_thread.clone();
+                        move || cancel.load(Ordering::SeqCst)
+                    };
+                    let report = |weak: slint::Weak<MainWindow>, done: u64| {
+                        if combined_size == 0 {
+                            return;
+                        }
+                        let progress = (done as f32) / (combined_size as f32);
+                        let done_mb = (done as f64) / (1024.0 * 1024.0);
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = weak.upgrade() {
+                                ui.set_update_progress(progress);
+                                ui.set_update_status(
+                                    format!(
+                                        "Downloading: {:.1}% ({:.1} MB / {:.1} MB)",
+                                        progress * 100.0,
+                                        done_mb,
+                                        total_mb
+                                    )
+                                    .into(),
+                                );
+                            }
+                        });
+                    };
+
+                    let res = updater::download_and_verify_package(
+                        &package,
+                        &is_cancelled,
+                        |bytes, _total| report(weak_thread.clone(), bytes),
+                    )
+                    .and_then(|exe_path| {
+                        let dll_path = runtime_dll
+                            .as_ref()
+                            .map(|dll| {
+                                updater::download_and_verify_package(
+                                    dll,
+                                    &is_cancelled,
+                                    |bytes, _total| report(weak_thread.clone(), main_size + bytes),
+                                )
+                            })
+                            .transpose()?;
+                        Ok((exe_path, dll_path))
+                    });
 
                     match res {
                         Ok(verified_paths) => {
@@ -380,8 +376,9 @@ pub fn install_stage5_handlers(ui: &MainWindow, ctx: &AppContext) {
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner) =
                                 Some(verified_paths);
+                            let weak_done = weak_thread.clone();
                             let _ = slint::invoke_from_event_loop(move || {
-                                if let Some(ui) = weak_thread.upgrade() {
+                                if let Some(ui) = weak_done.upgrade() {
                                     ui.set_update_downloading(false);
                                     ui.set_update_ready(true);
                                     ui.set_update_status(
@@ -390,9 +387,21 @@ pub fn install_stage5_handlers(ui: &MainWindow, ctx: &AppContext) {
                                 }
                             });
                         }
-                        Err(e) => {
+                        Err(updater::UpdateError::Cancelled) => {
+                            let weak_cancelled = weak_thread.clone();
                             let _ = slint::invoke_from_event_loop(move || {
-                                if let Some(ui) = weak_thread.upgrade() {
+                                if let Some(ui) = weak_cancelled.upgrade() {
+                                    ui.set_update_downloading(false);
+                                    ui.set_update_ready(false);
+                                    ui.set_update_progress(0.0);
+                                    ui.set_update_status("Update download cancelled.".into());
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            let weak_failed = weak_thread.clone();
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(ui) = weak_failed.upgrade() {
                                     ui.set_update_downloading(false);
                                     ui.set_update_status(format!("Download failed: {e}").into());
                                 }
@@ -400,6 +409,18 @@ pub fn install_stage5_handlers(ui: &MainWindow, ctx: &AppContext) {
                         }
                     }
                 });
+            }
+        });
+    }
+
+    // Callback: Cancel Update Download
+    {
+        let weak = ui.as_weak();
+        let cancel = cancel_download.clone();
+        ui.on_cancel_update_download(move || {
+            cancel.store(true, Ordering::SeqCst);
+            if let Some(ui) = weak.upgrade() {
+                ui.set_update_status("Cancelling update...".into());
             }
         });
     }
