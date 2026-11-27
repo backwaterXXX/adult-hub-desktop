@@ -2073,7 +2073,9 @@ fn run_demo_shuffle(ui: &MainWindow) {
         // Step 5: Completed
         let _ = fs::write("/tmp/ah_demo_shuffle_done", "done");
         sleep(Duration::from_millis(400));
-        std::process::exit(0);
+        let _ = slint::invoke_from_event_loop(|| {
+            let _ = slint::quit_event_loop();
+        });
     });
 }
 

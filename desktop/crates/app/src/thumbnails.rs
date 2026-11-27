@@ -477,9 +477,13 @@ fn acquire_count_permit(
     limit: usize,
 ) -> Option<CountPermit> {
     let (active, available) = semaphore;
-    let mut count = active.lock().ok()?;
+    let mut count = active
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     while *count >= limit.max(1) {
-        count = available.wait(count).ok()?;
+        count = available
+            .wait(count)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
     }
     *count += 1;
     Some(CountPermit { semaphore })

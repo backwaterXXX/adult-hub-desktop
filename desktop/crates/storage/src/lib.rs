@@ -398,6 +398,7 @@ impl LocalStore {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn execute_raw_for_test(&self, sql: &str) -> Result<()> {
         let conn = self.conn()?;
         conn.execute_batch(sql)?;

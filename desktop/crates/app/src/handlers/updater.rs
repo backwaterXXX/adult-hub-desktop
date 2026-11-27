@@ -102,6 +102,21 @@ pub fn install_stage5_handlers(ui: &MainWindow, ctx: &AppContext) {
                 );
                 let release_url = std::env::var("ADULT_HUB_UPDATE_URL")
                     .unwrap_or_else(|_| default_release_url.to_owned());
+                let valid_scheme = release_url.starts_with("https://")
+                    || release_url.starts_with("http://127.0.0.1")
+                    || release_url.starts_with("http://localhost");
+                if !valid_scheme {
+                    check_in_flight_thread.store(false, Ordering::Release);
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak_thread.upgrade() {
+                            ui.set_update_checking(false);
+                            ui.set_update_status(
+                                "Update check error: invalid update URL scheme".into(),
+                            );
+                        }
+                    });
+                    return;
+                }
                 let sig_url = format!("{release_url}.sig");
 
                 let client = match reqwest::blocking::Client::builder().build() {
