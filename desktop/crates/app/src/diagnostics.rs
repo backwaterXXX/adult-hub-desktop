@@ -228,7 +228,11 @@ impl log::Log for AppLogger {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        eprintln!("[{stamp}] [{}] [{target}] {message}", record.level());
+        eprintln!(
+            "[{stamp}] [{}] [{target}] {}",
+            record.level(),
+            redact(&message)
+        );
         if crate::debug_logging_enabled() {
             crate::log_startup(&format!(
                 "[{}] [{target}] {}",

@@ -381,25 +381,31 @@ pub fn install_stage5_handlers(ui: &MainWindow, ctx: &AppContext) {
         let pending = pending_update.clone();
         let downloaded = downloaded_installer.clone();
         ui.on_install_update(move || {
-            let pkg_type = pending
+            let pkg_opt = pending
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .as_ref()
-                .map(|(_, p)| p.package_type.clone());
+                .map(|(_, p)| p.clone());
             let paths_opt = downloaded
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
-            if let (Some(ptype), Some((path, runtime_dll))) = (pkg_type, paths_opt) {
+            if let (Some(pkg), Some((path, runtime_dll))) = (pkg_opt, paths_opt) {
                 let playback_active = weak.upgrade().is_some_and(|ui| {
                     ui.get_active_screen() == "player"
                         && ui.get_status() != "Ready"
                         && !ui.get_url_text().trim().is_empty()
                 });
+                let runtime_integrity = pkg
+                    .runtime_dll
+                    .as_deref()
+                    .map(|dll| (dll.sha256.as_str(), dll.size_bytes));
                 match updater::launch_installation(
-                    &ptype,
+                    &pkg.package_type,
                     &path,
+                    Some((&pkg.sha256, pkg.size_bytes)),
                     runtime_dll.as_deref(),
+                    runtime_integrity,
                     playback_active,
                 ) {
                     Ok(()) => {

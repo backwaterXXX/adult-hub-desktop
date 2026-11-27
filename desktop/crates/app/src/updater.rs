@@ -479,14 +479,26 @@ pub fn download_and_verify_package(
 pub fn launch_installation(
     package_type: &str,
     file_path: &Path,
+    expected_integrity: Option<(&str, u64)>,
     runtime_dll_path: Option<&Path>,
+    expected_runtime_integrity: Option<(&str, u64)>,
     is_playback_active: bool,
 ) -> Result<(), UpdateError> {
     #[cfg(not(windows))]
-    let _ = runtime_dll_path;
+    let _ = (runtime_dll_path, expected_runtime_integrity);
 
     if is_playback_active {
         return Err(UpdateError::PlaybackActive);
+    }
+
+    if let Some((sha256, size_bytes)) = expected_integrity {
+        verify_file_integrity(file_path, sha256, size_bytes)?;
+    }
+    #[cfg(windows)]
+    if let (Some(dll_path), Some((sha256, size_bytes))) =
+        (runtime_dll_path, expected_runtime_integrity)
+    {
+        verify_file_integrity(dll_path, sha256, size_bytes)?;
     }
 
     #[cfg(windows)]
