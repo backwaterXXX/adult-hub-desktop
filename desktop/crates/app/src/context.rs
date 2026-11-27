@@ -157,7 +157,11 @@ impl AppContext {
     /// transitions — list → film → performer → another film — unwinding in the
     /// real visit order.
     pub fn push_history(history: &mut Vec<NavDestination>, dest: NavDestination) {
+        const MAX_NAV_HISTORY: usize = 64;
         if history.last() != Some(&dest) {
+            if history.len() >= MAX_NAV_HISTORY {
+                history.remove(0);
+            }
             history.push(dest);
         }
     }
