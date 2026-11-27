@@ -162,8 +162,12 @@ fn tune_connection(conn: &Connection) -> Result<()> {
         "PRAGMA temp_store=MEMORY;
          PRAGMA cache_size=-8192;",
     )?;
-    let _ = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get::<_, String>(0));
-    conn.execute_batch("PRAGMA synchronous=NORMAL;")?;
+    let wal_enabled = conn
+        .query_row("PRAGMA journal_mode=WAL", [], |row| row.get::<_, String>(0))
+        .is_ok_and(|mode| mode.eq_ignore_ascii_case("wal"));
+    if wal_enabled {
+        conn.execute_batch("PRAGMA synchronous=NORMAL;")?;
+    }
     Ok(())
 }
 
@@ -378,6 +382,18 @@ impl LocalStore {
             )?;
         }
 
+        if current_version < 8 {
+            conn.execute_batch(
+                "
+                BEGIN;
+                CREATE INDEX IF NOT EXISTS idx_local_progress_video_id
+                    ON local_progress (video_id);
+                INSERT INTO schema_version (version) VALUES (8);
+                COMMIT;
+                ",
+            )?;
+        }
+
         Ok(())
     }
 
@@ -573,14 +589,15 @@ impl LocalStore {
                 .as_secs() as i64
         };
 
-        let conn = self.conn()?;
+        let mut conn = self.conn()?;
         let bare = normalize_telegram_provider_id(&record.provider_video_id);
         let key = if bare.is_empty() {
             record.provider_video_id.trim().to_string()
         } else {
             bare
         };
-        conn.execute(
+        let tx = conn.transaction()?;
+        tx.execute(
             "INSERT INTO local_progress (channel_id, video_id, position_ms, duration_ms, updated_at, is_played, title, thumbnail_url)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(channel_id, video_id) DO UPDATE SET
@@ -604,10 +621,11 @@ impl LocalStore {
         // Rows written under a prefixed spelling describe the same material and
         // would otherwise produce a second, unusable resume card.
         let [_, prefixed, doubled] = telegram_key_variants(&key);
-        conn.execute(
+        tx.execute(
             "DELETE FROM local_progress WHERE channel_id = ?1 AND video_id IN (?2, ?3)",
             params![channel, prefixed, doubled],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -701,10 +719,11 @@ impl LocalStore {
         if old_id.trim().is_empty() || new_id.trim().is_empty() || old_id == new_id {
             return Ok(());
         }
-        let conn = self.conn()?;
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
 
         let progress_rows = {
-            let mut stmt = conn.prepare(
+            let mut stmt = tx.prepare(
                 "SELECT channel_id, position_ms, duration_ms, updated_at, is_played, title, thumbnail_url
                  FROM local_progress WHERE video_id = ?1",
             )?;
@@ -724,7 +743,7 @@ impl LocalStore {
         for (channel_id, position_ms, duration_ms, updated_at, is_played, title, thumbnail) in
             progress_rows
         {
-            conn.execute(
+            tx.execute(
                 "INSERT INTO local_progress
                     (channel_id, video_id, position_ms, duration_ms, updated_at, is_played, title, thumbnail_url)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
@@ -747,12 +766,12 @@ impl LocalStore {
                 ],
             )?;
         }
-        conn.execute(
+        tx.execute(
             "DELETE FROM local_progress WHERE video_id = ?1",
             params![old_id],
         )?;
 
-        let history_json = match conn.query_row(
+        let history_json = match tx.query_row(
             "SELECT item_json FROM watch_history WHERE item_id = ?1",
             params![old_id],
             |row| row.get::<_, String>(0),
@@ -778,17 +797,18 @@ impl LocalStore {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs() as i64;
-            conn.execute(
+            tx.execute(
                 "INSERT INTO watch_history (item_id, watched_at, item_json)
                  VALUES (?1, ?2, ?3)
                  ON CONFLICT(item_id) DO UPDATE SET watched_at = ?2, item_json = ?3",
                 params![new_id, now, rewritten],
             )?;
-            conn.execute(
+            tx.execute(
                 "DELETE FROM watch_history WHERE item_id = ?1",
                 params![old_id],
             )?;
         }
+        tx.commit()?;
         Ok(())
     }
 
@@ -854,14 +874,16 @@ impl LocalStore {
         }
         ids.sort();
         ids.dedup();
-        let conn = self.conn()?;
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
         for id in ids {
-            conn.execute(
+            tx.execute(
                 "DELETE FROM local_progress WHERE video_id = ?1",
                 params![id],
             )?;
-            conn.execute("DELETE FROM watch_history WHERE item_id = ?1", params![id])?;
+            tx.execute("DELETE FROM watch_history WHERE item_id = ?1", params![id])?;
         }
+        tx.commit()?;
         Ok(())
     }
 
@@ -900,18 +922,20 @@ impl LocalStore {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
-        let conn = self.conn()?;
-        conn.execute(
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        tx.execute(
             "INSERT INTO watch_history (item_id, watched_at, item_json) VALUES (?1, ?2, ?3)
              ON CONFLICT(item_id) DO UPDATE SET watched_at = ?2, item_json = ?3",
             params![item_id, now, item_json],
         )?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM watch_history WHERE item_id IN (
                 SELECT item_id FROM watch_history ORDER BY watched_at DESC LIMIT -1 OFFSET 100
             )",
             [],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -985,8 +1009,9 @@ impl LocalStore {
                 .as_secs() as i64
         };
 
-        let conn = self.conn()?;
-        conn.execute(
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        tx.execute(
             "INSERT INTO phash_jobs (resolver_scope, video_id, job_id, state, error_code, duration_us, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(resolver_scope, video_id) DO UPDATE SET
@@ -1007,12 +1032,13 @@ impl LocalStore {
         )?;
 
         // Trim to MAX_JOBS (200), matching Android PhashJobStore
-        conn.execute(
+        tx.execute(
             "DELETE FROM phash_jobs WHERE (resolver_scope, video_id) NOT IN (
                 SELECT resolver_scope, video_id FROM phash_jobs ORDER BY updated_at DESC LIMIT 200
             )",
             [],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -1099,9 +1125,10 @@ impl LocalStore {
     pub fn export_non_secret_config(&self) -> Result<AppConfigExport> {
         let selected_library_id = self.get_setting("selected_library_id")?;
         let selected_library_name = self.get_setting("selected_library_name")?;
-        let resolver_base_url = self
-            .get_setting("resolver_base_url")?
-            .or_else(|| self.get_setting("resolver_url").ok().flatten());
+        let resolver_base_url = match self.get_setting("resolver_base_url")? {
+            Some(url) => Some(url),
+            None => self.get_setting("resolver_url")?,
+        };
         let cache_limit_mb = self
             .get_setting("cache_limit_mb")?
             .and_then(|s| s.parse::<i32>().ok())
@@ -1624,6 +1651,7 @@ fn load_platform_session(_session_file: &std::path::Path) -> Option<Session> {
 }
 
 #[cfg(not(windows))]
+#[allow(clippy::print_stderr)]
 fn load_platform_session(session_file: &std::path::Path) -> Option<Session> {
     if !session_file.exists() {
         return None;
@@ -1633,8 +1661,20 @@ fn load_platform_session(session_file: &std::path::Path) -> Option<Session> {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(session_file, std::fs::Permissions::from_mode(0o600));
     }
-    let bytes = std::fs::read(session_file).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    let bytes = match std::fs::read(session_file) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("adult-hub-storage: failed to read session file: {e}");
+            return None;
+        }
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(session) => Some(session),
+        Err(e) => {
+            eprintln!("adult-hub-storage: ignoring invalid session file: {e}");
+            None
+        }
+    }
 }
 
 #[cfg(windows)]
