@@ -245,6 +245,28 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      # The manifest is checked with the client's own code, which links the
+      # windowing and font stack even for a test run.
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libmpv-dev mpv ffmpeg libsqlite3-dev libssl-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev \
+            libfreetype-dev libgl1-mesa-dev libegl1-mesa-dev libx11-dev \
+            libxcursor-dev libxrandr-dev libxi-dev libasound2-dev libpulse-dev \
+            appstream
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.99.1"
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: "desktop -> desktop/target"
+
       # The release job can succeed while the channel stays broken: a bad
       # signature, a manifest that is never served, or an asset URL that 404s.
       # Clients then report "no updates" and nothing fails in CI.
