@@ -18,7 +18,8 @@ artifacts/
 .idea/
 .vscode/
 .qoder/
-docs/
+# Root-only local notes; desktop/docs/ is committed documentation.
+/docs/
 *.log
 *.tmp
 .cache/
