@@ -528,13 +528,21 @@ impl Player {
         let (sender, events) = mpsc::channel();
         let quit = Arc::new(AtomicBool::new(false));
         let event_thread = {
-            let api = Arc::clone(&api);
-            let quit = Arc::clone(&quit);
-            let handle = SendHandle(handle);
-            std::thread::Builder::new()
+            let api_thread = Arc::clone(&api);
+            let quit_thread = Arc::clone(&quit);
+            let handle_thread = SendHandle(handle);
+            match std::thread::Builder::new()
                 .name("mpv-events".into())
-                .spawn(move || event_loop(api, handle, sender, quit))
-                .map_err(|error| PlayerError::Mpv(format!("cannot start event thread: {error}")))?
+                .spawn(move || event_loop(api_thread, handle_thread, sender, quit_thread))
+            {
+                Ok(thread) => thread,
+                Err(error) => {
+                    unsafe { (api.mpv_terminate_destroy)(handle) };
+                    return Err(PlayerError::Mpv(format!(
+                        "cannot start event thread: {error}"
+                    )));
+                }
+            }
         };
 
         Ok(Self {
@@ -1155,10 +1163,10 @@ impl Player {
 impl Drop for Player {
     fn drop(&mut self) {
         self.quit.store(true, Ordering::Release);
-        unsafe { (self.api.mpv_terminate_destroy)(self.handle) };
         if let Some(thread) = self.event_thread.take() {
             let _ = thread.join();
         }
+        unsafe { (self.api.mpv_terminate_destroy)(self.handle) };
     }
 }
 

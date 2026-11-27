@@ -19,8 +19,9 @@ fi
 
 if [[ ! -f "${APPIMAGETOOL}" ]]; then
     echo "==> Downloading appimagetool..."
-    curl -sL "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage" -o "${APPIMAGETOOL}"
-    chmod +x "${APPIMAGETOOL}"
+    curl -fsSL "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage" -o "${APPIMAGETOOL}.tmp"
+    chmod +x "${APPIMAGETOOL}.tmp"
+    mv "${APPIMAGETOOL}.tmp" "${APPIMAGETOOL}"
 fi
 
 echo "==> Preparing AppDir in ${APPDIR}..."
