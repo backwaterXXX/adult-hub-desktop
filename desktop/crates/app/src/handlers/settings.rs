@@ -1280,13 +1280,11 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
                 Ok(()) => {
                     crate::diagnostics::GLOBAL_LOG.i("Config", "Config imported successfully");
                     if let Ok(config) = local_store.export_non_secret_config() {
-                        crate::thumbnails::set_cache_limit_mb(
+                        crate::thumbnails::set_cache_limit_mb_async(
                             config.cache_limit_mb.max(0) as usize
                         );
                         ui.set_seek_step_sec(config.seek_step_sec);
-                        ui.set_seek_step_label(
-                            format!("Step: {}s", config.seek_step_sec).into(),
-                        );
+                        ui.set_seek_step_label(format!("Step: {}s", config.seek_step_sec).into());
                         ui.set_cache_limit_label(
                             format!(
                                 "Cache Limit: {}",
@@ -1299,94 +1297,94 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
                         ui.set_autoplay_active(config.autoplay_next);
                         crate::thumbnails::set_low_ram_mode(config.low_ram_mode);
                         ui.set_low_ram_active(config.low_ram_mode);
-                            if let Some(url) = config.resolver_base_url {
-                                ui.set_resolver_url_input(url.into());
-                            }
-                            if let Some(lib_name) = config.selected_library_name {
-                                ui.set_current_library(lib_name.into());
-                            }
-                            let tags_model = Rc::new(slint::VecModel::from(
-                                config
-                                    .excluded_tags
-                                    .into_iter()
-                                    .map(slint::SharedString::from)
-                                    .collect::<Vec<_>>(),
-                            ));
-                            ui.set_excluded_tags_list(tags_model.into());
-                            let channels_model = Rc::new(slint::VecModel::from(
-                                config
-                                    .hidden_channel_ids
-                                    .into_iter()
-                                    .map(slint::SharedString::from)
-                                    .collect::<Vec<_>>(),
-                            ));
-                            ui.set_hidden_channels_list(channels_model.into());
+                        if let Some(url) = config.resolver_base_url {
+                            ui.set_resolver_url_input(url.into());
                         }
-                        ui.set_status("Configuration imported successfully".into());
-                        ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
-                        let imported_resolver_url = local_store
-                            .get_setting("resolver_base_url")
-                            .ok()
-                            .flatten()
-                            .unwrap_or_default();
-                        if !imported_resolver_url.is_empty() {
-                            match ServiceUrlPolicy::inspect(&imported_resolver_url, false) {
-                                ServiceUrlValidation::Valid(service_url)
-                                    if service_url.uses_cleartext
-                                        && !super::request_cleartext_consent(
-                                            &ui,
-                                            &local_store,
-                                            &service_url.normalized,
-                                            "resolver-save",
-                                        ) =>
-                                {
-                                    let _ = local_store.set_setting("resolver_base_url", "");
-                                    let _ = local_store.set_setting("resolver_url", "");
-                                    ui.set_resolver_url_input(service_url.normalized.into());
-                                    let session = credential_store.get().ok().flatten();
-                                    phash_coord.update_auth(
-                                        "",
-                                        session
-                                            .as_ref()
-                                            .map(|session| session.access_token.as_str()),
-                                    );
-                                }
-                                ServiceUrlValidation::Invalid(error) => {
-                                    let _ = local_store.set_setting("resolver_base_url", "");
-                                    let _ = local_store.set_setting("resolver_url", "");
-                                    ui.set_resolver_url_input("".into());
-                                    show_error(
-                                        &ui,
-                                        format!("Importowany adres serwera odrzucony: {error}"),
-                                    );
-                                }
-                                _ => {}
-                            }
+                        if let Some(lib_name) = config.selected_library_name {
+                            ui.set_current_library(lib_name.into());
                         }
-                        let active_resolver_url = local_store
-                            .get_setting("resolver_base_url")
-                            .ok()
-                            .flatten()
-                            .filter(|url| !url.is_empty())
-                            .or_else(|| {
-                                credential_store
-                                    .get()
-                                    .ok()
-                                    .flatten()
-                                    .map(|session| session.server_url)
-                            })
-                            .unwrap_or_default();
-                        crate::thumbnails::set_resolver_base_url(&active_resolver_url);
-                        let active_token = credential_store
-                            .get()
-                            .ok()
-                            .flatten()
-                            .map(|session| session.access_token);
-                        crate::thumbnails::set_resolver_auth_token(active_token.as_deref());
+                        let tags_model = Rc::new(slint::VecModel::from(
+                            config
+                                .excluded_tags
+                                .into_iter()
+                                .map(slint::SharedString::from)
+                                .collect::<Vec<_>>(),
+                        ));
+                        ui.set_excluded_tags_list(tags_model.into());
+                        let channels_model = Rc::new(slint::VecModel::from(
+                            config
+                                .hidden_channel_ids
+                                .into_iter()
+                                .map(slint::SharedString::from)
+                                .collect::<Vec<_>>(),
+                        ));
+                        ui.set_hidden_channels_list(channels_model.into());
                     }
-                    Err(err) => show_error(&ui, format!("Odrzucono import konfiguracji: {err}")),
+                    ui.set_status("Configuration imported successfully".into());
+                    ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
+                    let imported_resolver_url = local_store
+                        .get_setting("resolver_base_url")
+                        .ok()
+                        .flatten()
+                        .unwrap_or_default();
+                    if !imported_resolver_url.is_empty() {
+                        match ServiceUrlPolicy::inspect(&imported_resolver_url, false) {
+                            ServiceUrlValidation::Valid(service_url)
+                                if service_url.uses_cleartext
+                                    && !super::request_cleartext_consent(
+                                        &ui,
+                                        &local_store,
+                                        &service_url.normalized,
+                                        "resolver-save",
+                                    ) =>
+                            {
+                                let _ = local_store.set_setting("resolver_base_url", "");
+                                let _ = local_store.set_setting("resolver_url", "");
+                                ui.set_resolver_url_input(service_url.normalized.into());
+                                let session = credential_store.get().ok().flatten();
+                                phash_coord.update_auth(
+                                    "",
+                                    session
+                                        .as_ref()
+                                        .map(|session| session.access_token.as_str()),
+                                );
+                            }
+                            ServiceUrlValidation::Invalid(error) => {
+                                let _ = local_store.set_setting("resolver_base_url", "");
+                                let _ = local_store.set_setting("resolver_url", "");
+                                ui.set_resolver_url_input("".into());
+                                show_error(
+                                    &ui,
+                                    format!("Importowany adres serwera odrzucony: {error}"),
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                    let active_resolver_url = local_store
+                        .get_setting("resolver_base_url")
+                        .ok()
+                        .flatten()
+                        .filter(|url| !url.is_empty())
+                        .or_else(|| {
+                            credential_store
+                                .get()
+                                .ok()
+                                .flatten()
+                                .map(|session| session.server_url)
+                        })
+                        .unwrap_or_default();
+                    crate::thumbnails::set_resolver_base_url(&active_resolver_url);
+                    let active_token = credential_store
+                        .get()
+                        .ok()
+                        .flatten()
+                        .map(|session| session.access_token);
+                    crate::thumbnails::set_resolver_auth_token(active_token.as_deref());
                 }
-            });
+                Err(err) => show_error(&ui, format!("Odrzucono import konfiguracji: {err}")),
+            }
+        });
     }
 
     // 15. Export Redacted Diagnostics

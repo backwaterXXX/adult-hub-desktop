@@ -583,7 +583,17 @@ pub fn launch_installation(
                 runtime_rollback,
                 runtime_rollback
             );
-            std::process::Command::new("powershell.exe")
+            let powershell_bin = std::env::var_os("SystemRoot")
+                .map(PathBuf::from)
+                .map(|root| {
+                    root.join("System32")
+                        .join("WindowsPowerShell")
+                        .join("v1.0")
+                        .join("powershell.exe")
+                })
+                .filter(|p| p.is_file())
+                .unwrap_or_else(|| PathBuf::from("powershell.exe"));
+            std::process::Command::new(powershell_bin)
                 .args([
                     "-NoProfile",
                     "-NonInteractive",
@@ -674,7 +684,9 @@ pub fn launch_installation(
                     .map_err(|e| UpdateError::Io(e.to_string()))?;
                 drop(helper_file);
 
-                let _ = std::process::Command::new("sh").arg(&helper_script).spawn();
+                let _ = std::process::Command::new("/bin/sh")
+                    .arg(&helper_script)
+                    .spawn();
 
                 std::process::exit(0);
             }

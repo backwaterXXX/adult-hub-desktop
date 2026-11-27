@@ -304,7 +304,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match local_store.export_non_secret_config() {
         Ok(config) => {
             let limit_mb = config.cache_limit_mb;
-            thumbnails::set_cache_limit_mb(limit_mb.max(0) as usize);
+            thumbnails::set_cache_limit_mb_async(limit_mb.max(0) as usize);
             thumbnails::set_low_ram_mode(config.low_ram_mode);
             autoplay_active.store(config.autoplay_next, std::sync::atomic::Ordering::SeqCst);
             ui.set_autoplay_active(config.autoplay_next);
