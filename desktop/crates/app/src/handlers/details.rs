@@ -166,80 +166,16 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
             };
             let studio_str = target_item.studios.first().cloned().unwrap_or_default();
             let genres_str = target_item.genres.join(", ");
-            let mut overview_str = target_item.overview.clone().unwrap_or_default();
-            let mut extracted_channel = String::new();
-            let mut extracted_source_url = String::new();
-            let mut extracted_telegram_id = String::new();
-
-            // Clean up overview by extracting raw source/channel metadata and removing title repetitions
+            let raw_overview = target_item.overview.clone().unwrap_or_default();
             let clean_title = target_item.title.trim();
             let disp_title_str = crate::catalog::display_title(&target_item);
             let disp_title = disp_title_str.trim();
-
-            let mut clean_overview_lines = Vec::new();
-            for raw_line in overview_str.lines() {
-                let line = raw_line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                let lower = line.to_lowercase();
-                if lower.starts_with("kanał:")
-                    || lower.starts_with("kanal:")
-                    || lower.starts_with("channel:")
-                {
-                    if let Some((_, val)) = line.split_once(':') {
-                        let trimmed = val.trim();
-                        if !trimmed.is_empty() && extracted_channel.is_empty() {
-                            extracted_channel = trimmed.to_string();
-                        }
-                    }
-                    continue;
-                }
-                if lower.starts_with("video page:")
-                    || lower.starts_with("video url:")
-                    || lower.starts_with("strona wideo:")
-                    || lower.starts_with("url:")
-                    || lower.starts_with("source:")
-                {
-                    if let Some((_, val)) = line.split_once(':') {
-                        let trimmed = val.trim();
-                        if !trimmed.is_empty() && extracted_source_url.is_empty() {
-                            extracted_source_url = trimmed.to_string();
-                        }
-                    }
-                    continue;
-                }
-                if lower.starts_with("telegram id:")
-                    || lower.starts_with("telegram_id:")
-                    || lower.starts_with("id telegram:")
-                    || lower.starts_with("tg id:")
-                    || lower.starts_with("tg_id:")
-                    || lower.starts_with("msg id:")
-                    || lower.starts_with("message id:")
-                {
-                    if let Some((_, val)) = line.split_once(':') {
-                        let trimmed = val.trim();
-                        let clean_val = trimmed.strip_prefix("telegram:").unwrap_or(trimmed).trim();
-                        let clean_lower = clean_val.to_ascii_lowercase();
-                        if !clean_val.is_empty()
-                            && !clean_lower.starts_with("http://")
-                            && !clean_lower.starts_with("https://")
-                            && extracted_telegram_id.is_empty()
-                        {
-                            extracted_telegram_id = clean_val.to_string();
-                        }
-                    }
-                    continue;
-                }
-                if lower.starts_with("tytuł:") || lower.starts_with("title:") {
-                    continue;
-                }
-                if line.eq_ignore_ascii_case(clean_title) || line.eq_ignore_ascii_case(disp_title) {
-                    continue;
-                }
-                clean_overview_lines.push(raw_line.trim_end());
-            }
-            overview_str = clean_overview_lines.join("\n").trim().to_string();
+            let ParsedOverview {
+                clean_overview: overview_str,
+                channel: extracted_channel,
+                source_url: extracted_source_url,
+                telegram_id: extracted_telegram_id,
+            } = parse_overview_metadata(&raw_overview, clean_title, disp_title);
 
             let original_title_str = if clean_title.eq_ignore_ascii_case(disp_title) {
                 String::new()
@@ -540,39 +476,9 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                     }
                 }
             }
-            let mut scored: Vec<(i32, TvItem)> = all_items
+            let similar_cards: Vec<VideoCardData> = rank_similar_items(&target_item, all_items, 8)
                 .into_iter()
-                .filter(|i| i.id != target_item.id)
-                .map(|i| {
-                    let mut score = 0;
-                    for g in &target_item.genres {
-                        if i.genres.iter().any(|ig| ig.eq_ignore_ascii_case(g)) {
-                            score += 3;
-                        }
-                    }
-                    for s in &target_item.studios {
-                        if i.studios.iter().any(|is| is.eq_ignore_ascii_case(s)) {
-                            score += 5;
-                        }
-                    }
-                    for p in &target_item.people {
-                        if i.people
-                            .iter()
-                            .any(|ip| ip.name.eq_ignore_ascii_case(&p.name))
-                        {
-                            score += 4;
-                        }
-                    }
-                    (score, i)
-                })
-                .collect();
-
-            scored.sort_by_key(|a| std::cmp::Reverse(a.0));
-            let similar_cards: Vec<VideoCardData> = scored
-                .into_iter()
-                .filter(|(s, _)| *s > 0)
-                .take(8)
-                .map(|(_, item)| {
+                .map(|item| {
                     if let Some(session) = &artwork_session {
                         tv_item_to_card_for_server(&item, &session.server_url)
                     } else {
@@ -1407,6 +1313,123 @@ fn resolve_real_media_size(
     None
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ParsedOverview {
+    clean_overview: String,
+    channel: String,
+    source_url: String,
+    telegram_id: String,
+}
+
+fn parse_overview_metadata(
+    raw_overview: &str,
+    raw_title: &str,
+    display_title: &str,
+) -> ParsedOverview {
+    let mut parsed = ParsedOverview::default();
+    let mut clean_lines = Vec::new();
+    for raw_line in raw_overview.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let lower = line.to_lowercase();
+        if lower.starts_with("kanał:")
+            || lower.starts_with("kanal:")
+            || lower.starts_with("channel:")
+        {
+            if let Some((_, val)) = line.split_once(':') {
+                let trimmed = val.trim();
+                if !trimmed.is_empty() && parsed.channel.is_empty() {
+                    parsed.channel = trimmed.to_string();
+                }
+            }
+            continue;
+        }
+        if lower.starts_with("video page:")
+            || lower.starts_with("video url:")
+            || lower.starts_with("strona wideo:")
+            || lower.starts_with("url:")
+            || lower.starts_with("source:")
+        {
+            if let Some((_, val)) = line.split_once(':') {
+                let trimmed = val.trim();
+                if !trimmed.is_empty() && parsed.source_url.is_empty() {
+                    parsed.source_url = trimmed.to_string();
+                }
+            }
+            continue;
+        }
+        if lower.starts_with("telegram id:")
+            || lower.starts_with("telegram_id:")
+            || lower.starts_with("id telegram:")
+            || lower.starts_with("tg id:")
+            || lower.starts_with("tg_id:")
+            || lower.starts_with("msg id:")
+            || lower.starts_with("message id:")
+        {
+            if let Some((_, val)) = line.split_once(':') {
+                let trimmed = val.trim();
+                let clean_val = trimmed.strip_prefix("telegram:").unwrap_or(trimmed).trim();
+                let clean_lower = clean_val.to_ascii_lowercase();
+                if !clean_val.is_empty()
+                    && !clean_lower.starts_with("http://")
+                    && !clean_lower.starts_with("https://")
+                    && parsed.telegram_id.is_empty()
+                {
+                    parsed.telegram_id = clean_val.to_string();
+                }
+            }
+            continue;
+        }
+        if lower.starts_with("tytuł:") || lower.starts_with("title:") {
+            continue;
+        }
+        if line.eq_ignore_ascii_case(raw_title) || line.eq_ignore_ascii_case(display_title) {
+            continue;
+        }
+        clean_lines.push(raw_line.trim_end());
+    }
+    parsed.clean_overview = clean_lines.join("\n").trim().to_string();
+    parsed
+}
+
+fn rank_similar_items(target: &TvItem, candidates: Vec<TvItem>, limit: usize) -> Vec<TvItem> {
+    let mut scored: Vec<(i32, TvItem)> = candidates
+        .into_iter()
+        .filter(|i| i.id != target.id)
+        .map(|i| {
+            let mut score = 0;
+            for g in &target.genres {
+                if i.genres.iter().any(|ig| ig.eq_ignore_ascii_case(g)) {
+                    score += 3;
+                }
+            }
+            for s in &target.studios {
+                if i.studios.iter().any(|is| is.eq_ignore_ascii_case(s)) {
+                    score += 5;
+                }
+            }
+            for p in &target.people {
+                if i.people
+                    .iter()
+                    .any(|ip| ip.name.eq_ignore_ascii_case(&p.name))
+                {
+                    score += 4;
+                }
+            }
+            (score, i)
+        })
+        .collect();
+    scored.sort_by_key(|a| std::cmp::Reverse(a.0));
+    scored
+        .into_iter()
+        .filter(|(s, _)| *s > 0)
+        .take(limit)
+        .map(|(_, item)| item)
+        .collect()
+}
+
 /// Extracts the Telegram ID from a `TvItem`.
 /// Inspects `provider_video_id` (stripping any `telegram:` prefix),
 /// then `item.id` if it starts with `telegram:`,
@@ -1486,6 +1509,84 @@ mod tests {
     fn test_resolve_item_telegram_id_empty_for_regular_media() {
         let item = TvItem::new("regular-id-888", "Standard Movie");
         assert_eq!(resolve_item_telegram_id(&item, None), None);
+    }
+
+    #[test]
+    fn test_parse_overview_metadata_extracts_fields_and_strips_titles() {
+        let raw = "\
+Kanał: @example_chan
+Strona wideo: https://example.com/watch/42
+ID Telegram: telegram:987654
+Tytuł: Duplicate Title
+Sample Title
+Actual description line 1.
+Actual description line 2.
+";
+        let parsed = parse_overview_metadata(raw, "Sample Title", "Sample Title");
+        assert_eq!(parsed.channel, "@example_chan");
+        assert_eq!(parsed.source_url, "https://example.com/watch/42");
+        assert_eq!(parsed.telegram_id, "987654");
+        assert_eq!(
+            parsed.clean_overview,
+            "Actual description line 1.\nActual description line 2."
+        );
+    }
+
+    #[test]
+    fn test_rank_similar_items_scores_studio_performer_and_genre() {
+        use adult_hub_client::TvPersonRole;
+        let target = TvItem {
+            id: "target".into(),
+            title: "Target".into(),
+            genres: vec!["Action".into()],
+            studios: vec!["StudioA".into()],
+            people: vec![TvPersonRole {
+                id: "p1".into(),
+                name: "Alice".into(),
+                role: None,
+                person_type: None,
+                primary_image_tag: None,
+            }],
+            ..Default::default()
+        };
+        let studio_match = TvItem {
+            id: "s".into(),
+            studios: vec!["studioa".into()],
+            ..Default::default()
+        };
+        let performer_match = TvItem {
+            id: "p".into(),
+            people: vec![TvPersonRole {
+                id: "p1".into(),
+                name: "alice".into(),
+                role: None,
+                person_type: None,
+                primary_image_tag: None,
+            }],
+            ..Default::default()
+        };
+        let genre_match = TvItem {
+            id: "g".into(),
+            genres: vec!["action".into()],
+            ..Default::default()
+        };
+        let unrelated = TvItem {
+            id: "u".into(),
+            ..Default::default()
+        };
+        let ranked = rank_similar_items(
+            &target,
+            vec![
+                target.clone(),
+                unrelated,
+                genre_match,
+                performer_match,
+                studio_match,
+            ],
+            8,
+        );
+        let ids: Vec<&str> = ranked.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["s", "p", "g"]);
     }
 
     #[test]
