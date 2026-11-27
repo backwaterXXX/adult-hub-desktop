@@ -530,6 +530,116 @@ pub fn download_and_verify_package(
     Ok(verified_path)
 }
 
+/// The PowerShell script that swaps the running executable.
+///
+/// The application quits as soon as it has started this helper, so by the time
+/// the script runs the process is normally gone: waiting for it must therefore
+/// poll `Get-Process` instead of `Wait-Process`, which raises when the PID no
+/// longer exists and aborted the whole replacement.
+///
+/// Every step retries, a failed swap rolls back to `.previous`, and each
+/// outcome is appended to `%TEMP%\adult-hub-update.log`.
+#[cfg_attr(not(windows), allow(dead_code))]
+const WINDOWS_UPDATE_SCRIPT: &str = r#"$ErrorActionPreference = 'Stop'
+$log = Join-Path $env:TEMP 'adult-hub-update.log'
+function Log([string]$message) {
+    try { Add-Content -LiteralPath $log -Value ((Get-Date -Format 's') + ' ' + $message) -ErrorAction Stop } catch { }
+}
+function Move-WithRetry([string]$from, [string]$to) {
+    for ($i = 0; $i -lt 40; $i++) {
+        try { Move-Item -LiteralPath $from -Destination $to -Force -ErrorAction Stop; return $true } catch { Start-Sleep -Milliseconds 250 }
+    }
+    return $false
+}
+function Copy-WithRetry([string]$from, [string]$to) {
+    for ($i = 0; $i -lt 40; $i++) {
+        try { Copy-Item -LiteralPath $from -Destination $to -Force -ErrorAction Stop; return $true } catch { Start-Sleep -Milliseconds 250 }
+    }
+    return $false
+}
+function Restore-Previous {
+    if ((Test-Path -LiteralPath $backup) -and -not (Test-Path -LiteralPath $dst)) {
+        if (Move-WithRetry $backup $dst) { Log 'restored the previous executable' } else { Log 'could not restore the previous executable' }
+    }
+    if ($installRuntime -and (Test-Path -LiteralPath $runtimeBackup) -and -not (Test-Path -LiteralPath $runtimeDst)) {
+        if (Move-WithRetry $runtimeBackup $runtimeDst) { Log 'restored the previous runtime library' } else { Log 'could not restore the previous runtime library' }
+    }
+}
+$appPid = __APP_PID__
+$installRuntime = __INSTALL_RUNTIME__
+$src = $env:AH_UPDATE_SRC
+$dst = $env:AH_UPDATE_DST
+$stage = $dst + '.update'
+$backup = $dst + '.previous'
+$runtimeSrc = $env:AH_UPDATE_RUNTIME_SRC
+$runtimeDst = $env:AH_UPDATE_RUNTIME_DST
+$runtimeStage = $runtimeDst + '.update'
+$runtimeBackup = $runtimeDst + '.previous'
+Log ('start; pid=' + $appPid + '; src=' + $src + '; dst=' + $dst)
+for ($i = 0; $i -lt 300; $i++) {
+    if (-not (Get-Process -Id $appPid -ErrorAction SilentlyContinue)) { break }
+    Start-Sleep -Milliseconds 200
+}
+$failure = ''
+try {
+    if (-not (Copy-WithRetry $src $stage)) { throw 'could not stage the downloaded executable' }
+    Log 'staged executable'
+    if ((Test-Path -LiteralPath $dst) -and -not (Move-WithRetry $dst $backup)) { throw 'could not move the running executable aside' }
+    Log 'backed up executable'
+    if ($installRuntime -and (Test-Path -LiteralPath $runtimeSrc)) {
+        if (-not (Copy-WithRetry $runtimeSrc $runtimeStage)) { throw 'could not stage the runtime library' }
+        if ((Test-Path -LiteralPath $runtimeDst) -and -not (Move-WithRetry $runtimeDst $runtimeBackup)) { throw 'could not move the runtime library aside' }
+        Log 'staged runtime library'
+    }
+    if (-not (Move-WithRetry $stage $dst)) { throw 'could not install the new executable' }
+    Log 'installed executable'
+    if ($installRuntime -and (Test-Path -LiteralPath $runtimeStage)) {
+        if (-not (Move-WithRetry $runtimeStage $runtimeDst)) { throw 'could not install the runtime library' }
+        Log 'installed runtime library'
+    }
+} catch {
+    $failure = $_.Exception.Message
+}
+if ($failure -ne '') {
+    Log ('error: ' + $failure)
+    Restore-Previous
+    Remove-Item -LiteralPath $stage -Force -ErrorAction SilentlyContinue
+    if ($installRuntime) { Remove-Item -LiteralPath $runtimeStage -Force -ErrorAction SilentlyContinue }
+    exit 1
+}
+$started = $null
+try { $started = Start-Process -FilePath $dst -WorkingDirectory (Split-Path -Parent $dst) -PassThru -ErrorAction Stop } catch { Log ('restart failed: ' + $_.Exception.Message) }
+if (-not $started) {
+    Log 'the new executable did not start; restoring the previous executable'
+    if (Move-WithRetry $dst $stage) { Restore-Previous }
+    exit 1
+}
+Start-Sleep -Seconds 4
+if ($started.HasExited) {
+    Log ('the new executable exited with code ' + $started.ExitCode + '; restoring the previous executable')
+    if (Move-WithRetry $dst $stage) { Restore-Previous }
+    exit 1
+}
+Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
+if ($installRuntime) { Remove-Item -LiteralPath $runtimeBackup -Force -ErrorAction SilentlyContinue }
+Remove-Item -LiteralPath $src -Force -ErrorAction SilentlyContinue
+if ($installRuntime) { Remove-Item -LiteralPath $runtimeSrc -Force -ErrorAction SilentlyContinue }
+Log 'done'
+exit 0
+"#;
+
+/// Fills in the process id and the runtime flag; paths stay in the environment
+/// so no quote character can end a PowerShell string literal.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn windows_update_script(app_pid: u32, install_runtime: bool) -> String {
+    WINDOWS_UPDATE_SCRIPT
+        .replace("__APP_PID__", &app_pid.to_string())
+        .replace(
+            "__INSTALL_RUNTIME__",
+            if install_runtime { "$true" } else { "$false" },
+        )
+}
+
 /// Launch installation according to platform.
 pub fn launch_installation(
     package_type: &str,
@@ -580,29 +690,8 @@ pub fn launch_installation(
             // never spliced into the script text, so no quote character in a path
             // can end a string literal.
             let runtime_destination = parent.join("libmpv-2.dll");
-            let runtime_install = if runtime_dll_path.is_some() {
-                "$runtimeSrc=$env:AH_UPDATE_RUNTIME_SRC; $runtimeDst=$env:AH_UPDATE_RUNTIME_DST; $runtimeStage=$runtimeDst+'.update'; $runtimeBackup=$runtimeDst+'.previous'; Copy-Item -LiteralPath $runtimeSrc -Destination $runtimeStage -Force; if (Test-Path -LiteralPath $runtimeDst) { Move-Item -LiteralPath $runtimeDst -Destination $runtimeBackup -Force }; Move-Item -LiteralPath $runtimeStage -Destination $runtimeDst -Force;"
-            } else {
-                ""
-            };
-            let runtime_cleanup = if runtime_dll_path.is_some() {
-                "if (Test-Path -LiteralPath $runtimeBackup) { Remove-Item -LiteralPath $runtimeBackup -Force }; Remove-Item -LiteralPath $runtimeSrc -Force;"
-            } else {
-                ""
-            };
-            let runtime_rollback = if runtime_dll_path.is_some() {
-                "if (Test-Path -LiteralPath $runtimeBackup) { Remove-Item -LiteralPath $runtimeDst -Force -ErrorAction SilentlyContinue; Move-Item -LiteralPath $runtimeBackup -Destination $runtimeDst -Force }"
-            } else {
-                ""
-            };
-            let wait_and_replace = format!(
-                "$ErrorActionPreference='Stop'; $appPid={}; $src=$env:AH_UPDATE_SRC; $dst=$env:AH_UPDATE_DST; $stage=$dst+'.update'; $backup=$dst+'.previous'; try {{ Wait-Process -Id $appPid; Copy-Item -LiteralPath $src -Destination $stage -Force; Move-Item -LiteralPath $dst -Destination $backup -Force; try {{ {} Move-Item -LiteralPath $stage -Destination $dst -Force; $updated=Start-Process -FilePath $dst -PassThru; Start-Sleep -Seconds 5; if ($updated.HasExited) {{ throw 'Updated process exited during startup' }}; Remove-Item -LiteralPath $backup -Force; {}; Remove-Item -LiteralPath $src -Force }} catch {{ if (Test-Path -LiteralPath $backup) {{ Remove-Item -LiteralPath $dst -Force -ErrorAction SilentlyContinue; Move-Item -LiteralPath $backup -Destination $dst -Force }}; {}; throw }} }} catch {{ if ((Test-Path -LiteralPath $backup) -and !(Test-Path -LiteralPath $dst)) {{ Move-Item -LiteralPath $backup -Destination $dst -Force }}; {} }}",
-                std::process::id(),
-                runtime_install,
-                runtime_cleanup,
-                runtime_rollback,
-                runtime_rollback
-            );
+            let replace_script =
+                windows_update_script(std::process::id(), runtime_dll_path.is_some());
             let powershell_bin = std::env::var_os("SystemRoot")
                 .map(PathBuf::from)
                 .map(|root| {
@@ -613,14 +702,16 @@ pub fn launch_installation(
                 })
                 .filter(|p| p.is_file())
                 .unwrap_or_else(|| PathBuf::from("powershell.exe"));
-            std::process::Command::new(powershell_bin)
+            let mut command = std::process::Command::new(powershell_bin);
+            command
                 .args([
                     "-NoProfile",
                     "-NonInteractive",
-                    "-WindowStyle",
-                    "Hidden",
+                    "-NoLogo",
+                    "-ExecutionPolicy",
+                    "Bypass",
                     "-Command",
-                    &wait_and_replace,
+                    &replace_script,
                 ])
                 .env("AH_UPDATE_SRC", file_path)
                 .env("AH_UPDATE_DST", &current_exe)
@@ -628,7 +719,12 @@ pub fn launch_installation(
                     "AH_UPDATE_RUNTIME_SRC",
                     runtime_dll_path.unwrap_or(file_path),
                 )
-                .env("AH_UPDATE_RUNTIME_DST", &runtime_destination)
+                .env("AH_UPDATE_RUNTIME_DST", &runtime_destination);
+            // CREATE_NO_WINDOW: a helper that flashes a console window looks
+            // like a crash to the user, and there is nothing to read there.
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x0800_0000);
+            command
                 .spawn()
                 .map_err(|e| UpdateError::Io(format!("failed to schedule EXE replacement: {e}")))?;
             std::process::exit(0);
@@ -971,6 +1067,59 @@ mod tests {
         assert!(verify_file_integrity(&test_file, wrong_hash, content.len() as u64).is_err());
 
         let _ = std::fs::remove_file(&test_file);
+    }
+
+    /// The helper starts after the app has already quit, so waiting on the PID
+    /// must not raise: `Wait-Process` did, which aborted the replacement and
+    /// left the old executable in place.
+    #[test]
+    fn test_windows_update_script_waits_without_a_live_process() {
+        let script = windows_update_script(4242, true);
+        assert!(script.contains("$appPid = 4242"));
+        assert!(
+            !script.contains("Wait-Process"),
+            "Wait-Process raises once the PID is gone, which is the normal case"
+        );
+        assert!(script.contains("Get-Process -Id $appPid -ErrorAction SilentlyContinue"));
+        assert!(script.contains("function Move-WithRetry"));
+        assert!(script.contains("function Copy-WithRetry"));
+        assert!(script.contains("Restore-Previous"));
+        assert!(script.contains("adult-hub-update.log"));
+    }
+
+    #[test]
+    fn test_windows_update_script_stays_parseable_and_flagged() {
+        for install_runtime in [true, false] {
+            let script = windows_update_script(7, install_runtime);
+            assert_eq!(
+                script.matches('{').count(),
+                script.matches('}').count(),
+                "unbalanced braces would make PowerShell reject the whole script"
+            );
+            let flag = if install_runtime { "$true" } else { "$false" };
+            assert!(script.contains(&format!("$installRuntime = {flag}")));
+            assert!(script.contains("$src = $env:AH_UPDATE_SRC"));
+            assert!(script.contains("$dst = $env:AH_UPDATE_DST"));
+            // Paths travel through the environment only; inlining them would let
+            // a quote in a user path break the script.
+            assert!(!script.contains("__APP_PID__"));
+        }
+    }
+
+    #[test]
+    fn test_windows_update_script_restores_the_previous_build_on_failure() {
+        let script = windows_update_script(1, true);
+        // Every failure path must roll back rather than leave the installation
+        // without an executable.
+        assert!(script.contains("Move-WithRetry $backup $dst"));
+        assert!(script.contains("Move-WithRetry $runtimeBackup $runtimeDst"));
+        assert!(script.contains("$started.HasExited"));
+        // The backup is only dropped after the new build is known to run.
+        let cleanup = script
+            .find("Remove-Item -LiteralPath $backup -Force")
+            .unwrap();
+        let liveness = script.find("$started.HasExited").unwrap();
+        assert!(cleanup > liveness);
     }
 
     #[test]
