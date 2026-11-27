@@ -1098,7 +1098,7 @@ pub(crate) fn display_title(item: &TvItem) -> String {
             || (clean.len() == 36 && clean.chars().filter(|&c| c == '-').count() == 4)
     };
 
-    // 1. Poprawny tytuł
+    // 1. Valid explicit title
     if !title.is_empty()
         && title != item.id
         && !is_hash(title)
@@ -1127,7 +1127,7 @@ pub(crate) fn display_title(item: &TvItem) -> String {
         }
     }
 
-    // 1. Czytelna nazwa z metadanych (np. wykonawcy, studio, rok)
+    // 2. Readable title derived from metadata (performers, studio, year)
     if !item.people.is_empty() {
         let performers: Vec<String> = item
             .people

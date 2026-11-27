@@ -1267,7 +1267,7 @@ pub fn current_nav_destination(
             id: ctx
                 .current_playing_item
                 .lock()
-                .unwrap()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .as_ref()
                 .map(|item| item.id.clone())
                 .unwrap_or_else(|| ui.get_detail_id().to_string()),
@@ -1773,18 +1773,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                                 ui.set_home_error_message(msg.clone().into());
                                 ui.set_home_latest_error(msg.into());
                                 if is_unauth {
-                                    ui.set_is_logged_in(false);
-                                    ui.set_login_modal_visible(true);
-                                    ui.set_login_modal_message(
-                                        "Session expired (401 Unauthorized). Please sign in again."
-                                            .into(),
-                                    );
-                                    ui.set_toast_message(
-                                        "Session expired. Please reconnect.".into(),
-                                    );
-                                    ui.set_toast_type("warning".into());
-                                    ui.set_toast_action_text("Sign In".into());
-                                    ui.set_toast_visible(true);
+                                    crate::playback::show_session_expired_prompt(&ui);
                                 }
                             }
                         })
@@ -1870,18 +1859,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                                 ui.set_home_error_message(msg.clone().into());
                                 ui.set_home_latest_error(msg.into());
                                 if is_unauth {
-                                    ui.set_is_logged_in(false);
-                                    ui.set_login_modal_visible(true);
-                                    ui.set_login_modal_message(
-                                        "Session expired (401 Unauthorized). Please sign in again."
-                                            .into(),
-                                    );
-                                    ui.set_toast_message(
-                                        "Session expired. Please reconnect.".into(),
-                                    );
-                                    ui.set_toast_type("warning".into());
-                                    ui.set_toast_action_text("Sign In".into());
-                                    ui.set_toast_visible(true);
+                                    crate::playback::show_session_expired_prompt(&ui);
                                 }
                             }
                         })
@@ -2734,6 +2712,20 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 // Two-stage publish: the first call renders the movie page as
                 // soon as stage A lands; the second re-renders once the slower
                 // performer/studio/tag/channel sources have appended.
+                #[derive(Default)]
+                struct SearchPublishPayload {
+                    items: Vec<TvItem>,
+                    next_start: usize,
+                    totals: SearchTypeTotals,
+                    has_more: bool,
+                    supplemental_total: usize,
+                    search_error_message: String,
+                    is_unauth: bool,
+                    channels_loading: bool,
+                    channel_error: String,
+                    preserve_scroll: bool,
+                }
+
                 let publish = {
                     let weak = weak.clone();
                     let query = query.clone();
@@ -2745,16 +2737,19 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     let recent_queries = recent_queries.clone();
                     let image_server = image_server.clone();
                     let token_for_refresh = token_for_refresh.clone();
-                    move |items: Vec<TvItem>,
-                          next_start: usize,
-                          totals: SearchTypeTotals,
-                          has_more: bool,
-                          supplemental_total: usize,
-                          search_error_message: String,
-                          is_unauth: bool,
-                          channels_loading: bool,
-                          channel_error: String,
-                          preserve_scroll: bool| {
+                    move |payload: SearchPublishPayload| {
+                        let SearchPublishPayload {
+                            items,
+                            next_start,
+                            totals,
+                            has_more,
+                            supplemental_total,
+                            search_error_message,
+                            is_unauth,
+                            channels_loading,
+                            channel_error,
+                            preserve_scroll,
+                        } = payload;
                         let filtered = filter_catalog_items(items, &local_store);
                         let (movie_count, performer_count, studio_count, tag_count, channel_count) =
                             search_result_counts(&filtered);
@@ -2861,34 +2856,18 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                                 );
                             }
                             if is_unauth {
-                                ui.set_is_logged_in(false);
-                                ui.set_login_modal_visible(true);
-                                ui.set_login_modal_message(
-                                    "Session expired (401 Unauthorized). Please sign in again."
-                                        .into(),
-                                );
-                                ui.set_toast_message("Session expired. Please reconnect.".into());
-                                ui.set_toast_type("warning".into());
-                                ui.set_toast_action_text("Sign In".into());
-                                ui.set_toast_visible(true);
+                                crate::playback::show_session_expired_prompt(&ui);
                             }
                         });
                     }
                 };
 
                 let Some(session) = session else {
-                    publish(
-                        Vec::new(),
-                        0,
-                        SearchTypeTotals::default(),
-                        false,
-                        0,
-                        "Sign in to Adult Hub before searching the catalog.".into(),
-                        false,
-                        false,
-                        String::new(),
-                        false,
-                    );
+                    publish(SearchPublishPayload {
+                        search_error_message: "Sign in to Adult Hub before searching the catalog."
+                            .into(),
+                        ..Default::default()
+                    });
                     return;
                 };
 
@@ -2928,18 +2907,12 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                 let client = match AdultHubClient::new(&session.server_url) {
                     Ok(client) => client.with_token(&session.access_token),
                     Err(error) => {
-                        publish(
-                            Vec::new(),
-                            0,
-                            SearchTypeTotals::default(),
-                            false,
-                            0,
-                            format!("Could not initialize Adult Hub client: {error}"),
-                            false,
-                            false,
-                            String::new(),
-                            false,
-                        );
+                        publish(SearchPublishPayload {
+                            search_error_message: format!(
+                                "Could not initialize Adult Hub client: {error}"
+                            ),
+                            ..Default::default()
+                        });
                         return;
                     }
                 };
@@ -2965,18 +2938,11 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                         }
                         .into();
                         if is_unauth {
-                            publish(
-                                Vec::new(),
-                                0,
-                                SearchTypeTotals::default(),
-                                false,
-                                0,
-                                message,
-                                true,
-                                false,
-                                String::new(),
-                                false,
-                            );
+                            publish(SearchPublishPayload {
+                                search_error_message: message,
+                                is_unauth: true,
+                                ..Default::default()
+                            });
                             return;
                         }
                         crate::diagnostics::GLOBAL_LOG
@@ -3011,18 +2977,16 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
 
                 // Publish Stage A immediately: Performers, Studios, Movies, Tags appear simultaneously,
                 // and Channels shows the compact loading spinner at the bottom
-                publish(
-                    stage_a_merged.items.clone(),
-                    movie_page.next_start,
+                publish(SearchPublishPayload {
+                    items: stage_a_merged.items.clone(),
+                    next_start: movie_page.next_start,
                     totals,
-                    movie_page.has_more,
+                    has_more: movie_page.has_more,
                     supplemental_total,
-                    stage_a_error.clone(),
-                    false,
-                    true,
-                    String::new(),
-                    false,
-                );
+                    search_error_message: stage_a_error.clone(),
+                    channels_loading: true,
+                    ..Default::default()
+                });
 
                 // Stage B: Wait for channel videos from Resolver
                 let channel_res =
@@ -3051,32 +3015,29 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                         supplemental_total += channel_added;
                         totals.channel = channel_added;
 
-                        publish(
-                            stage_a_merged.items,
-                            movie_page.next_start,
+                        publish(SearchPublishPayload {
+                            items: stage_a_merged.items,
+                            next_start: movie_page.next_start,
                             totals,
-                            movie_page.has_more,
+                            has_more: movie_page.has_more,
                             supplemental_total,
-                            stage_a_error,
-                            false,
-                            false,
-                            String::new(),
-                            true,
-                        );
+                            search_error_message: stage_a_error,
+                            preserve_scroll: true,
+                            ..Default::default()
+                        });
                     }
                     Err(_) => {
-                        publish(
-                            stage_a_merged.items,
-                            movie_page.next_start,
+                        publish(SearchPublishPayload {
+                            items: stage_a_merged.items,
+                            next_start: movie_page.next_start,
                             totals,
-                            movie_page.has_more,
+                            has_more: movie_page.has_more,
                             supplemental_total,
-                            stage_a_error,
-                            false,
-                            false,
-                            "Failed to load channel videos".into(),
-                            true,
-                        );
+                            search_error_message: stage_a_error,
+                            channel_error: "Failed to load channel videos".into(),
+                            preserve_scroll: true,
+                            ..Default::default()
+                        });
                     }
                 }
             });
@@ -3498,15 +3459,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                             );
                         }
                         if is_unauth {
-                            ui.set_is_logged_in(false);
-                            ui.set_login_modal_visible(true);
-                            ui.set_login_modal_message(
-                                "Session expired (401 Unauthorized). Please sign in again.".into(),
-                            );
-                            ui.set_toast_message("Session expired. Please reconnect.".into());
-                            ui.set_toast_type("warning".into());
-                            ui.set_toast_action_text("Sign In".into());
-                            ui.set_toast_visible(true);
+                            crate::playback::show_session_expired_prompt(&ui);
                         }
                     }
                 })

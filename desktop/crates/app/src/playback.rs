@@ -271,6 +271,16 @@ pub fn stop_active_playback_for_navigation(
     ui.set_status_color(slint::Color::from_rgb_u8(158, 158, 158));
 }
 
+pub(crate) fn show_session_expired_prompt(ui: &MainWindow) {
+    ui.set_is_logged_in(false);
+    ui.set_login_modal_visible(true);
+    ui.set_login_modal_message("Session expired (401 Unauthorized). Please sign in again.".into());
+    ui.set_toast_message("Session expired. Please reconnect.".into());
+    ui.set_toast_type("warning".into());
+    ui.set_toast_action_text("Sign In".into());
+    ui.set_toast_visible(true);
+}
+
 pub fn start_item_playback(
     ui: &MainWindow,
     player: &Player,
@@ -943,16 +953,7 @@ pub fn start_item_playback_with_resume_ctx(
                             ui.set_is_switching_movie(false);
                             show_error(&ui, msg.clone());
                             if is_unauth {
-                                ui.set_is_logged_in(false);
-                                ui.set_login_modal_visible(true);
-                                ui.set_login_modal_message(
-                                    "Session expired (401 Unauthorized). Please sign in again."
-                                        .into(),
-                                );
-                                ui.set_toast_message("Session expired. Please reconnect.".into());
-                                ui.set_toast_type("warning".into());
-                                ui.set_toast_action_text("Sign In".into());
-                                ui.set_toast_visible(true);
+                                show_session_expired_prompt(&ui);
                             } else if not_found {
                                 ui.set_toast_remove_item_id(failed_item_id.into());
                                 ui.set_toast_message(msg.into());

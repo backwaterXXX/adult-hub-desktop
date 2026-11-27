@@ -788,7 +788,7 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
             ui.set_resolver_url_input(trimmed.clone().into());
             ui.set_saved_resolver_url(trimmed.into());
             ui.set_resolver_url_dirty(false);
-            ui.set_status("Zaktualizowano adres serwera wideo".into());
+            ui.set_status("Video server URL updated".into());
             ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
             ui.invoke_test_resolver_connection();
         });
