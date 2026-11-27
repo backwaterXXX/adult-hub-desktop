@@ -1720,53 +1720,63 @@ mod tests {
 
     #[test]
     fn buffer_profile_parameters() {
-        let fast = BufferProfile::FastStart;
-        assert_eq!(fast.id(), "fast_start");
-        assert_eq!(fast.name(), "Fast Start");
-        assert_eq!(fast.demuxer_max_bytes(), "48M");
-        assert_eq!(fast.demuxer_readahead_secs(), "15");
-        assert_eq!(fast.cache_secs(), "15");
-        assert_eq!(fast.cache_pause_wait(), "1.5");
+        let cases = [
+            (
+                BufferProfile::FastStart,
+                "fast_start",
+                "Fast Start",
+                "48M",
+                "15",
+                "15",
+                "1.5",
+            ),
+            (
+                BufferProfile::Standard,
+                "standard",
+                "Standard",
+                "160M",
+                "45",
+                "45",
+                "3.5",
+            ),
+            (
+                BufferProfile::Large,
+                "large",
+                "Large (4K)",
+                "384M",
+                "90",
+                "90",
+                "5.5",
+            ),
+            (
+                BufferProfile::LowMemory,
+                "low_memory",
+                "Low-Memory",
+                "24M",
+                "8",
+                "8",
+                "1.5",
+            ),
+        ];
+        for (profile, id, name, max_bytes, readahead, cache_secs, pause_wait) in cases {
+            assert_eq!(profile.id(), id);
+            assert_eq!(profile.name(), name);
+            assert_eq!(profile.demuxer_max_bytes(), max_bytes);
+            assert_eq!(profile.demuxer_readahead_secs(), readahead);
+            assert_eq!(profile.cache_secs(), cache_secs);
+            assert_eq!(profile.cache_pause_wait(), pause_wait);
+        }
 
-        let std = BufferProfile::Standard;
-        assert_eq!(std.id(), "standard");
-        assert_eq!(std.name(), "Standard");
-        assert_eq!(std.demuxer_max_bytes(), "160M");
-        assert_eq!(std.demuxer_readahead_secs(), "45");
-        assert_eq!(std.cache_secs(), "45");
-        assert_eq!(std.cache_pause_wait(), "3.5");
-
-        let large = BufferProfile::Large;
-        assert_eq!(large.id(), "large");
-        assert_eq!(large.name(), "Large (4K)");
-        assert_eq!(large.demuxer_max_bytes(), "384M");
-        assert_eq!(large.demuxer_readahead_secs(), "90");
-        assert_eq!(large.cache_secs(), "90");
-        assert_eq!(large.cache_pause_wait(), "5.5");
-
-        let low = BufferProfile::LowMemory;
-        assert_eq!(low.id(), "low_memory");
-        assert_eq!(low.name(), "Low-Memory");
-        assert_eq!(low.demuxer_max_bytes(), "24M");
-        assert_eq!(low.demuxer_readahead_secs(), "8");
-        assert_eq!(low.cache_secs(), "8");
-        assert_eq!(low.cache_pause_wait(), "1.5");
-
-        assert_eq!(
-            BufferProfile::from_id("fast_start"),
-            Some(BufferProfile::FastStart)
-        );
-        assert_eq!(
-            BufferProfile::from_id("standard"),
-            Some(BufferProfile::Standard)
-        );
-        assert_eq!(BufferProfile::from_id("large"), Some(BufferProfile::Large));
-        assert_eq!(BufferProfile::from_id("4k"), Some(BufferProfile::Large));
-        assert_eq!(
-            BufferProfile::from_id("low_memory"),
-            Some(BufferProfile::LowMemory)
-        );
-        assert_eq!(BufferProfile::from_id("unknown"), None);
+        for (raw, expected) in [
+            ("fast_start", Some(BufferProfile::FastStart)),
+            ("standard", Some(BufferProfile::Standard)),
+            ("large", Some(BufferProfile::Large)),
+            ("4k", Some(BufferProfile::Large)),
+            ("low_memory", Some(BufferProfile::LowMemory)),
+            ("unknown", None),
+        ] {
+            assert_eq!(BufferProfile::from_id(raw), expected);
+        }
     }
 
     #[test]

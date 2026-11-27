@@ -1367,272 +1367,13 @@ pub fn restore_nav_destination(
 }
 
 pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
-    let player = ctx.player.clone();
     let local_store = ctx.local_store.clone();
     let credential_store = ctx.credential_store.clone();
     let resolver = ctx.resolver.clone();
-    let reporter = ctx.reporter.clone();
-    let session_ctrl = ctx.session_ctrl.clone();
-    let current_item = ctx.current_playing_item.clone();
     let cached_catalog = ctx.cached_catalog.clone();
-    let phash_coord = ctx.phash_coord.clone();
     refresh_recent_searches_for_context(ui, &local_store);
 
-    // 1. Screen switching
-    {
-        let weak = ui.as_weak();
-        let player = player.clone();
-        let local_store = local_store.clone();
-        let reporter = reporter.clone();
-        let session_ctrl = session_ctrl.clone();
-        let current_item = current_item.clone();
-        let ctx_switch = ctx.clone();
-        ui.on_switch_screen(move |screen| {
-            let Some(ui) = weak.upgrade() else { return };
-            let current_screen = ui.get_active_screen();
-            if current_screen != screen {
-                if current_screen == "browse" {
-                    ui.invoke_cache_catalog_view();
-                }
-                ctx_switch.push_nav_destination(current_nav_destination(&ui, &ctx_switch));
-            }
-            if matches!(current_screen.as_str(), "home" | "browse" | "channels") {
-                ui.set_last_content_screen(current_screen);
-            }
-            if ui.get_active_screen() == "player" && screen != "player" {
-                crate::playback::stop_active_playback_for_navigation(
-                    &ui,
-                    player.as_deref(),
-                    &reporter,
-                    &session_ctrl,
-                    &current_item,
-                );
-            }
-            let target_screen = if screen == "player" && !ui.get_has_active_media() {
-                let last = ui.get_last_content_screen();
-                if last.is_empty() || last == "player" {
-                    "home".into()
-                } else {
-                    last
-                }
-            } else {
-                screen
-            };
-
-            let is_channels = target_screen == "channels";
-            let is_home = target_screen == "home";
-            let is_settings = target_screen == "settings";
-            let is_browse = target_screen == "browse";
-            if target_screen == "player" {
-                ui.set_player_controls_visible(true);
-            }
-            ui.set_active_screen(target_screen);
-            refresh_recent_searches_for_context(&ui, &local_store);
-            if is_channels {
-                let current_cat = ui.get_active_channel_category();
-                if !current_cat.is_empty() {
-                    ui.invoke_select_channel_category(current_cat);
-                } else if let Ok(Some(saved)) = local_store.get_selected_channel() {
-                    ui.invoke_select_channel_category(saved.into());
-                } else {
-                    ui.invoke_refresh_channel_categories();
-                }
-            } else if is_home {
-                ui.invoke_refresh_home();
-            } else if is_browse {
-                if !ui.get_is_catalog_search_results() {
-                    ui.invoke_filter_category(ui.get_active_category());
-                }
-            } else if is_settings {
-                ui.invoke_refresh_home_categories();
-            }
-        });
-    }
-
-    // 1b. Navigation Back (History Stack)
-    {
-        let weak = ui.as_weak();
-        let player = player.clone();
-        let reporter = reporter.clone();
-        let session_ctrl = session_ctrl.clone();
-        let current_item = current_item.clone();
-        let ctx_nav = ctx.clone();
-        ui.on_navigate_back(move || {
-            let Some(ui) = weak.upgrade() else { return };
-            if ui.get_active_screen() == "player" {
-                crate::playback::stop_active_playback_for_navigation(
-                    &ui,
-                    player.as_deref(),
-                    &reporter,
-                    &session_ctrl,
-                    &current_item,
-                );
-            }
-            if let Some(dest) = ctx_nav.pop_nav_destination() {
-                restore_nav_destination(&ui, &ctx_nav, dest);
-            } else {
-                let last = ui.get_last_content_screen();
-                let target = if last.is_empty() || last == "player" {
-                    "home".into()
-                } else {
-                    last
-                };
-                ui.invoke_switch_screen(target);
-            }
-        });
-    }
-
-    // 2. Perform Login
-    {
-        let weak = ui.as_weak();
-        let local_store = local_store.clone();
-        let credential_store = credential_store.clone();
-        let reporter = reporter.clone();
-        let phash_coord = phash_coord.clone();
-        ui.on_perform_login(move |server_url, username, password| {
-            let Some(ui) = weak.upgrade() else { return };
-            let server_url = server_url.trim().to_string();
-            let username = username.trim().to_string();
-            let password = password.to_string();
-
-            if server_url.is_empty() {
-                show_error(&ui, "Server address cannot be empty");
-                return;
-            }
-
-            match ServiceUrlPolicy::inspect(&server_url, false) {
-                ServiceUrlValidation::Valid(service_url) => {
-                    if !super::request_cleartext_consent(
-                        &ui,
-                        &local_store,
-                        &service_url.normalized,
-                        "login",
-                    ) {
-                        return;
-                    }
-                    let normalized = service_url.normalized;
-                    let weak = weak.clone();
-                    let credential_store = credential_store.clone();
-                    let reporter = reporter.clone();
-                    let phash_coord = phash_coord.clone();
-                    ui.set_status("Connecting to server...".into());
-                    ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
-                    std::thread::spawn(move || {
-                        match AdultHubClient::new(&normalized)
-                            .and_then(|client| client.login(&username, &password))
-                        {
-                            Ok(auth) => {
-                                let session = Session {
-                                    server_url: normalized.clone(),
-                                    user_id: auth.user.id.clone(),
-                                    username: auth.user.username.clone(),
-                                    access_token: auth.access_token.clone(),
-                                    server_name: "Adult Hub".into(),
-                                    refresh_token: Some(auth.refresh_token.clone()),
-                                };
-                                let session_save = credential_store.save(session.clone());
-                                reporter.set_auth(
-                                    Some(session.server_url.clone()),
-                                    Some(session.access_token.clone()),
-                                );
-                                crate::thumbnails::set_resolver_base_url(&session.server_url);
-                                crate::thumbnails::set_resolver_auth_token(Some(&session.access_token));
-                                phash_coord.update_auth(
-                                    &session.server_url,
-                                    Some(&session.access_token),
-                                );
-                                slint::invoke_from_event_loop(move || {
-                                    let Some(ui) = weak.upgrade() else { return };
-                                    ui.set_is_logged_in(true);
-                                    ui.set_login_modal_visible(false);
-                                    ui.set_login_modal_message("".into());
-                                    ui.set_logged_in_user(session.username.into());
-                                    ui.set_server_url_input(session.server_url.into());
-                                    ui.invoke_filter_category("Latest".into());
-                                    ui.set_active_screen("home".into());
-                                    ui.invoke_refresh_home();
-                                    let warning = session_save.err().map(|_| {
-                                        "Could not save this session securely. You can use it until the app closes, then sign in again.".to_owned()
-                                    });
-                                    if let Some(message) = warning {
-                                        ui.set_status(message.clone().into());
-                                        ui.set_status_color(slint::Color::from_rgb_u8(255, 190, 90));
-                                        ui.set_toast_message(message.into());
-                                        ui.set_toast_type("warning".into());
-                                    } else {
-                                        ui.set_status("Logged in successfully".into());
-                                        ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
-                                        ui.set_toast_message("Connected to Adult Hub successfully!".into());
-                                        ui.set_toast_type("success".into());
-                                    }
-                                    ui.set_toast_action_text("".into());
-                                    ui.set_toast_visible(true);
-                                })
-                                .ok();
-                            }
-                            Err(error) => {
-                                slint::invoke_from_event_loop(move || {
-                                    let Some(ui) = weak.upgrade() else { return };
-                                    show_error(&ui, format!("Login failed: {error}"));
-                                    ui.set_login_modal_message(
-                                        format!("Login failed: {error}").into(),
-                                    );
-                                    ui.set_toast_message(format!("Login failed: {error}").into());
-                                    ui.set_toast_type("error".into());
-                                    ui.set_toast_action_text("".into());
-                                    ui.set_toast_visible(true);
-                                })
-                                .ok();
-                            }
-                        }
-                    });
-                }
-                ServiceUrlValidation::Invalid(err) => {
-                    show_error(&ui, err);
-                }
-            }
-        });
-    }
-
-    // 3. Perform Logout
-    {
-        let weak = ui.as_weak();
-        let local_store = local_store.clone();
-        let credential_store = credential_store.clone();
-        let reporter = reporter.clone();
-        let cached_catalog = cached_catalog.clone();
-        let home_catalog = ctx.home_catalog.clone();
-        let phash_coord = phash_coord.clone();
-        ui.on_perform_logout(move || {
-            let Some(ui) = weak.upgrade() else { return };
-            let _ = local_store.clear_session();
-            let _ = credential_store.clear();
-            reporter.set_auth(None, None);
-            crate::thumbnails::set_resolver_auth_token(None);
-            clear_home_categories_cache();
-            phash_coord.update_auth("", None);
-            home_catalog
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clear();
-            let raw_items = Vec::new();
-            let cards = raw_items.iter().map(tv_item_to_card).collect::<Vec<_>>();
-            *cached_catalog
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = raw_items;
-            ui.set_is_logged_in(false);
-            ui.set_logged_in_user("".into());
-            set_home_shelves(
-                &ui,
-                &[Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()],
-            );
-            set_home_category_options(&ui, &[], &[]);
-            ui.set_home_category_shelves(Rc::new(slint::VecModel::from(Vec::new())).into());
-            set_catalog(&ui, cards);
-            ui.set_status("Logged out".into());
-            ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
-        });
-    }
+    install_navigation_and_auth_handlers(ui, ctx);
 
     // 5. Search Catalog
     let catalog_generation = Arc::new(AtomicU64::new(0));
@@ -1645,478 +1386,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
     >::new()));
     let catalog_filters = Arc::new(Mutex::new(load_catalog_filters(&local_store)));
     let catalog_filter_options = Arc::new(Mutex::new(Vec::<CatalogFilterChoice>::new()));
-    {
-        let weak = ui.as_weak();
-        let credential_store = credential_store.clone();
-        let local_store = local_store.clone();
-        let home_catalog = ctx.home_catalog.clone();
-        let weak_for_toggle = weak.clone();
-        ui.on_toggle_home_random_filter(move || {
-            let Some(ui) = weak_for_toggle.upgrade() else {
-                return;
-            };
-            ui.set_home_random_unwatched_only(!ui.get_home_random_unwatched_only());
-            ui.invoke_refresh_home();
-        });
-        let weak_for_categories = weak.clone();
-        let credential_store_for_categories = credential_store.clone();
-        let local_store_for_categories = local_store.clone();
-        ui.on_refresh_home_categories(move || {
-            let Some(ui) = weak_for_categories.upgrade() else {
-                return;
-            };
-            let Some(session) = credential_store_for_categories.get().ok().flatten() else {
-                set_home_category_options(&ui, &[], &[]);
-                return;
-            };
-            let weak = weak_for_categories.clone();
-            let local_store = local_store_for_categories.clone();
-            std::thread::spawn(move || {
-                let categories = match AdultHubClient::new(&session.server_url)
-                    .map(|client| client.with_token(&session.access_token))
-                {
-                    Ok(client) => cached_home_categories(&client, &session).unwrap_or_default(),
-                    Err(_) => Vec::new(),
-                };
-                let selected = resolve_home_category_ids(&categories, &local_store);
-                slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = weak.upgrade() {
-                        set_home_category_options(&ui, &categories, &selected);
-                    }
-                })
-                .ok();
-            });
-        });
-        {
-            let weak = weak.clone();
-            let local_store = local_store.clone();
-            ui.on_toggle_home_category(move |category_id| {
-                let Some(ui) = weak.upgrade() else { return };
-                let id = category_id.to_string();
-                let mut selected = local_store
-                    .get_home_categories()
-                    .ok()
-                    .flatten()
-                    .unwrap_or_default();
-                if let Some(index) = selected.iter().position(|selected_id| selected_id == &id) {
-                    selected.remove(index);
-                } else {
-                    selected.push(id);
-                }
-                if let Err(error) = local_store.set_home_categories(Some(&selected)) {
-                    ui.set_status(format!("Could not save home categories: {error}").into());
-                    ui.set_status_color(slint::Color::from_rgb_u8(244, 67, 54));
-                    return;
-                }
-                ui.invoke_refresh_home_categories();
-                ui.invoke_refresh_home();
-            });
-        }
-        let catalog_views_for_home = catalog_views.clone();
-        let ctx_home = ctx.clone();
-        ui.on_refresh_home(move || {
-            let Some(ui) = weak.upgrade() else { return };
-            catalog_views_for_home.borrow_mut().clear();
-            let _ = local_store.remove_setting("home_shelves_cache_v1");
-            ui.set_home_is_loading(true);
-            ui.set_home_error_message(String::new().into());
-            ui.set_home_resume_error(String::new().into());
-            ui.set_home_latest_error(String::new().into());
-            ui.set_home_random_error(String::new().into());
-            ui.set_home_performer_error(String::new().into());
-            let random_unwatched_only = ui.get_home_random_unwatched_only();
-            let weak = weak.clone();
-            let credential_store = credential_store.clone();
-            let local_store = local_store.clone();
-            let home_catalog = home_catalog.clone();
-            let ctx_home = ctx_home.clone();
-
-            std::thread::spawn(move || {
-                let Some(session) = credential_store.get().ok().flatten() else {
-                    home_catalog
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .clear();
-                    slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = weak.upgrade() {
-                            ui.set_home_is_loading(false);
-                            ui.set_home_error_message(String::new().into());
-                            ui.set_home_resume_error(String::new().into());
-                            ui.set_home_latest_error(String::new().into());
-                            ui.set_home_random_error(String::new().into());
-                            ui.set_home_performer_error(String::new().into());
-                            set_home_shelves(
-                                &ui,
-                                &[Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()],
-                            );
-                            set_home_category_options(&ui, &[], &[]);
-                            ui.set_home_category_shelves(
-                                Rc::new(slint::VecModel::from(Vec::new())).into(),
-                            );
-                        }
-                    })
-                    .ok();
-                    return;
-                };
-
-                let client_res = adult_hub_client::AdultHubClient::new(&session.server_url)
-                    .map(|c| c.with_token(&session.access_token));
-
-                let client = match client_res {
-                    Ok(c) => c,
-                    Err(err) => {
-                        let is_unauth = err.is_unauthorized();
-                        let msg = format!("Failed to initialize Adult Hub client: {err}");
-                        slint::invoke_from_event_loop(move || {
-                            if let Some(ui) = weak.upgrade() {
-                                ui.set_home_is_loading(false);
-                                ui.set_home_error_message(msg.clone().into());
-                                ui.set_home_latest_error(msg.into());
-                                if is_unauth {
-                                    crate::playback::show_session_expired_prompt(&ui);
-                                }
-                            }
-                        })
-                        .ok();
-                        return;
-                    }
-                };
-
-                // Fetch the independent Home shelves concurrently; a slow
-                // performers or taxonomy request must not delay Recently Added.
-                let (latest_res, random_res, performer_res, categories_result) =
-                    std::thread::scope(|scope| {
-                        let latest_task = scope.spawn(|| {
-                            client.get_catalog_videos(&adult_hub_client::CatalogVideosQuery {
-                                offset: Some(0),
-                                limit: Some(16),
-                                sort: Some("latest"),
-                                ..Default::default()
-                            })
-                        });
-                        let random_task = scope.spawn(|| {
-                            client.get_catalog_videos(&adult_hub_client::CatalogVideosQuery {
-                                offset: Some(0),
-                                limit: Some(50),
-                                sort: Some("latest"),
-                                ..Default::default()
-                            })
-                        });
-                        let performer_task = scope.spawn(|| {
-                            client.get_performers(&adult_hub_client::CatalogPerformersQuery {
-                                offset: Some(0),
-                                limit: Some(100),
-                                q: None,
-                                letter: None,
-                                photo_only: Some(true),
-                                sort: Some("video_count"),
-                                direction: Some("desc"),
-                            })
-                        });
-                        let categories_task =
-                            scope.spawn(|| cached_home_categories(&client, &session));
-                        let task_error = || adult_hub_client::AdultHubError::Api {
-                            status: 0,
-                            message: "home shelf worker panicked".into(),
-                            code: None,
-                        };
-                        (
-                            latest_task.join().unwrap_or_else(|_| Err(task_error())),
-                            random_task.join().unwrap_or_else(|_| Err(task_error())),
-                            performer_task.join().unwrap_or_else(|_| Err(task_error())),
-                            categories_task
-                                .join()
-                                .unwrap_or_else(|_| Err("category worker panicked".into())),
-                        )
-                    });
-
-                let latest_items = match latest_res {
-                    Ok(resp) => resp.items.into_iter().map(TvItem::from).collect::<Vec<_>>(),
-                    Err(err) => {
-                        let is_unauth = err.is_unauthorized();
-                        if is_unauth {
-                            // Access tokens expire routinely; try the refresh
-                            // token before forcing the user back to the login
-                            // screen.
-                            if crate::download::refresh_adult_hub_session_if_current(
-                                &ctx_home,
-                                &session.access_token,
-                            )
-                            .is_ok()
-                            {
-                                let _ = slint::invoke_from_event_loop(move || {
-                                    if let Some(ui) = weak.upgrade() {
-                                        ui.invoke_refresh_home();
-                                    }
-                                });
-                                return;
-                            }
-                        }
-                        let msg = format!("Failed to load latest videos: {err}");
-                        slint::invoke_from_event_loop(move || {
-                            if let Some(ui) = weak.upgrade() {
-                                ui.set_home_is_loading(false);
-                                ui.set_home_error_message(msg.clone().into());
-                                ui.set_home_latest_error(msg.into());
-                                if is_unauth {
-                                    crate::playback::show_session_expired_prompt(&ui);
-                                }
-                            }
-                        })
-                        .ok();
-                        return;
-                    }
-                };
-
-                let (mut random_items, random_error) = match random_res {
-                    Ok(resp) => (
-                        resp.items.into_iter().map(TvItem::from).collect::<Vec<_>>(),
-                        String::new(),
-                    ),
-                    Err(err) => (Vec::new(), format!("Couldn't load Random Picks: {err}")),
-                };
-                if random_unwatched_only {
-                    random_items
-                        .retain(|item| !item.is_played && item.playback_position_ticks == 0);
-                }
-                fastrand::shuffle(&mut random_items);
-                random_items.truncate(4);
-
-                let (mut performers, performer_error) = match performer_res {
-                    Ok(resp) => (
-                        resp.items.into_iter().map(TvItem::from).collect::<Vec<_>>(),
-                        String::new(),
-                    ),
-                    Err(err) => (Vec::new(), format!("Couldn't load Performers: {err}")),
-                };
-                performers.retain(|person| {
-                    person
-                        .primary_image_tag
-                        .as_ref()
-                        .is_some_and(|tag| !tag.trim().is_empty())
-                });
-                fastrand::shuffle(&mut performers);
-                performers.truncate(12);
-
-                let (categories, categories_error) = match categories_result {
-                    Ok(categories) => (categories, String::new()),
-                    Err(err) => (Vec::new(), format!("Couldn't load categories: {err}")),
-                };
-                let selected_categories = resolve_home_category_ids(&categories, &local_store);
-                let mut category_items = Vec::new();
-                let mut category_shelves = Vec::new();
-                // Category shelves are independent; fetch them concurrently so
-                // three slow requests do not add up before Home can render.
-                let selected_shelves = categories
-                    .iter()
-                    .filter(|category| selected_categories.iter().any(|id| id == &category.id))
-                    .collect::<Vec<_>>();
-                let fetched_shelves = std::thread::scope(|scope| {
-                    let client_ref = &client;
-                    let handles = selected_shelves
-                        .iter()
-                        .map(|category| {
-                            scope.spawn(move || {
-                                let result =
-                                    client_ref.get_videos(&adult_hub_client::CatalogVideosQuery {
-                                        offset: Some(0),
-                                        limit: Some(16),
-                                        sort: Some("latest"),
-                                        category: Some(category.title.as_str()),
-                                        ..Default::default()
-                                    });
-                                (category.title.clone(), result)
-                            })
-                        })
-                        .collect::<Vec<_>>();
-                    handles
-                        .into_iter()
-                        .filter_map(|handle| handle.join().ok())
-                        .collect::<Vec<_>>()
-                });
-                for (title, result) in fetched_shelves {
-                    let (items, error) = match result {
-                        Ok(response) => (
-                            response
-                                .items
-                                .into_iter()
-                                .map(TvItem::from)
-                                .collect::<Vec<_>>(),
-                            String::new(),
-                        ),
-                        Err(err) => (Vec::new(), format!("Couldn't load {title}: {err}")),
-                    };
-                    let items = filter_catalog_items(items, &local_store);
-                    category_items.extend(items.iter().cloned());
-                    category_shelves.push((
-                        title,
-                        items.into_iter().take(4).collect::<Vec<_>>(),
-                        error,
-                    ));
-                }
-
-                let mut resume = Vec::new();
-                if let Ok(records) = local_store.get_all_telegram_progress(50) {
-                    for record in records.into_iter().filter(|record| {
-                        !record.is_played
-                            && record.position_ms > 15_000
-                            && (record.duration_ms == 0
-                                || record.position_ms < record.duration_ms * 9 / 10)
-                    }) {
-                        let Some(item_id) = resume_item_id(&record.provider_video_id) else {
-                            continue;
-                        };
-                        resume.push(TvItem {
-                            id: item_id,
-                            title: if record.title.is_empty() {
-                                format!("Telegram {}", record.provider_video_id)
-                            } else {
-                                record.title
-                            },
-                            runtime_ticks: Some((record.duration_ms.saturating_mul(10_000)) as i64),
-                            playback_position_ticks: (record.position_ms.saturating_mul(10_000))
-                                as i64,
-                            played_percentage: (record.duration_ms > 0).then_some(
-                                record.position_ms as f64 / record.duration_ms as f64 * 100.0,
-                            ),
-                            primary_image_tag: record.thumbnail_url,
-                            source_provider: Some("telegram".into()),
-                            ..Default::default()
-                        });
-                    }
-                }
-
-                // Local rows only carry what was recorded during playback, and
-                // rows written before the metadata arrived have an empty title
-                // (the shelf then shows a raw provider reference). The resume id
-                // is canonical now, so borrow the metadata of the catalog entry
-                // it points at whenever that entry is already loaded.
-                let catalog_meta: std::collections::HashMap<&str, &TvItem> = latest_items
-                    .iter()
-                    .chain(random_items.iter())
-                    .chain(performers.iter())
-                    .chain(category_items.iter())
-                    .map(|item| (item.id.as_str(), item))
-                    .collect();
-                for entry in resume.iter_mut() {
-                    if let Some(meta) = catalog_meta.get(entry.id.as_str()) {
-                        entry.title = meta.title.clone();
-                        entry.primary_image_tag = meta.primary_image_tag.clone();
-                        entry.runtime_ticks = entry.runtime_ticks.or(meta.runtime_ticks);
-                        entry.source_provider = meta.source_provider.clone();
-                    }
-                }
-
-                // Older local rows may not have a title at all. Hydrate the
-                // visible resume cards directly by canonical id instead of
-                // showing a raw Telegram reference. Keep the lookup bounded
-                // and parallel so a slow link cannot stall Home.
-                hydrate_missing_titles(&client, &mut resume, 12);
-                resume.retain(|item| !has_unresolved_raw_title(item));
-
-                let mut history = local_store
-                    .get_watch_history(16)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter_map(|json| serde_json::from_str::<TvItem>(&json).ok())
-                    .collect::<Vec<_>>();
-                hydrate_missing_titles(&client, &mut history, 12);
-                history.retain(|item| !has_unresolved_raw_title(item));
-
-                // Try to map legacy hash ids to canonical catalog items. If a
-                // title no longer exists in the catalog, hide the stale shelf
-                // entry instead of letting playback fail with a 404 later.
-                let mut legacy_checks = 0usize;
-                let mut stale_ids = std::collections::HashSet::new();
-                for item in resume.iter_mut().chain(history.iter_mut()) {
-                    if !is_legacy_telegram_hash_id(&item.id) {
-                        continue;
-                    }
-                    if legacy_checks >= 12 {
-                        break;
-                    }
-                    legacy_checks += 1;
-                    let stale_id = item.id.clone();
-                    if crate::playback::remap_stale_catalog_item(&client, item, &local_store)
-                        .is_none()
-                    {
-                        stale_ids.insert(stale_id);
-                    }
-                }
-                resume.retain(|item| !stale_ids.contains(&item.id));
-                history.retain(|item| !stale_ids.contains(&item.id));
-
-                let mut all_home_items = Vec::new();
-                all_home_items.extend(resume.clone());
-                all_home_items.extend(history.clone());
-                all_home_items.extend(latest_items.clone());
-                all_home_items.extend(random_items.clone());
-                all_home_items.extend(performers.clone());
-                all_home_items.extend(category_items);
-
-                *home_catalog
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = all_home_items;
-
-                slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = weak.upgrade() {
-                        let resume_cards = resume.iter().map(tv_item_to_card).collect::<Vec<_>>();
-                        let history_cards = history.iter().map(tv_item_to_card).collect::<Vec<_>>();
-                        let latest_cards =
-                            latest_items.iter().map(tv_item_to_card).collect::<Vec<_>>();
-                        let random_cards =
-                            random_items.iter().map(tv_item_to_card).collect::<Vec<_>>();
-                        let performer_cards =
-                            performers.iter().map(tv_item_to_card).collect::<Vec<_>>();
-                        let category_cards = category_shelves
-                            .iter()
-                            .map(|(name, items, error)| {
-                                (
-                                    name.clone(),
-                                    items
-                                        .iter()
-                                        .map(tv_item_to_card)
-                                        .collect::<Vec<VideoCardData>>(),
-                                    error.clone(),
-                                )
-                            })
-                            .collect::<Vec<_>>();
-
-                        ui.set_home_is_loading(false);
-                        ui.set_home_error_message(categories_error.into());
-                        ui.set_home_resume_error(String::new().into());
-                        ui.set_home_latest_error(String::new().into());
-                        ui.set_home_random_error(random_error.into());
-                        ui.set_home_performer_error(performer_error.into());
-                        set_home_shelves(
-                            &ui,
-                            &[
-                                resume_cards,
-                                history_cards,
-                                latest_cards,
-                                random_cards,
-                                performer_cards,
-                            ],
-                        );
-                        set_home_category_options(&ui, &categories, &selected_categories);
-                        let ui_category_shelves = category_cards
-                            .into_iter()
-                            .map(|(name, items, error)| HomeCategoryShelfData {
-                                name: name.into(),
-                                items: Rc::new(slint::VecModel::from(items)).into(),
-                                error_message: error.into(),
-                            })
-                            .collect::<Vec<_>>();
-                        ui.set_home_category_shelves(
-                            Rc::new(slint::VecModel::from(ui_category_shelves)).into(),
-                        );
-                        crate::catalog::refresh_home_thumbnails_async(ui.as_weak(), None);
-                    }
-                })
-                .ok();
-            });
-        });
-    }
+    install_home_handlers(ui, ctx, &catalog_views);
     {
         let weak = ui.as_weak();
         let filters = catalog_filters.clone();
@@ -3883,6 +3153,755 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     .clone(),
             );
             crate::playback::start_item_playback_with_resume_ctx(&ui, &ctx_play, target_item, None);
+        });
+    }
+}
+
+fn install_navigation_and_auth_handlers(ui: &MainWindow, ctx: &AppContext) {
+    let player = ctx.player.clone();
+    let local_store = ctx.local_store.clone();
+    let credential_store = ctx.credential_store.clone();
+    let reporter = ctx.reporter.clone();
+    let session_ctrl = ctx.session_ctrl.clone();
+    let current_item = ctx.current_playing_item.clone();
+    let cached_catalog = ctx.cached_catalog.clone();
+    let phash_coord = ctx.phash_coord.clone();
+
+    // 1. Screen switching
+    {
+        let weak = ui.as_weak();
+        let player = player.clone();
+        let local_store = local_store.clone();
+        let reporter = reporter.clone();
+        let session_ctrl = session_ctrl.clone();
+        let current_item = current_item.clone();
+        let ctx_switch = ctx.clone();
+        ui.on_switch_screen(move |screen| {
+            let Some(ui) = weak.upgrade() else { return };
+            let current_screen = ui.get_active_screen();
+            if current_screen != screen {
+                if current_screen == "browse" {
+                    ui.invoke_cache_catalog_view();
+                }
+                ctx_switch.push_nav_destination(current_nav_destination(&ui, &ctx_switch));
+            }
+            if matches!(current_screen.as_str(), "home" | "browse" | "channels") {
+                ui.set_last_content_screen(current_screen);
+            }
+            if ui.get_active_screen() == "player" && screen != "player" {
+                crate::playback::stop_active_playback_for_navigation(
+                    &ui,
+                    player.as_deref(),
+                    &reporter,
+                    &session_ctrl,
+                    &current_item,
+                );
+            }
+            let target_screen = if screen == "player" && !ui.get_has_active_media() {
+                let last = ui.get_last_content_screen();
+                if last.is_empty() || last == "player" {
+                    "home".into()
+                } else {
+                    last
+                }
+            } else {
+                screen
+            };
+
+            let is_channels = target_screen == "channels";
+            let is_home = target_screen == "home";
+            let is_settings = target_screen == "settings";
+            let is_browse = target_screen == "browse";
+            if target_screen == "player" {
+                ui.set_player_controls_visible(true);
+            }
+            ui.set_active_screen(target_screen);
+            refresh_recent_searches_for_context(&ui, &local_store);
+            if is_channels {
+                let current_cat = ui.get_active_channel_category();
+                if !current_cat.is_empty() {
+                    ui.invoke_select_channel_category(current_cat);
+                } else if let Ok(Some(saved)) = local_store.get_selected_channel() {
+                    ui.invoke_select_channel_category(saved.into());
+                } else {
+                    ui.invoke_refresh_channel_categories();
+                }
+            } else if is_home {
+                ui.invoke_refresh_home();
+            } else if is_browse {
+                if !ui.get_is_catalog_search_results() {
+                    ui.invoke_filter_category(ui.get_active_category());
+                }
+            } else if is_settings {
+                ui.invoke_refresh_home_categories();
+            }
+        });
+    }
+
+    // 1b. Navigation Back (History Stack)
+    {
+        let weak = ui.as_weak();
+        let player = player.clone();
+        let reporter = reporter.clone();
+        let session_ctrl = session_ctrl.clone();
+        let current_item = current_item.clone();
+        let ctx_nav = ctx.clone();
+        ui.on_navigate_back(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            if ui.get_active_screen() == "player" {
+                crate::playback::stop_active_playback_for_navigation(
+                    &ui,
+                    player.as_deref(),
+                    &reporter,
+                    &session_ctrl,
+                    &current_item,
+                );
+            }
+            if let Some(dest) = ctx_nav.pop_nav_destination() {
+                restore_nav_destination(&ui, &ctx_nav, dest);
+            } else {
+                let last = ui.get_last_content_screen();
+                let target = if last.is_empty() || last == "player" {
+                    "home".into()
+                } else {
+                    last
+                };
+                ui.invoke_switch_screen(target);
+            }
+        });
+    }
+
+    // 2. Perform Login
+    {
+        let weak = ui.as_weak();
+        let local_store = local_store.clone();
+        let credential_store = credential_store.clone();
+        let reporter = reporter.clone();
+        let phash_coord = phash_coord.clone();
+        ui.on_perform_login(move |server_url, username, password| {
+            let Some(ui) = weak.upgrade() else { return };
+            let server_url = server_url.trim().to_string();
+            let username = username.trim().to_string();
+            let password = password.to_string();
+
+            if server_url.is_empty() {
+                show_error(&ui, "Server address cannot be empty");
+                return;
+            }
+
+            match ServiceUrlPolicy::inspect(&server_url, false) {
+                ServiceUrlValidation::Valid(service_url) => {
+                    if !super::request_cleartext_consent(
+                        &ui,
+                        &local_store,
+                        &service_url.normalized,
+                        "login",
+                    ) {
+                        return;
+                    }
+                    let normalized = service_url.normalized;
+                    let weak = weak.clone();
+                    let credential_store = credential_store.clone();
+                    let reporter = reporter.clone();
+                    let phash_coord = phash_coord.clone();
+                    ui.set_status("Connecting to server...".into());
+                    ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
+                    std::thread::spawn(move || {
+                        match AdultHubClient::new(&normalized)
+                            .and_then(|client| client.login(&username, &password))
+                        {
+                            Ok(auth) => {
+                                let session = Session {
+                                    server_url: normalized.clone(),
+                                    user_id: auth.user.id.clone(),
+                                    username: auth.user.username.clone(),
+                                    access_token: auth.access_token.clone(),
+                                    server_name: "Adult Hub".into(),
+                                    refresh_token: Some(auth.refresh_token.clone()),
+                                };
+                                let session_save = credential_store.save(session.clone());
+                                reporter.set_auth(
+                                    Some(session.server_url.clone()),
+                                    Some(session.access_token.clone()),
+                                );
+                                crate::thumbnails::set_resolver_base_url(&session.server_url);
+                                crate::thumbnails::set_resolver_auth_token(Some(&session.access_token));
+                                phash_coord.update_auth(
+                                    &session.server_url,
+                                    Some(&session.access_token),
+                                );
+                                slint::invoke_from_event_loop(move || {
+                                    let Some(ui) = weak.upgrade() else { return };
+                                    ui.set_is_logged_in(true);
+                                    ui.set_login_modal_visible(false);
+                                    ui.set_login_modal_message("".into());
+                                    ui.set_logged_in_user(session.username.into());
+                                    ui.set_server_url_input(session.server_url.into());
+                                    ui.invoke_filter_category("Latest".into());
+                                    ui.set_active_screen("home".into());
+                                    ui.invoke_refresh_home();
+                                    let warning = session_save.err().map(|_| {
+                                        "Could not save this session securely. You can use it until the app closes, then sign in again.".to_owned()
+                                    });
+                                    if let Some(message) = warning {
+                                        ui.set_status(message.clone().into());
+                                        ui.set_status_color(slint::Color::from_rgb_u8(255, 190, 90));
+                                        ui.set_toast_message(message.into());
+                                        ui.set_toast_type("warning".into());
+                                    } else {
+                                        ui.set_status("Logged in successfully".into());
+                                        ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
+                                        ui.set_toast_message("Connected to Adult Hub successfully!".into());
+                                        ui.set_toast_type("success".into());
+                                    }
+                                    ui.set_toast_action_text("".into());
+                                    ui.set_toast_visible(true);
+                                })
+                                .ok();
+                            }
+                            Err(error) => {
+                                slint::invoke_from_event_loop(move || {
+                                    let Some(ui) = weak.upgrade() else { return };
+                                    show_error(&ui, format!("Login failed: {error}"));
+                                    ui.set_login_modal_message(
+                                        format!("Login failed: {error}").into(),
+                                    );
+                                    ui.set_toast_message(format!("Login failed: {error}").into());
+                                    ui.set_toast_type("error".into());
+                                    ui.set_toast_action_text("".into());
+                                    ui.set_toast_visible(true);
+                                })
+                                .ok();
+                            }
+                        }
+                    });
+                }
+                ServiceUrlValidation::Invalid(err) => {
+                    show_error(&ui, err);
+                }
+            }
+        });
+    }
+
+    // 3. Perform Logout
+    {
+        let weak = ui.as_weak();
+        let local_store = local_store.clone();
+        let credential_store = credential_store.clone();
+        let reporter = reporter.clone();
+        let cached_catalog = cached_catalog.clone();
+        let home_catalog = ctx.home_catalog.clone();
+        let phash_coord = phash_coord.clone();
+        ui.on_perform_logout(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let _ = local_store.clear_session();
+            let _ = credential_store.clear();
+            reporter.set_auth(None, None);
+            crate::thumbnails::set_resolver_auth_token(None);
+            clear_home_categories_cache();
+            phash_coord.update_auth("", None);
+            home_catalog
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clear();
+            let raw_items = Vec::new();
+            let cards = raw_items.iter().map(tv_item_to_card).collect::<Vec<_>>();
+            *cached_catalog
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = raw_items;
+            ui.set_is_logged_in(false);
+            ui.set_logged_in_user("".into());
+            set_home_shelves(
+                &ui,
+                &[Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+            );
+            set_home_category_options(&ui, &[], &[]);
+            ui.set_home_category_shelves(Rc::new(slint::VecModel::from(Vec::new())).into());
+            set_catalog(&ui, cards);
+            ui.set_status("Logged out".into());
+            ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
+        });
+    }
+}
+
+fn install_home_handlers(
+    ui: &MainWindow,
+    ctx: &AppContext,
+    catalog_views: &Rc<RefCell<std::collections::HashMap<String, CatalogViewSnapshot>>>,
+) {
+    let local_store = ctx.local_store.clone();
+    let credential_store = ctx.credential_store.clone();
+
+    {
+        let weak = ui.as_weak();
+        let credential_store = credential_store.clone();
+        let local_store = local_store.clone();
+        let home_catalog = ctx.home_catalog.clone();
+        let weak_for_toggle = weak.clone();
+        ui.on_toggle_home_random_filter(move || {
+            let Some(ui) = weak_for_toggle.upgrade() else {
+                return;
+            };
+            ui.set_home_random_unwatched_only(!ui.get_home_random_unwatched_only());
+            ui.invoke_refresh_home();
+        });
+        let weak_for_categories = weak.clone();
+        let credential_store_for_categories = credential_store.clone();
+        let local_store_for_categories = local_store.clone();
+        ui.on_refresh_home_categories(move || {
+            let Some(ui) = weak_for_categories.upgrade() else {
+                return;
+            };
+            let Some(session) = credential_store_for_categories.get().ok().flatten() else {
+                set_home_category_options(&ui, &[], &[]);
+                return;
+            };
+            let weak = weak_for_categories.clone();
+            let local_store = local_store_for_categories.clone();
+            std::thread::spawn(move || {
+                let categories = match AdultHubClient::new(&session.server_url)
+                    .map(|client| client.with_token(&session.access_token))
+                {
+                    Ok(client) => cached_home_categories(&client, &session).unwrap_or_default(),
+                    Err(_) => Vec::new(),
+                };
+                let selected = resolve_home_category_ids(&categories, &local_store);
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        set_home_category_options(&ui, &categories, &selected);
+                    }
+                })
+                .ok();
+            });
+        });
+        {
+            let weak = weak.clone();
+            let local_store = local_store.clone();
+            ui.on_toggle_home_category(move |category_id| {
+                let Some(ui) = weak.upgrade() else { return };
+                let id = category_id.to_string();
+                let mut selected = local_store
+                    .get_home_categories()
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+                if let Some(index) = selected.iter().position(|selected_id| selected_id == &id) {
+                    selected.remove(index);
+                } else {
+                    selected.push(id);
+                }
+                if let Err(error) = local_store.set_home_categories(Some(&selected)) {
+                    ui.set_status(format!("Could not save home categories: {error}").into());
+                    ui.set_status_color(slint::Color::from_rgb_u8(244, 67, 54));
+                    return;
+                }
+                ui.invoke_refresh_home_categories();
+                ui.invoke_refresh_home();
+            });
+        }
+        let catalog_views_for_home = catalog_views.clone();
+        let ctx_home = ctx.clone();
+        ui.on_refresh_home(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            catalog_views_for_home.borrow_mut().clear();
+            let _ = local_store.remove_setting("home_shelves_cache_v1");
+            ui.set_home_is_loading(true);
+            ui.set_home_error_message(String::new().into());
+            ui.set_home_resume_error(String::new().into());
+            ui.set_home_latest_error(String::new().into());
+            ui.set_home_random_error(String::new().into());
+            ui.set_home_performer_error(String::new().into());
+            let random_unwatched_only = ui.get_home_random_unwatched_only();
+            let weak = weak.clone();
+            let credential_store = credential_store.clone();
+            let local_store = local_store.clone();
+            let home_catalog = home_catalog.clone();
+            let ctx_home = ctx_home.clone();
+
+            std::thread::spawn(move || {
+                let Some(session) = credential_store.get().ok().flatten() else {
+                    home_catalog
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clear();
+                    slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak.upgrade() {
+                            ui.set_home_is_loading(false);
+                            ui.set_home_error_message(String::new().into());
+                            ui.set_home_resume_error(String::new().into());
+                            ui.set_home_latest_error(String::new().into());
+                            ui.set_home_random_error(String::new().into());
+                            ui.set_home_performer_error(String::new().into());
+                            set_home_shelves(
+                                &ui,
+                                &[Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+                            );
+                            set_home_category_options(&ui, &[], &[]);
+                            ui.set_home_category_shelves(
+                                Rc::new(slint::VecModel::from(Vec::new())).into(),
+                            );
+                        }
+                    })
+                    .ok();
+                    return;
+                };
+
+                let client_res = adult_hub_client::AdultHubClient::new(&session.server_url)
+                    .map(|c| c.with_token(&session.access_token));
+
+                let client = match client_res {
+                    Ok(c) => c,
+                    Err(err) => {
+                        let is_unauth = err.is_unauthorized();
+                        let msg = format!("Failed to initialize Adult Hub client: {err}");
+                        slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = weak.upgrade() {
+                                ui.set_home_is_loading(false);
+                                ui.set_home_error_message(msg.clone().into());
+                                ui.set_home_latest_error(msg.into());
+                                if is_unauth {
+                                    crate::playback::show_session_expired_prompt(&ui);
+                                }
+                            }
+                        })
+                        .ok();
+                        return;
+                    }
+                };
+
+                // Fetch the independent Home shelves concurrently; a slow
+                // performers or taxonomy request must not delay Recently Added.
+                let (latest_res, random_res, performer_res, categories_result) =
+                    std::thread::scope(|scope| {
+                        let latest_task = scope.spawn(|| {
+                            client.get_catalog_videos(&adult_hub_client::CatalogVideosQuery {
+                                offset: Some(0),
+                                limit: Some(16),
+                                sort: Some("latest"),
+                                ..Default::default()
+                            })
+                        });
+                        let random_task = scope.spawn(|| {
+                            client.get_catalog_videos(&adult_hub_client::CatalogVideosQuery {
+                                offset: Some(0),
+                                limit: Some(50),
+                                sort: Some("latest"),
+                                ..Default::default()
+                            })
+                        });
+                        let performer_task = scope.spawn(|| {
+                            client.get_performers(&adult_hub_client::CatalogPerformersQuery {
+                                offset: Some(0),
+                                limit: Some(100),
+                                q: None,
+                                letter: None,
+                                photo_only: Some(true),
+                                sort: Some("video_count"),
+                                direction: Some("desc"),
+                            })
+                        });
+                        let categories_task =
+                            scope.spawn(|| cached_home_categories(&client, &session));
+                        let task_error = || adult_hub_client::AdultHubError::Api {
+                            status: 0,
+                            message: "home shelf worker panicked".into(),
+                            code: None,
+                        };
+                        (
+                            latest_task.join().unwrap_or_else(|_| Err(task_error())),
+                            random_task.join().unwrap_or_else(|_| Err(task_error())),
+                            performer_task.join().unwrap_or_else(|_| Err(task_error())),
+                            categories_task
+                                .join()
+                                .unwrap_or_else(|_| Err("category worker panicked".into())),
+                        )
+                    });
+
+                let latest_items = match latest_res {
+                    Ok(resp) => resp.items.into_iter().map(TvItem::from).collect::<Vec<_>>(),
+                    Err(err) => {
+                        let is_unauth = err.is_unauthorized();
+                        if is_unauth {
+                            // Access tokens expire routinely; try the refresh
+                            // token before forcing the user back to the login
+                            // screen.
+                            if crate::download::refresh_adult_hub_session_if_current(
+                                &ctx_home,
+                                &session.access_token,
+                            )
+                            .is_ok()
+                            {
+                                let _ = slint::invoke_from_event_loop(move || {
+                                    if let Some(ui) = weak.upgrade() {
+                                        ui.invoke_refresh_home();
+                                    }
+                                });
+                                return;
+                            }
+                        }
+                        let msg = format!("Failed to load latest videos: {err}");
+                        slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = weak.upgrade() {
+                                ui.set_home_is_loading(false);
+                                ui.set_home_error_message(msg.clone().into());
+                                ui.set_home_latest_error(msg.into());
+                                if is_unauth {
+                                    crate::playback::show_session_expired_prompt(&ui);
+                                }
+                            }
+                        })
+                        .ok();
+                        return;
+                    }
+                };
+
+                let (mut random_items, random_error) = match random_res {
+                    Ok(resp) => (
+                        resp.items.into_iter().map(TvItem::from).collect::<Vec<_>>(),
+                        String::new(),
+                    ),
+                    Err(err) => (Vec::new(), format!("Couldn't load Random Picks: {err}")),
+                };
+                if random_unwatched_only {
+                    random_items
+                        .retain(|item| !item.is_played && item.playback_position_ticks == 0);
+                }
+                fastrand::shuffle(&mut random_items);
+                random_items.truncate(4);
+
+                let (mut performers, performer_error) = match performer_res {
+                    Ok(resp) => (
+                        resp.items.into_iter().map(TvItem::from).collect::<Vec<_>>(),
+                        String::new(),
+                    ),
+                    Err(err) => (Vec::new(), format!("Couldn't load Performers: {err}")),
+                };
+                performers.retain(|person| {
+                    person
+                        .primary_image_tag
+                        .as_ref()
+                        .is_some_and(|tag| !tag.trim().is_empty())
+                });
+                fastrand::shuffle(&mut performers);
+                performers.truncate(12);
+
+                let (categories, categories_error) = match categories_result {
+                    Ok(categories) => (categories, String::new()),
+                    Err(err) => (Vec::new(), format!("Couldn't load categories: {err}")),
+                };
+                let selected_categories = resolve_home_category_ids(&categories, &local_store);
+                let mut category_items = Vec::new();
+                let mut category_shelves = Vec::new();
+                // Category shelves are independent; fetch them concurrently so
+                // three slow requests do not add up before Home can render.
+                let selected_shelves = categories
+                    .iter()
+                    .filter(|category| selected_categories.iter().any(|id| id == &category.id))
+                    .collect::<Vec<_>>();
+                let fetched_shelves = std::thread::scope(|scope| {
+                    let client_ref = &client;
+                    let handles = selected_shelves
+                        .iter()
+                        .map(|category| {
+                            scope.spawn(move || {
+                                let result =
+                                    client_ref.get_videos(&adult_hub_client::CatalogVideosQuery {
+                                        offset: Some(0),
+                                        limit: Some(16),
+                                        sort: Some("latest"),
+                                        category: Some(category.title.as_str()),
+                                        ..Default::default()
+                                    });
+                                (category.title.clone(), result)
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    handles
+                        .into_iter()
+                        .filter_map(|handle| handle.join().ok())
+                        .collect::<Vec<_>>()
+                });
+                for (title, result) in fetched_shelves {
+                    let (items, error) = match result {
+                        Ok(response) => (
+                            response
+                                .items
+                                .into_iter()
+                                .map(TvItem::from)
+                                .collect::<Vec<_>>(),
+                            String::new(),
+                        ),
+                        Err(err) => (Vec::new(), format!("Couldn't load {title}: {err}")),
+                    };
+                    let items = filter_catalog_items(items, &local_store);
+                    category_items.extend(items.iter().cloned());
+                    category_shelves.push((
+                        title,
+                        items.into_iter().take(4).collect::<Vec<_>>(),
+                        error,
+                    ));
+                }
+
+                let mut resume = Vec::new();
+                if let Ok(records) = local_store.get_all_telegram_progress(50) {
+                    for record in records.into_iter().filter(|record| {
+                        !record.is_played
+                            && record.position_ms > 15_000
+                            && (record.duration_ms == 0
+                                || record.position_ms < record.duration_ms * 9 / 10)
+                    }) {
+                        let Some(item_id) = resume_item_id(&record.provider_video_id) else {
+                            continue;
+                        };
+                        resume.push(TvItem {
+                            id: item_id,
+                            title: if record.title.is_empty() {
+                                format!("Telegram {}", record.provider_video_id)
+                            } else {
+                                record.title
+                            },
+                            runtime_ticks: Some((record.duration_ms.saturating_mul(10_000)) as i64),
+                            playback_position_ticks: (record.position_ms.saturating_mul(10_000))
+                                as i64,
+                            played_percentage: (record.duration_ms > 0).then_some(
+                                record.position_ms as f64 / record.duration_ms as f64 * 100.0,
+                            ),
+                            primary_image_tag: record.thumbnail_url,
+                            source_provider: Some("telegram".into()),
+                            ..Default::default()
+                        });
+                    }
+                }
+
+                // Local rows only carry what was recorded during playback, and
+                // rows written before the metadata arrived have an empty title
+                // (the shelf then shows a raw provider reference). The resume id
+                // is canonical now, so borrow the metadata of the catalog entry
+                // it points at whenever that entry is already loaded.
+                let catalog_meta: std::collections::HashMap<&str, &TvItem> = latest_items
+                    .iter()
+                    .chain(random_items.iter())
+                    .chain(performers.iter())
+                    .chain(category_items.iter())
+                    .map(|item| (item.id.as_str(), item))
+                    .collect();
+                for entry in resume.iter_mut() {
+                    if let Some(meta) = catalog_meta.get(entry.id.as_str()) {
+                        entry.title = meta.title.clone();
+                        entry.primary_image_tag = meta.primary_image_tag.clone();
+                        entry.runtime_ticks = entry.runtime_ticks.or(meta.runtime_ticks);
+                        entry.source_provider = meta.source_provider.clone();
+                    }
+                }
+
+                // Older local rows may not have a title at all. Hydrate the
+                // visible resume cards directly by canonical id instead of
+                // showing a raw Telegram reference. Keep the lookup bounded
+                // and parallel so a slow link cannot stall Home.
+                hydrate_missing_titles(&client, &mut resume, 12);
+                resume.retain(|item| !has_unresolved_raw_title(item));
+
+                let mut history = local_store
+                    .get_watch_history(16)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|json| serde_json::from_str::<TvItem>(&json).ok())
+                    .collect::<Vec<_>>();
+                hydrate_missing_titles(&client, &mut history, 12);
+                history.retain(|item| !has_unresolved_raw_title(item));
+
+                // Try to map legacy hash ids to canonical catalog items. If a
+                // title no longer exists in the catalog, hide the stale shelf
+                // entry instead of letting playback fail with a 404 later.
+                let mut legacy_checks = 0usize;
+                let mut stale_ids = std::collections::HashSet::new();
+                for item in resume.iter_mut().chain(history.iter_mut()) {
+                    if !is_legacy_telegram_hash_id(&item.id) {
+                        continue;
+                    }
+                    if legacy_checks >= 12 {
+                        break;
+                    }
+                    legacy_checks += 1;
+                    let stale_id = item.id.clone();
+                    if crate::playback::remap_stale_catalog_item(&client, item, &local_store)
+                        .is_none()
+                    {
+                        stale_ids.insert(stale_id);
+                    }
+                }
+                resume.retain(|item| !stale_ids.contains(&item.id));
+                history.retain(|item| !stale_ids.contains(&item.id));
+
+                let mut all_home_items = Vec::new();
+                all_home_items.extend(resume.clone());
+                all_home_items.extend(history.clone());
+                all_home_items.extend(latest_items.clone());
+                all_home_items.extend(random_items.clone());
+                all_home_items.extend(performers.clone());
+                all_home_items.extend(category_items);
+
+                *home_catalog
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = all_home_items;
+
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        let resume_cards = resume.iter().map(tv_item_to_card).collect::<Vec<_>>();
+                        let history_cards = history.iter().map(tv_item_to_card).collect::<Vec<_>>();
+                        let latest_cards =
+                            latest_items.iter().map(tv_item_to_card).collect::<Vec<_>>();
+                        let random_cards =
+                            random_items.iter().map(tv_item_to_card).collect::<Vec<_>>();
+                        let performer_cards =
+                            performers.iter().map(tv_item_to_card).collect::<Vec<_>>();
+                        let category_cards = category_shelves
+                            .iter()
+                            .map(|(name, items, error)| {
+                                (
+                                    name.clone(),
+                                    items
+                                        .iter()
+                                        .map(tv_item_to_card)
+                                        .collect::<Vec<VideoCardData>>(),
+                                    error.clone(),
+                                )
+                            })
+                            .collect::<Vec<_>>();
+
+                        ui.set_home_is_loading(false);
+                        ui.set_home_error_message(categories_error.into());
+                        ui.set_home_resume_error(String::new().into());
+                        ui.set_home_latest_error(String::new().into());
+                        ui.set_home_random_error(random_error.into());
+                        ui.set_home_performer_error(performer_error.into());
+                        set_home_shelves(
+                            &ui,
+                            &[
+                                resume_cards,
+                                history_cards,
+                                latest_cards,
+                                random_cards,
+                                performer_cards,
+                            ],
+                        );
+                        set_home_category_options(&ui, &categories, &selected_categories);
+                        let ui_category_shelves = category_cards
+                            .into_iter()
+                            .map(|(name, items, error)| HomeCategoryShelfData {
+                                name: name.into(),
+                                items: Rc::new(slint::VecModel::from(items)).into(),
+                                error_message: error.into(),
+                            })
+                            .collect::<Vec<_>>();
+                        ui.set_home_category_shelves(
+                            Rc::new(slint::VecModel::from(ui_category_shelves)).into(),
+                        );
+                        crate::catalog::refresh_home_thumbnails_async(ui.as_weak(), None);
+                    }
+                })
+                .ok();
+            });
         });
     }
 }
