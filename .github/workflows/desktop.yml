@@ -119,6 +119,12 @@ jobs:
       - name: Package Linux AppImage
         run: ./scripts/package-appimage.sh
 
+      - name: Smoke-check Linux packages
+        run: |
+          dpkg-deb --info bin/adult-hub-desktop_*.deb
+          dpkg-deb --contents bin/adult-hub-desktop_*.deb | grep -q 'usr/bin/adult-hub-desktop'
+          test -x bin/Adult_Hub_Desktop-x86_64.AppImage
+
       - name: Upload Linux Artifacts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
@@ -190,7 +196,7 @@ jobs:
       - name: Validate Release Version
         run: |
           TAG_VER="${GITHUB_REF#refs/tags/desktop-v}"
-          CARGO_VER=$(grep '^version = ' desktop/Cargo.toml | head -1 | cut -d '"' -f 2)
+          CARGO_VER=$(python3 -c "import tomllib; print(tomllib.load(open('desktop/Cargo.toml', 'rb'))['workspace']['package']['version'])")
           echo "Tag version: ${TAG_VER}, Cargo.toml version: ${CARGO_VER}"
           if [[ "${TAG_VER}" != "${CARGO_VER}" ]]; then
             echo "::error::Tag version '${TAG_VER}' does not match desktop/Cargo.toml version '${CARGO_VER}'"
