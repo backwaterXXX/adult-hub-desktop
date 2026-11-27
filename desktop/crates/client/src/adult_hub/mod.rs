@@ -61,6 +61,15 @@ impl AdultHubError {
     pub fn is_rate_limited(&self) -> bool {
         matches!(self, AdultHubError::RateLimited(_))
     }
+
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            AdultHubError::RateLimited(_) => true,
+            AdultHubError::Api { status, .. } => *status >= 500,
+            AdultHubError::Http(err) => err.is_connect() || err.is_timeout(),
+            _ => false,
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, AdultHubError>;

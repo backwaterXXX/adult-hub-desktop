@@ -2763,3 +2763,51 @@ fn test_part_file_metadata_optional_unknown_expected_bytes() {
         "adulthub:http://127.0.0.1:8090|vid_42|default|/stream"
     ));
 }
+
+#[test]
+fn adult_hub_error_retryability() {
+    assert!(AdultHubError::RateLimited("slow down".into()).is_retryable());
+    assert!(
+        AdultHubError::Api {
+            status: 500,
+            message: "Internal Server Error".into(),
+            code: None,
+        }
+        .is_retryable()
+    );
+    assert!(
+        AdultHubError::Api {
+            status: 502,
+            message: "Bad Gateway".into(),
+            code: None,
+        }
+        .is_retryable()
+    );
+    assert!(
+        AdultHubError::Api {
+            status: 503,
+            message: "Service Unavailable".into(),
+            code: None,
+        }
+        .is_retryable()
+    );
+
+    assert!(
+        !AdultHubError::Api {
+            status: 400,
+            message: "Bad Request".into(),
+            code: None,
+        }
+        .is_retryable()
+    );
+    assert!(
+        !AdultHubError::Unauthorized {
+            status: 401,
+            message: "Unauthorized".into(),
+        }
+        .is_retryable()
+    );
+    assert!(!AdultHubError::NotFound("missing".into()).is_retryable());
+    assert!(!AdultHubError::Conflict("conflict".into()).is_retryable());
+    assert!(!AdultHubError::InvalidUrl("bad".into()).is_retryable());
+}
