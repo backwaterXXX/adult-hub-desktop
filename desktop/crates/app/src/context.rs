@@ -55,6 +55,7 @@ pub struct AppContext {
     pub detail_active_item: Arc<Mutex<Option<TvItem>>>,
     pub pending_resume_position: Arc<Mutex<Option<f64>>>,
     pub cached_catalog: Arc<Mutex<Vec<TvItem>>>,
+    pub similar_catalog: Arc<Mutex<Vec<TvItem>>>,
     pub home_catalog: Arc<Mutex<Vec<TvItem>>>,
     pub performer_catalog: Arc<Mutex<Vec<TvItem>>>,
     pub studio_catalog: Arc<Mutex<Vec<TvItem>>>,
@@ -207,6 +208,15 @@ impl AppContext {
         }
         if let Some(item) = self
             .cached_catalog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .find(|i| i.id == id)
+        {
+            return Some(item.clone());
+        }
+        if let Some(item) = self
+            .similar_catalog
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()

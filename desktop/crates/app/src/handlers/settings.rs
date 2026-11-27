@@ -611,15 +611,20 @@ fn spawn_connection_diagnostics(
 }
 
 pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
+    install_settings_system_handlers(ui, ctx);
+    install_settings_history_handlers(ui, ctx);
+    install_settings_resolver_handlers(ui, ctx);
+    install_settings_playback_handlers(ui, ctx);
+    install_settings_resource_handlers(ui, ctx);
+    install_settings_channel_visibility_handlers(ui, ctx);
+    install_settings_config_handlers(ui, ctx);
+}
+
+/// System information, the shared confirm dialog and the emergency exit.
+fn install_settings_system_handlers(ui: &MainWindow, ctx: &AppContext) {
     let player = ctx.player.clone();
-    let local_store = ctx.local_store.clone();
-    let credential_store = ctx.credential_store.clone();
-    let resolver = ctx.resolver.clone();
-    let phash_coord = ctx.phash_coord.clone();
     let session_ctrl = ctx.session_ctrl.clone();
     let current_item = ctx.current_playing_item.clone();
-    let cached_catalog = ctx.cached_catalog.clone();
-    let autoplay_active = ctx.autoplay_active.clone();
 
     {
         let weak = ui.as_weak();
@@ -677,8 +682,14 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
             std::process::exit(0);
         });
     }
+}
 
-    // 2. Clear Search History
+/// The three "clear history" resets.
+fn install_settings_history_handlers(ui: &MainWindow, ctx: &AppContext) {
+    let local_store = ctx.local_store.clone();
+    let cached_catalog = ctx.cached_catalog.clone();
+
+    // Clear Search History
     {
         let weak = ui.as_weak();
         let local_store = local_store.clone();
@@ -746,8 +757,16 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
             }
         });
     }
+}
 
-    // 4. Save Resolver Base URL
+/// Resolver address, connection diagnostics and the HTTP trust grants.
+fn install_settings_resolver_handlers(ui: &MainWindow, ctx: &AppContext) {
+    let local_store = ctx.local_store.clone();
+    let credential_store = ctx.credential_store.clone();
+    let resolver = ctx.resolver.clone();
+    let phash_coord = ctx.phash_coord.clone();
+
+    // Save Resolver Base URL
     {
         let weak = ui.as_weak();
         let local_store = local_store.clone();
@@ -967,8 +986,13 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
             ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
         });
     }
+}
 
-    // 6. Cycle Seek Step (10s, 15s, 30s)
+/// Seek step, build id and thumbnail-cache limits.
+fn install_settings_playback_handlers(ui: &MainWindow, ctx: &AppContext) {
+    let local_store = ctx.local_store.clone();
+
+    // Cycle Seek Step (10s, 15s, 30s)
     {
         let weak = ui.as_weak();
         let local_store = local_store.clone();
@@ -1074,8 +1098,13 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
             });
         });
     }
+}
 
-    // 8. Toggle Low-RAM Mode
+/// Low-RAM mode, video matching and the excluded-tag list.
+fn install_settings_resource_handlers(ui: &MainWindow, ctx: &AppContext) {
+    let local_store = ctx.local_store.clone();
+
+    // Toggle Low-RAM Mode
     {
         let weak = ui.as_weak();
         let local_store = local_store.clone();
@@ -1165,8 +1194,13 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
             refresh_content_after_filter_change(&ui);
         });
     }
+}
 
-    // 11. Unhide channels
+/// Hidden-channel recovery and the image cache.
+fn install_settings_channel_visibility_handlers(ui: &MainWindow, ctx: &AppContext) {
+    let local_store = ctx.local_store.clone();
+
+    // Unhide channels
     {
         let weak = ui.as_weak();
         let local_store = local_store.clone();
@@ -1236,8 +1270,17 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
             ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
         });
     }
+}
 
-    // 13. Export Configuration
+/// Configuration import/export and the redacted diagnostics bundle.
+fn install_settings_config_handlers(ui: &MainWindow, ctx: &AppContext) {
+    let local_store = ctx.local_store.clone();
+    let credential_store = ctx.credential_store.clone();
+    let phash_coord = ctx.phash_coord.clone();
+    let player = ctx.player.clone();
+    let autoplay_active = ctx.autoplay_active.clone();
+
+    // Export Configuration
     {
         let weak = ui.as_weak();
         let local_store = local_store.clone();

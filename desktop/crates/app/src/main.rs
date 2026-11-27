@@ -282,6 +282,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         detail_active_item: Arc::new(Mutex::new(None)),
         pending_resume_position: Arc::new(Mutex::new(None)),
         cached_catalog: cached_catalog.clone(),
+        similar_catalog: Arc::new(Mutex::new(vec![])),
         home_catalog: home_catalog.clone(),
         performer_catalog: Arc::new(Mutex::new(Vec::new())),
         studio_catalog: Arc::new(Mutex::new(Vec::new())),
@@ -2805,6 +2806,7 @@ mod tests {
             detail_active_item: Arc::new(Mutex::new(Some(detail_item.clone()))),
             pending_resume_position: Arc::new(Mutex::new(None)),
             cached_catalog: Arc::new(Mutex::new(vec![])), // Browse is empty!
+            similar_catalog: Arc::new(Mutex::new(vec![])),
             home_catalog: Arc::new(Mutex::new(vec![home_item.clone()])),
             performer_catalog: Arc::new(Mutex::new(vec![])),
             studio_catalog: Arc::new(Mutex::new(vec![])),

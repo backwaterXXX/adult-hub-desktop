@@ -4,7 +4,8 @@ use crate::catalog::{
     set_channel_catalog, tv_item_to_card,
 };
 use crate::context::AppContext;
-use adult_hub_client::{ResolverError, TvItem};
+use adult_hub_client::{ResolverClient, ResolverError, TvItem};
+use adult_hub_storage::LocalStore;
 use slint::ComponentHandle;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -107,32 +108,74 @@ struct ChannelCacheEntry {
     has_more: bool,
 }
 
-pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
-    let local_store = ctx.local_store.clone();
-    let credential_store = ctx.credential_store.clone();
-    let resolver = ctx.resolver.clone();
-    let cached_catalog = ctx.cached_catalog.clone();
+/// Channel handlers share one offset cursor, one generation counter and one
+/// filtered cache, so they are installed from a single bundle.
+struct ChannelHandlerState {
+    local_store: Arc<LocalStore>,
+    credential_store: Arc<adult_hub_storage::CredentialStore>,
+    resolver: Arc<ResolverClient>,
+    cached_catalog: Arc<Mutex<Vec<TvItem>>>,
+    current_channel_id: Arc<Mutex<String>>,
+    channel_generation: Arc<AtomicU64>,
+    category_ids: Arc<Mutex<HashMap<String, String>>>,
+    channel_offset_id: Arc<Mutex<Option<i64>>>,
+    channel_items_cache: Arc<Mutex<Vec<TvItem>>>,
+    channel_cache_map: Arc<Mutex<HashMap<String, ChannelCacheEntry>>>,
+    channel_sort_mode: Arc<Mutex<u8>>,
+    channel_duration_filter: Arc<Mutex<u8>>,
+    saved_sort_mode: u8,
+}
 
-    let current_channel_id = Arc::new(Mutex::new(String::new()));
-    let channel_generation = Arc::new(AtomicU64::new(0));
-    let category_ids = Arc::new(Mutex::new(HashMap::<String, String>::new()));
-    let channel_offset_id = Arc::new(Mutex::new(None::<i64>));
-    let channel_items_cache = ctx.channel_catalog.clone();
-    let channel_cache_map = Arc::new(Mutex::new(HashMap::<String, ChannelCacheEntry>::new()));
-    let saved_sort_mode = match local_store
-        .get_setting("channel_sort_mode")
-        .ok()
-        .flatten()
-        .as_deref()
-    {
-        Some("longest") => 1,
-        Some("shortest") => 2,
-        _ => 0,
-    };
-    let channel_sort_mode = Arc::new(Mutex::new(saved_sort_mode));
-    let channel_duration_filter = Arc::new(Mutex::new(0u8));
-    ui.set_channel_sort_mode(saved_sort_mode as i32);
+impl ChannelHandlerState {
+    fn new(ctx: &AppContext) -> Self {
+        let saved_sort_mode = match ctx
+            .local_store
+            .get_setting("channel_sort_mode")
+            .ok()
+            .flatten()
+            .as_deref()
+        {
+            Some("longest") => 1,
+            Some("shortest") => 2,
+            _ => 0,
+        };
+        Self {
+            local_store: ctx.local_store.clone(),
+            credential_store: ctx.credential_store.clone(),
+            resolver: ctx.resolver.clone(),
+            cached_catalog: ctx.cached_catalog.clone(),
+            current_channel_id: Arc::new(Mutex::new(String::new())),
+            channel_generation: Arc::new(AtomicU64::new(0)),
+            category_ids: Arc::new(Mutex::new(HashMap::<String, String>::new())),
+            channel_offset_id: Arc::new(Mutex::new(None::<i64>)),
+            channel_items_cache: ctx.channel_catalog.clone(),
+            channel_cache_map: Arc::new(Mutex::new(HashMap::<String, ChannelCacheEntry>::new())),
+            channel_sort_mode: Arc::new(Mutex::new(saved_sort_mode)),
+            channel_duration_filter: Arc::new(Mutex::new(0u8)),
+            saved_sort_mode,
+        }
+    }
+}
+
+pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
+    let state = ChannelHandlerState::new(ctx);
+    ui.set_channel_sort_mode(state.saved_sort_mode as i32);
     ui.set_channel_duration_filter(0);
+
+    install_channel_category_handlers(ui, &state);
+    install_channel_switch_handler(ui, &state);
+    install_channel_sort_handlers(ui, &state);
+    install_channel_browse_handlers(ui, &state);
+    install_channel_search_handler(ui, &state);
+    install_channel_initial_load(ui, &state);
+}
+
+/// Loads the resolver category list for the sidebar.
+fn install_channel_category_handlers(ui: &MainWindow, state: &ChannelHandlerState) {
+    let local_store = state.local_store.clone();
+    let credential_store = state.credential_store.clone();
+    let resolver = state.resolver.clone();
+    let category_ids = state.category_ids.clone();
 
     {
         let weak = ui.as_weak();
@@ -220,6 +263,15 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
             });
         });
     }
+}
+
+/// Hides the open channel and moves to the next one.
+fn install_channel_switch_handler(ui: &MainWindow, state: &ChannelHandlerState) {
+    let local_store = state.local_store.clone();
+    let current_channel_id = state.current_channel_id.clone();
+    let category_ids = state.category_ids.clone();
+    let channel_items_cache = state.channel_items_cache.clone();
+    let channel_cache_map = state.channel_cache_map.clone();
 
     {
         let weak = ui.as_weak();
@@ -282,6 +334,15 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
             ui.set_channel_loading(false);
         });
     }
+}
+
+/// Sort and duration-filter cycling, both persisted for the next launch.
+fn install_channel_sort_handlers(ui: &MainWindow, state: &ChannelHandlerState) {
+    let local_store = state.local_store.clone();
+    let channel_items_cache = state.channel_items_cache.clone();
+    let channel_generation = state.channel_generation.clone();
+    let channel_sort_mode = state.channel_sort_mode.clone();
+    let channel_duration_filter = state.channel_duration_filter.clone();
 
     {
         let weak = ui.as_weak();
@@ -351,8 +412,24 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
             );
         });
     }
+}
 
-    // 1. Select Channel Category
+/// Category selection and paging for the channel grid.
+fn install_channel_browse_handlers(ui: &MainWindow, state: &ChannelHandlerState) {
+    let local_store = state.local_store.clone();
+    let credential_store = state.credential_store.clone();
+    let resolver = state.resolver.clone();
+    let cached_catalog = state.cached_catalog.clone();
+    let channel_items_cache = state.channel_items_cache.clone();
+    let category_ids = state.category_ids.clone();
+    let current_channel_id = state.current_channel_id.clone();
+    let channel_offset_id = state.channel_offset_id.clone();
+    let channel_generation = state.channel_generation.clone();
+    let channel_cache_map = state.channel_cache_map.clone();
+    let channel_sort_mode = state.channel_sort_mode.clone();
+    let channel_duration_filter = state.channel_duration_filter.clone();
+
+    // Select Channel Category
     {
         let weak = ui.as_weak();
         let local_store = local_store.clone();
@@ -960,8 +1037,17 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
             });
         });
     }
+}
 
-    // 3. Search Channel Videos
+/// Local search over the loaded channel grid.
+fn install_channel_search_handler(ui: &MainWindow, state: &ChannelHandlerState) {
+    let local_store = state.local_store.clone();
+    let channel_items_cache = state.channel_items_cache.clone();
+    let channel_generation = state.channel_generation.clone();
+    let channel_sort_mode = state.channel_sort_mode.clone();
+    let channel_duration_filter = state.channel_duration_filter.clone();
+
+    // Search Channel Videos
     {
         let weak = ui.as_weak();
         let channel_items_cache = channel_items_cache.clone();
@@ -1008,8 +1094,22 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
             );
         });
     }
+}
 
-    // 4. Initial Channel Population
+/// First population of the channel grid, run once while the handlers install.
+fn install_channel_initial_load(ui: &MainWindow, state: &ChannelHandlerState) {
+    let local_store = state.local_store.clone();
+    let credential_store = state.credential_store.clone();
+    let resolver = state.resolver.clone();
+    let cached_catalog = state.cached_catalog.clone();
+    let channel_items_cache = state.channel_items_cache.clone();
+    let category_ids = state.category_ids.clone();
+    let channel_offset_id = state.channel_offset_id.clone();
+    let channel_generation = state.channel_generation.clone();
+    let channel_sort_mode = state.channel_sort_mode.clone();
+    let channel_duration_filter = state.channel_duration_filter.clone();
+
+    // Initial Channel Population
     {
         let weak = ui.as_weak();
         let local_store = local_store.clone();

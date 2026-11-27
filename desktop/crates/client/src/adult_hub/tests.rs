@@ -2891,3 +2891,24 @@ fn test_wire_get_retries_transient_503_and_succeeds() {
     handle.join().unwrap();
     assert_eq!(caps.supported_containers, vec!["mp4"]);
 }
+
+#[test]
+fn test_wire_similar_videos_encodes_id_and_uses_token() {
+    let (server_url, handle) = spawn_mock_server(|line, headers, _body| {
+        assert!(line.starts_with(
+            "GET /api/v1/catalog/videos/telegram%3A-100%3A456/similar?limit=8 HTTP/1.1"
+        ));
+        assert!(headers.contains("authorization: Bearer my_active_token"));
+        (
+            200,
+            vec![("Content-Type", "application/json")],
+            r#"{"items":[{"id":"other","title":"Other","duration_seconds":1}]}"#.to_string(),
+        )
+    });
+    let client = AdultHubClient::new(&server_url)
+        .unwrap()
+        .with_token("my_active_token");
+    let response = client.get_similar_videos("telegram:-100:456", 8).unwrap();
+    handle.join().unwrap();
+    assert_eq!(response.items[0].id, "other");
+}

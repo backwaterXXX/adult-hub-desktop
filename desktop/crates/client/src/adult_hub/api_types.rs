@@ -279,6 +279,11 @@ impl From<CatalogVideoItem> for TvItem {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SimilarVideosResponse {
+    pub items: Vec<CatalogVideoItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PaginatedVideosResponse {
     pub items: Vec<CatalogVideoItem>,
     pub total_count: u64,

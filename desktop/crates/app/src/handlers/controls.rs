@@ -277,11 +277,16 @@ fn compute_volume_state(vol: f32, muted: bool) -> (f32, bool) {
 }
 
 pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
+    install_playback_transport_handlers(ui, ctx);
+    install_media_source_handlers(ui, ctx);
+    install_display_handlers(ui, ctx);
+    install_playback_option_handlers(ui, ctx);
+    install_download_handlers(ui, ctx);
+}
+
+/// Play/pause, retry, seeking and volume.
+fn install_playback_transport_handlers(ui: &MainWindow, ctx: &AppContext) {
     let player = ctx.player.clone();
-    let autoplay_active = ctx.autoplay_active.clone();
-    let hwdec_active = ctx.hwdec_active.clone();
-    let current_item = ctx.current_playing_item.clone();
-    let local_store = ctx.local_store.clone();
     let seek_repeat_state = Arc::new(Mutex::new(SeekRepeatState::default()));
     let seek_feedback_generation = Arc::new(AtomicU64::new(0));
 
@@ -454,7 +459,10 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
             }
         });
     }
+}
 
+/// Loading a URL, the sample clip or a local file.
+fn install_media_source_handlers(ui: &MainWindow, ctx: &AppContext) {
     {
         let weak = ui.as_weak();
         let ctx_play = ctx.clone();
@@ -579,6 +587,11 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
             }
         });
     }
+}
+
+/// Aspect ratio, HUD and mute.
+fn install_display_handlers(ui: &MainWindow, ctx: &AppContext) {
+    let player = ctx.player.clone();
 
     {
         let weak = ui.as_weak();
@@ -641,8 +654,16 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
             }
         });
     }
+}
 
-    // Stage 3 Playback Controls
+/// Speed, buffer profile, hardware decoding, autoplay and the queue controls.
+fn install_playback_option_handlers(ui: &MainWindow, ctx: &AppContext) {
+    let player = ctx.player.clone();
+    let autoplay_active = ctx.autoplay_active.clone();
+    let hwdec_active = ctx.hwdec_active.clone();
+    let current_item = ctx.current_playing_item.clone();
+    let local_store = ctx.local_store.clone();
+
     {
         let weak = ui.as_weak();
         let player = player.clone();
@@ -862,8 +883,10 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
             crate::playback::switch_video_quality(&ui, &ctx_quality, variant_id.to_string());
         });
     }
+}
 
-    // Download handlers
+/// Download queue: start, pause, resume, cancel and reveal.
+fn install_download_handlers(ui: &MainWindow, ctx: &AppContext) {
     {
         let ui_weak = ui.as_weak();
         let ctx_dl = ctx.clone();

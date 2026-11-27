@@ -8,15 +8,20 @@ use crate::{MainWindow, VideoCardData};
 use adult_hub_client::TvItem;
 use slint::{ComponentHandle, Model};
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
-    let local_store = ctx.local_store.clone();
-    let credential_store = ctx.credential_store.clone();
-    let session_ctrl = ctx.session_ctrl.clone();
-    let current_item = ctx.current_playing_item.clone();
-    let cached_catalog = ctx.cached_catalog.clone();
-    let home_catalog = ctx.home_catalog.clone();
+    install_detail_link_handlers(ui);
+    install_open_item_detail_handler(ui, ctx);
+    install_detail_close_handler(ui, ctx);
+    install_detail_flag_handlers(ui, ctx);
+    install_detail_playback_handlers(ui, ctx);
+    install_detail_profile_handlers(ui);
+}
 
+/// Opens the raw source URL and copies the record identifiers from the Details
+/// header.
+fn install_detail_link_handlers(ui: &MainWindow) {
     {
         let weak = ui.as_weak();
         ui.on_open_detail_source_url(move |raw_url| {
@@ -78,8 +83,17 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
             }
         });
     }
+}
 
-    // 1. Open Item Detail Modal
+/// Opens the Details screen: fills every field from the record, then refreshes
+/// artwork and recommendations in the background.
+fn install_open_item_detail_handler(ui: &MainWindow, ctx: &AppContext) {
+    let local_store = ctx.local_store.clone();
+    let credential_store = ctx.credential_store.clone();
+    let session_ctrl = ctx.session_ctrl.clone();
+    let cached_catalog = ctx.cached_catalog.clone();
+    let home_catalog = ctx.home_catalog.clone();
+
     {
         let weak = ui.as_weak();
         let cached_catalog = cached_catalog.clone();
@@ -459,9 +473,7 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                 });
             }
 
-            // Stage 7: Similar Items ("More Like This"). The API has no
-            // dedicated similar endpoint, so rank locally across both the
-            // browse cache and the Home catalog.
+            // Load recommendations away from the UI thread, falling back only for older servers.
             let mut all_items = cached_catalog
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -476,79 +488,14 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                     }
                 }
             }
-            let similar_cards: Vec<VideoCardData> = rank_similar_items(&target_item, all_items, 8)
-                .into_iter()
-                .map(|item| {
-                    if let Some(session) = &artwork_session {
-                        tv_item_to_card_for_server(&item, &session.server_url)
-                    } else {
-                        tv_item_to_card(&item)
-                    }
-                })
-                .collect();
-            let initial_sim_image_jobs: Vec<(String, crate::catalog::ThumbnailRequest)> =
-                similar_cards
-                    .iter()
-                    .filter(|card| {
-                        !card.has_thumbnail
-                            || (card.provider == "telegram"
-                                && !card.fallback_thumbnail_url.is_empty())
-                    })
-                    .map(|card| {
-                        (
-                            card.id.to_string(),
-                            crate::catalog::ThumbnailRequest::from(card),
-                        )
-                    })
-                    .collect();
-            let sim_model = Rc::new(slint::VecModel::from(similar_cards));
-            ui.set_detail_similar_items(sim_model.into());
-            ui.set_detail_similar_loading(false);
-
-            if !initial_sim_image_jobs.is_empty() {
-                let weak = weak.clone();
-                let detail_id = target_item.id.clone();
-                let token = artwork_token.clone();
-                std::thread::spawn(move || {
-                    for (card_id, request) in initial_sim_image_jobs {
-                        let Some(thumbnail) =
-                            crate::catalog::fetch_card_thumbnail(&request, token.as_deref())
-                        else {
-                            continue;
-                        };
-                        let weak = weak.clone();
-                        let detail_id = detail_id.clone();
-                        let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(ui) = weak.upgrade()
-                                && ui.get_detail_id() == detail_id.as_str()
-                            {
-                                let image = crate::thumbnails::remember_artwork_image(
-                                    &thumbnail.url,
-                                    crate::thumbnails::CARD_ARTWORK_WIDTH,
-                                    &thumbnail.artwork,
-                                );
-                                let model = ui.get_detail_similar_items();
-                                let mut cards = (0..model.row_count())
-                                    .filter_map(|row| model.row_data(row))
-                                    .collect::<Vec<_>>();
-                                // Attach by stable record id, never by the index
-                                // captured when the batch started.
-                                if let Some(card) =
-                                    cards.iter_mut().find(|card| card.id == card_id.as_str())
-                                {
-                                    card.thumbnail = image;
-                                    card.thumbnail_url = thumbnail.url.into();
-                                    card.has_thumbnail = true;
-                                    card.thumbnail_state = "ready".into();
-                                    ui.set_detail_similar_items(
-                                        Rc::new(slint::VecModel::from(cards)).into(),
-                                    );
-                                }
-                            }
-                        });
-                    }
-                });
-            }
+            spawn_similar_items_fetch(
+                &ui,
+                &target_item,
+                artwork_session.as_ref(),
+                artwork_token.clone(),
+                ctx_detail.similar_catalog.clone(),
+                all_items,
+            );
 
             ui.set_detail_visible(false);
             ui.set_active_screen("video-details".into());
@@ -674,8 +621,10 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
             }
         });
     }
+}
 
-    // 2. Close Item Detail Modal
+/// Closes the Details screen and returns to the screen that opened it.
+fn install_detail_close_handler(ui: &MainWindow, ctx: &AppContext) {
     {
         let weak = ui.as_weak();
         let player = ctx.player.clone();
@@ -701,8 +650,16 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
             }
         });
     }
+}
 
-    // 3. Toggle Detail Favorite
+/// Favorite/played toggles, which update the record and the open screen at once.
+fn install_detail_flag_handlers(ui: &MainWindow, ctx: &AppContext) {
+    let local_store = ctx.local_store.clone();
+    let credential_store = ctx.credential_store.clone();
+    let cached_catalog = ctx.cached_catalog.clone();
+    let home_catalog = ctx.home_catalog.clone();
+    let current_item = ctx.current_playing_item.clone();
+
     {
         let weak = ui.as_weak();
         let cached_catalog = cached_catalog.clone();
@@ -955,8 +912,12 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
             }
         });
     }
+}
 
-    // 5. Play Detail Item (Play from start or resume)
+/// Play/resume from the Details screen and the random-contextual start.
+fn install_detail_playback_handlers(ui: &MainWindow, ctx: &AppContext) {
+    let cached_catalog = ctx.cached_catalog.clone();
+
     {
         let weak = ui.as_weak();
         let ctx_play = ctx.clone();
@@ -1117,8 +1078,11 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
             crate::playback::start_item_playback_ctx(&ui, &ctx_random, target);
         });
     }
+}
 
-    // 6. Select Performer (Direct to Performer Profile Screen)
+/// Profile links from the Details screen.
+fn install_detail_profile_handlers(ui: &MainWindow) {
+    // Select Performer (Direct to Performer Profile Screen)
     {
         let weak = ui.as_weak();
         ui.on_select_performer(move |performer| {
@@ -1135,6 +1099,144 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
             ui.invoke_open_studio_profile(studio);
         });
     }
+}
+
+/// Loads "More like this" off the UI thread. Servers with the `similar_videos`
+/// capability rank the list themselves; older ones fall back to the local
+/// ranking over the browse and Home caches.
+fn spawn_similar_items_fetch(
+    ui: &MainWindow,
+    target_item: &TvItem,
+    session: Option<&adult_hub_storage::Session>,
+    token: Option<String>,
+    similar_catalog: Arc<Mutex<Vec<TvItem>>>,
+    all_items: Vec<TvItem>,
+) {
+    ui.set_detail_similar_items(Rc::new(slint::VecModel::from(Vec::<VideoCardData>::new())).into());
+    ui.set_detail_similar_loading(true);
+    let detail_id = target_item.id.clone();
+    let target_for_similar = target_item.clone();
+    let session_for_similar = session.cloned();
+    let weak_for_similar = ui.as_weak();
+    let catalog_for_similar = similar_catalog;
+    let artwork_token_for_similar = token;
+    std::thread::spawn(move || {
+        let similar_items = match session_for_similar.as_ref() {
+            Some(session) => match adult_hub_client::AdultHubClient::new(&session.server_url) {
+                Ok(client) => {
+                    let client = client.with_token(&session.access_token);
+                    match client.discover_version() {
+                        Ok(version) if !version.has_capability("similar_videos") => {
+                            rank_similar_items(&target_for_similar, all_items, 8)
+                        }
+                        Ok(_) => match client.get_similar_videos(&detail_id, 8) {
+                            Ok(response) => response.items.into_iter().map(TvItem::from).collect(),
+                            Err(error) => {
+                                log::warn!("Similar videos request failed: {error}");
+                                Vec::new()
+                            }
+                        },
+                        Err(error) => {
+                            log::warn!("Server discovery failed: {error}");
+                            Vec::new()
+                        }
+                    }
+                }
+                Err(error) => {
+                    log::warn!("Similar videos client failed: {error}");
+                    Vec::new()
+                }
+            },
+            None => Vec::new(),
+        };
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak_for_similar.upgrade() else {
+                return;
+            };
+            if ui.get_detail_id() != detail_id.as_str() {
+                return;
+            }
+            *catalog_for_similar
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = similar_items.clone();
+            let weak = weak_for_similar;
+            let artwork_session = session_for_similar;
+            let artwork_token = artwork_token_for_similar;
+            let similar_cards: Vec<VideoCardData> = similar_items
+                .into_iter()
+                .map(|item| {
+                    if let Some(session) = &artwork_session {
+                        tv_item_to_card_for_server(&item, &session.server_url)
+                    } else {
+                        tv_item_to_card(&item)
+                    }
+                })
+                .collect();
+            let initial_sim_image_jobs: Vec<(String, crate::catalog::ThumbnailRequest)> =
+                similar_cards
+                    .iter()
+                    .filter(|card| {
+                        !card.has_thumbnail
+                            || (card.provider == "telegram"
+                                && !card.fallback_thumbnail_url.is_empty())
+                    })
+                    .map(|card| {
+                        (
+                            card.id.to_string(),
+                            crate::catalog::ThumbnailRequest::from(card),
+                        )
+                    })
+                    .collect();
+            let sim_model = Rc::new(slint::VecModel::from(similar_cards));
+            ui.set_detail_similar_items(sim_model.into());
+            ui.set_detail_similar_loading(false);
+
+            if !initial_sim_image_jobs.is_empty() {
+                let weak = weak.clone();
+                let detail_id = detail_id.clone();
+                let token = artwork_token.clone();
+                std::thread::spawn(move || {
+                    for (card_id, request) in initial_sim_image_jobs {
+                        let Some(thumbnail) =
+                            crate::catalog::fetch_card_thumbnail(&request, token.as_deref())
+                        else {
+                            continue;
+                        };
+                        let weak = weak.clone();
+                        let detail_id = detail_id.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = weak.upgrade()
+                                && ui.get_detail_id() == detail_id.as_str()
+                            {
+                                let image = crate::thumbnails::remember_artwork_image(
+                                    &thumbnail.url,
+                                    crate::thumbnails::CARD_ARTWORK_WIDTH,
+                                    &thumbnail.artwork,
+                                );
+                                let model = ui.get_detail_similar_items();
+                                let mut cards = (0..model.row_count())
+                                    .filter_map(|row| model.row_data(row))
+                                    .collect::<Vec<_>>();
+                                // Attach by stable record id, never by the index
+                                // captured when the batch started.
+                                if let Some(card) =
+                                    cards.iter_mut().find(|card| card.id == card_id.as_str())
+                                {
+                                    card.thumbnail = image;
+                                    card.thumbnail_url = thumbnail.url.into();
+                                    card.has_thumbnail = true;
+                                    card.thumbnail_state = "ready".into();
+                                    ui.set_detail_similar_items(
+                                        Rc::new(slint::VecModel::from(cards)).into(),
+                                    );
+                                }
+                            }
+                        });
+                    }
+                });
+            }
+        });
+    });
 }
 
 /// Sizes below this are error documents, playlists or `.strm` referral bodies,

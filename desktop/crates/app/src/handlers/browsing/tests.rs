@@ -581,3 +581,194 @@ fn legacy_telegram_hashes_are_distinguished_from_canonical_refs() {
         "864d93c2-630d-5cfc-9022-a20ec78a352e"
     ));
 }
+
+/// The three tabs that answer a search with their own result list.
+const SCOPED_SEARCH_TABS: [&str; 6] = [
+    "Studios",
+    "Categories",
+    "Favorites",
+    "Watch History",
+    "Continue Watching",
+    "Resume",
+];
+
+#[test]
+fn filter_category_scopes_the_query_to_searchable_tabs() {
+    // Performers searches by name, so the performer field wins.
+    assert_eq!(
+        category_query("Performers", false, "dragon", "typed"),
+        "dragon"
+    );
+    // Every scoped list reuses the query the user typed there.
+    for tab in SCOPED_SEARCH_TABS {
+        assert_eq!(category_query(tab, false, "dragon", "typed"), "typed");
+    }
+    // A drilldown inside Latest carries the query; the plain Latest tab cannot.
+    assert_eq!(category_query("Latest", true, "dragon", "typed"), "typed");
+    assert_eq!(category_query("Latest", false, "dragon", "typed"), "");
+    // Random and the remaining sections are never server-filtered.
+    assert_eq!(category_query("Random", false, "dragon", "typed"), "");
+    assert_eq!(category_query("Unknown", true, "dragon", "typed"), "");
+}
+
+#[test]
+fn filter_category_reclick_refreshes_instead_of_restoring_a_snapshot() {
+    // Random reshuffles wherever it is clicked from.
+    assert!(is_category_reclick_refresh(
+        "Random", "home", "Latest", false, ""
+    ));
+    // Clicking the tab already on screen drops its cached view...
+    assert!(is_category_reclick_refresh(
+        "Latest", "browse", "Latest", false, ""
+    ));
+    // ...but a drilldown or an active search must keep the snapshot.
+    assert!(!is_category_reclick_refresh(
+        "Latest", "browse", "Latest", true, ""
+    ));
+    assert!(!is_category_reclick_refresh(
+        "Latest", "browse", "Latest", false, "dragon"
+    ));
+    // Choosing a different tab from another screen saves the outgoing view.
+    assert!(!is_category_reclick_refresh(
+        "Studios", "browse", "Latest", false, ""
+    ));
+    assert!(!is_category_reclick_refresh(
+        "Latest", "settings", "Latest", false, ""
+    ));
+}
+
+#[test]
+fn filter_category_loading_message_names_the_target_tab() {
+    assert_eq!(
+        category_loading_message("Performers"),
+        "Loading performers…"
+    );
+    assert_eq!(category_loading_message("Random"), "Loading random titles…");
+    assert_eq!(category_loading_message("Studios"), "Loading studios…");
+    assert_eq!(
+        category_loading_message("Categories"),
+        "Loading categories…"
+    );
+    assert_eq!(category_loading_message("Favorites"), "Loading favorites…");
+    assert_eq!(
+        category_loading_message("Watch History"),
+        "Loading watch history…"
+    );
+    assert_eq!(
+        category_loading_message("Continue Watching"),
+        category_loading_message("Resume")
+    );
+    assert_eq!(category_loading_message("Latest"), "Loading library…");
+}
+
+fn catalog_item(id: &str, title: &str) -> TvItem {
+    TvItem {
+        id: id.into(),
+        title: title.into(),
+        ..Default::default()
+    }
+}
+
+fn studio_item(id: &str, title: &str) -> TvItem {
+    let mut item = catalog_item(id, title);
+    item.genres = vec!["__adult_hub_studio".into()];
+    item
+}
+
+fn catalog_ids(items: &[TvItem]) -> Vec<&str> {
+    items.iter().map(|item| item.id.as_str()).collect()
+}
+
+#[test]
+fn load_more_catalog_gate_stops_scrolling_after_a_failure() {
+    // A failure banner keeps the scroll-driven prefetch away from the endpoint.
+    assert_eq!(
+        load_more_gate("Could not load more items: timeout", false, false, true),
+        LoadMoreGate::Failed
+    );
+    // Only the banner's Retry gets through, even when the list looked exhausted.
+    assert_eq!(
+        load_more_gate("Could not load more items: timeout", true, false, false),
+        LoadMoreGate::Proceed
+    );
+    // An in-flight page is never requested twice.
+    assert_eq!(
+        load_more_gate("", false, true, true),
+        LoadMoreGate::InFlight
+    );
+    // The final page leaves `has_more` false until a retry forces another try.
+    assert_eq!(
+        load_more_gate("", false, false, false),
+        LoadMoreGate::Exhausted
+    );
+    assert_eq!(
+        load_more_gate("", false, true, false),
+        LoadMoreGate::InFlight
+    );
+    assert_eq!(
+        load_more_gate("", false, false, true),
+        LoadMoreGate::Proceed
+    );
+}
+
+#[test]
+fn load_more_catalog_retry_clears_the_failure_and_marks_the_page_in_flight() {
+    let mut paging = CatalogPageState {
+        category: "Latest".into(),
+        next_start: 50,
+        ..Default::default()
+    };
+    // Page one failed: the handler keeps the loaded cards and stops paging.
+    let mut error = "Could not load more items: connection reset".to_string();
+    paging.has_more = false;
+    assert_eq!(
+        load_more_gate(&error, false, paging.loading_more, paging.has_more),
+        LoadMoreGate::Failed
+    );
+    // Retry clears the banner, so the gate lets one forced request through.
+    error.clear();
+    assert_eq!(
+        load_more_gate(&error, true, paging.loading_more, paging.has_more),
+        LoadMoreGate::Proceed
+    );
+    // The handler then marks the page in flight before it spawns the worker.
+    paging.has_more = true;
+    paging.loading_more = true;
+    assert_eq!(
+        load_more_gate(&error, false, paging.loading_more, paging.has_more),
+        LoadMoreGate::InFlight
+    );
+    assert_eq!(paging.next_start, 50);
+}
+
+#[test]
+fn load_more_catalog_merge_skips_records_already_delivered() {
+    // The server pages by offset, so an item can arrive twice when the catalog
+    // shifts between requests; the grid must not grow duplicates.
+    let mut cached = vec![catalog_item("a", "A"), catalog_item("b", "B")];
+    merge_browse_page(
+        "Latest",
+        &mut cached,
+        vec![catalog_item("b", "B"), catalog_item("c", "C")],
+    );
+    assert_eq!(catalog_ids(&cached), vec!["a", "b", "c"]);
+}
+
+#[test]
+fn load_more_catalog_merge_keeps_one_card_per_studio() {
+    let mut cached = vec![studio_item("first", "Vixen")];
+    merge_browse_page("Studios", &mut cached, vec![studio_item("second", "vixen")]);
+    assert_eq!(
+        cached.len(),
+        1,
+        "the studios grid must not show the same studio twice"
+    );
+    assert!(
+        cached[0].tags.contains(&"alias_id:second".to_string()),
+        "the folded card keeps the merged record reachable"
+    );
+    // The same page is appended record-by-record outside the studios tab.
+    let mut plain = vec![studio_item("first", "Vixen")];
+    merge_browse_page("Latest", &mut plain, vec![studio_item("second", "vixen")]);
+    assert_eq!(catalog_ids(&plain), vec!["first", "second"]);
+}

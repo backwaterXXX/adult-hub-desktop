@@ -727,6 +727,19 @@ impl AdultHubClient {
         self.get_catalog_videos(query)
     }
 
+    /// Returns server-ranked recommendations for a catalog video.
+    pub fn get_similar_videos(
+        &self,
+        video_id: &str,
+        limit: usize,
+    ) -> Result<SimilarVideosResponse> {
+        let endpoint = format!("/api/v1/catalog/videos/{}/similar", urlencoding(video_id));
+        let mut url = self.build_url(&endpoint)?;
+        url.query_pairs_mut()
+            .append_pair("limit", &limit.to_string());
+        self.get_json_with_retry(url, true)
+    }
+
     /// Queries `GET /api/v1/catalog/videos/{video_id}` for video detail.
     pub fn get_catalog_video_detail(&self, video_id: &str) -> Result<CatalogVideoItem> {
         let clean_id = video_id.trim();
