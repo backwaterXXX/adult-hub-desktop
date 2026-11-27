@@ -604,7 +604,7 @@ impl Player {
         let mut request = self
             .last_load
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
             .ok_or_else(|| PlayerError::InvalidArgument("no media source to retry".into()))?;
         request.start_position = Some(position_seconds.max(0.0));

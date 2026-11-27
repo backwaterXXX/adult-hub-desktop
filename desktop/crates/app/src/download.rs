@@ -676,9 +676,7 @@ pub fn format_download_bytes(bytes: u64, total: u64) -> String {
 pub fn open_file(path: &Path) {
     #[cfg(target_os = "windows")]
     {
-        let _ = std::process::Command::new("cmd")
-            .args(["/C", "start", "", &path.to_string_lossy()])
-            .spawn();
+        let _ = std::process::Command::new("explorer").arg(path).spawn();
     }
     #[cfg(target_os = "linux")]
     {

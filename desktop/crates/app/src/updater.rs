@@ -261,16 +261,26 @@ pub fn parse_and_verify_manifest(
 
 /// Determine whether `candidate` is strictly newer than `current`.
 pub fn is_newer_version(candidate: &str, current: &str) -> bool {
-    let parse_ver = |v: &str| -> Vec<u64> {
-        let clean = v.trim().trim_start_matches(['v', 'V']);
-        clean
-            .split(['.', '-', '+'])
+    fn split_semver(v: &str) -> (Vec<u64>, Option<&str>) {
+        let without_build = v
+            .trim()
+            .trim_start_matches(['v', 'V'])
+            .split('+')
+            .next()
+            .unwrap_or("");
+        let (core, pre) = match without_build.split_once('-') {
+            Some((c, p)) if !p.is_empty() => (c, Some(p)),
+            _ => (without_build, None),
+        };
+        let nums = core
+            .split('.')
             .filter_map(|part| part.parse::<u64>().ok())
-            .collect()
-    };
+            .collect();
+        (nums, pre)
+    }
 
-    let cand_parts = parse_ver(candidate);
-    let curr_parts = parse_ver(current);
+    let (cand_parts, cand_pre) = split_semver(candidate);
+    let (curr_parts, curr_pre) = split_semver(current);
 
     let max_len = cand_parts.len().max(curr_parts.len());
     for i in 0..max_len {
@@ -283,7 +293,32 @@ pub fn is_newer_version(candidate: &str, current: &str) -> bool {
         }
     }
 
-    false
+    match (cand_pre, curr_pre) {
+        (None, Some(_)) => true,
+        (Some(_), None) | (None, None) => false,
+        (Some(c_pre), Some(cur_pre)) => {
+            let mut c_iter = c_pre.split('.');
+            let mut cur_iter = cur_pre.split('.');
+            loop {
+                match (c_iter.next(), cur_iter.next()) {
+                    (Some(a), Some(b)) => {
+                        let ord = match (a.parse::<u64>(), b.parse::<u64>()) {
+                            (Ok(na), Ok(nb)) => na.cmp(&nb),
+                            (Ok(_), Err(_)) => std::cmp::Ordering::Less,
+                            (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
+                            (Err(_), Err(_)) => a.cmp(b),
+                        };
+                        if ord != std::cmp::Ordering::Equal {
+                            return ord == std::cmp::Ordering::Greater;
+                        }
+                    }
+                    (Some(_), None) => return true,
+                    (None, Some(_)) => return false,
+                    (None, None) => return false,
+                }
+            }
+        }
+    }
 }
 
 /// Select best package for current platform and environment.
@@ -663,6 +698,9 @@ mod tests {
         assert!(!is_newer_version("0.1.0", "0.1.0"));
         assert!(!is_newer_version("0.0.9", "0.1.0"));
         assert!(!is_newer_version("v0.1.0", "0.1.0"));
+        assert!(is_newer_version("1.0.0", "1.0.0-beta"));
+        assert!(!is_newer_version("1.0.0-beta", "1.0.0"));
+        assert!(is_newer_version("1.0.0-rc.2", "1.0.0-beta.1"));
     }
 
     #[test]
