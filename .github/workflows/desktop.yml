@@ -16,7 +16,7 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   lint-and-test:
@@ -110,7 +110,7 @@ jobs:
 
       - name: Build Linux release binary
         run: |
-          cargo build --manifest-path desktop/Cargo.toml --release
+          cargo build --locked --manifest-path desktop/Cargo.toml --release
           mkdir -p bin
           cp desktop/target/release/adult-hub-desktop bin/
           chmod +x bin/adult-hub-desktop

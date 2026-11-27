@@ -14,7 +14,7 @@ EXE_PATH="${ROOT_DIR}/desktop/target/${TARGET}/release/adult-hub-desktop.exe"
 # 1. Automatically increment patch version once per application build
 # Clean up re-entrancy marker on exit so future runs in the same shell still bump
 trap 'unset ADULT_HUB_VERSION_BUMPED 2>/dev/null || true' EXIT
-if [[ "${SKIP_VERSION_BUMP:-0}" != "1" && "${ADULT_HUB_VERSION_BUMPED:-0}" != "1" && "${GITHUB_ACTIONS:-false}" != "true" && ("${CI:-false}" != "true" || "${AH_DIRECT_BUILD:-0}" == "1") ]]; then
+if [[ "${SKIP_VERSION_BUMP:-0}" != "1" && "${ADULT_HUB_VERSION_BUMPED:-0}" != "1" && "${CI:-false}" != "true" && "${GITHUB_ACTIONS:-false}" != "true" ]]; then
     "${ROOT_DIR}/scripts/bump-version.sh"
     export ADULT_HUB_VERSION_BUMPED=1
 fi
@@ -61,18 +61,18 @@ if [[ "${AH_DIRECT_BUILD:-0}" == "1" ]]; then
     RUSTC_BIN="$(rustup which rustc)"
     CFLAGS_x86_64_pc_windows_gnu="${CFLAGS_x86_64_pc_windows_gnu:--O2}" \
     RUSTC="${RUSTC_BIN}" \
-    "${CARGO_BIN}" build --manifest-path desktop/Cargo.toml --target "${TARGET}" --release
+    "${CARGO_BIN}" build --locked --manifest-path desktop/Cargo.toml --target "${TARGET}" --release
     echo "==> Stripping debug symbols..."
     if command -v x86_64-w64-mingw32-strip >/dev/null 2>&1; then
         x86_64-w64-mingw32-strip "${EXE_PATH}"
     fi
 elif command -v docker >/dev/null 2>&1 && docker image inspect "${AH_DEV_IMAGE:-adult-hub-desktop-dev:rust-1.99.1}" >/dev/null 2>&1; then
-    "${ROOT_DIR}/dev/run.sh" cargo build --manifest-path desktop/Cargo.toml --target "${TARGET}" --release
+    "${ROOT_DIR}/dev/run.sh" cargo build --locked --manifest-path desktop/Cargo.toml --target "${TARGET}" --release
     echo "==> Stripping debug symbols..."
     "${ROOT_DIR}/dev/run.sh" x86_64-w64-mingw32-strip "desktop/target/${TARGET}/release/adult-hub-desktop.exe"
 else
     CFLAGS_x86_64_pc_windows_gnu="${CFLAGS_x86_64_pc_windows_gnu:--O2}" \
-    cargo build --manifest-path desktop/Cargo.toml --target "${TARGET}" --release
+    cargo build --locked --manifest-path desktop/Cargo.toml --target "${TARGET}" --release
     echo "==> Stripping debug symbols..."
     if command -v x86_64-w64-mingw32-strip >/dev/null 2>&1; then
         x86_64-w64-mingw32-strip "${EXE_PATH}"
