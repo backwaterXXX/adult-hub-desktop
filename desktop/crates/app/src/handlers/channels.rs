@@ -308,27 +308,16 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
                     _ => "latest",
                 },
             );
-            let request_id = channel_generation.fetch_add(1, Ordering::SeqCst) + 1;
-            ui.set_channel_loading(false);
-            let items = filter_sort_channel_items(
-                channel_items_cache
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone(),
-                ui.get_channel_search_query().as_str(),
-                *channel_duration_filter
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            let dur_filter = *channel_duration_filter
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            apply_channel_filter_and_refresh(
+                &ui,
+                &weak,
+                &channel_items_cache,
+                &channel_generation,
+                dur_filter,
                 next,
-            );
-            let cards = items.iter().map(tv_item_to_card).collect::<Vec<_>>();
-            set_channel_catalog(&ui, cards.clone());
-            refresh_channel_thumbnails_async(
-                weak.clone(),
-                cards,
-                channel_items_cache.clone(),
-                channel_generation.clone(),
-                request_id,
             );
         });
     }
@@ -349,27 +338,16 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
                 *filter
             };
             ui.set_channel_duration_filter(next as i32);
-            let request_id = channel_generation.fetch_add(1, Ordering::SeqCst) + 1;
-            ui.set_channel_loading(false);
-            let items = filter_sort_channel_items(
-                channel_items_cache
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone(),
-                ui.get_channel_search_query().as_str(),
+            let sort_mode = *channel_sort_mode
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            apply_channel_filter_and_refresh(
+                &ui,
+                &weak,
+                &channel_items_cache,
+                &channel_generation,
                 next,
-                *channel_sort_mode
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner),
-            );
-            let cards = items.iter().map(tv_item_to_card).collect::<Vec<_>>();
-            set_channel_catalog(&ui, cards.clone());
-            refresh_channel_thumbnails_async(
-                weak.clone(),
-                cards,
-                channel_items_cache.clone(),
-                channel_generation.clone(),
-                request_id,
+                sort_mode,
             );
         });
     }
@@ -1180,6 +1158,36 @@ pub fn install_stage8_handlers(ui: &MainWindow, ctx: &AppContext) {
             .ok();
         });
     }
+}
+
+fn apply_channel_filter_and_refresh(
+    ui: &MainWindow,
+    weak: &slint::Weak<MainWindow>,
+    channel_items_cache: &Arc<Mutex<Vec<TvItem>>>,
+    channel_generation: &Arc<AtomicU64>,
+    duration_filter: u8,
+    sort_mode: u8,
+) {
+    let request_id = channel_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    ui.set_channel_loading(false);
+    let items = filter_sort_channel_items(
+        channel_items_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone(),
+        ui.get_channel_search_query().as_str(),
+        duration_filter,
+        sort_mode,
+    );
+    let cards = items.iter().map(tv_item_to_card).collect::<Vec<_>>();
+    set_channel_catalog(ui, cards.clone());
+    refresh_channel_thumbnails_async(
+        weak.clone(),
+        cards,
+        channel_items_cache.clone(),
+        channel_generation.clone(),
+        request_id,
+    );
 }
 
 #[cfg(test)]

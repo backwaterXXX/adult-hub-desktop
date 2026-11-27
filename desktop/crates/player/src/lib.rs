@@ -1323,6 +1323,9 @@ impl RenderContext {
             (resolver.function)(unsafe { CStr::from_ptr(name) }).cast_mut()
         }
 
+        // SAFETY: Slint's RenderingSetup provides a borrowed `get_proc_address`
+        // valid for the duration of setup; libmpv's OpenGL backend resolves all
+        // GL symbols synchronously inside `mpv_render_context_create`.
         let mut resolver = Resolver {
             function: get_proc_address,
         };

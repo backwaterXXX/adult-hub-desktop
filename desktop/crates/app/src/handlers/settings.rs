@@ -974,16 +974,13 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
         let local_store = local_store.clone();
         ui.on_cycle_seek_step(move || {
             let Some(ui) = weak.upgrade() else { return };
-            let current = ui.get_seek_step_sec();
-            let next = match current {
+            let next = match ui.get_seek_step_sec() {
                 5 => 10,
                 10 => 15,
                 15 => 30,
                 _ => 5,
             };
-            let _ = local_store.set_setting("seek_step_sec", &next.to_string());
-            ui.set_seek_step_sec(next);
-            ui.set_seek_step_label(format!("Step: {next}s").into());
+            apply_seek_step(&ui, &local_store, next);
         });
     }
 
@@ -993,10 +990,7 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
         let local_store = local_store.clone();
         ui.on_select_seek_step(move |step| {
             let Some(ui) = weak.upgrade() else { return };
-            let step = step.clamp(5, 60);
-            let _ = local_store.set_setting("seek_step_sec", &step.to_string());
-            ui.set_seek_step_sec(step);
-            ui.set_seek_step_label(format!("Step: {step}s").into());
+            apply_seek_step(&ui, &local_store, step.clamp(5, 60));
         });
     }
 
@@ -1041,23 +1035,7 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
                 20480 => 0,
                 _ => 1024,
             };
-            let _ = local_store.set_setting("cache_limit_mb", &next.to_string());
-            crate::thumbnails::set_cache_limit_mb_async(next as usize);
-            let limit_str = crate::thumbnails::format_cache_limit(next);
-            ui.set_cache_limit_label(format!("Cache Limit: {limit_str}").into());
-            ui.set_cache_limit_mb(next);
-            let ui_weak = ui.as_weak();
-            std::thread::spawn(move || {
-                let used_bytes = crate::thumbnails::current_cache_size_bytes();
-                let used_str = crate::thumbnails::format_cache_bytes(used_bytes);
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = ui_weak.upgrade() {
-                        ui.set_cache_usage_text(
-                            format!("Used: {used_str} / Limit: {limit_str}").into(),
-                        );
-                    }
-                });
-            });
+            apply_cache_limit(&ui, &local_store, next);
         });
     }
 
@@ -1066,24 +1044,7 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
         let local_store = local_store.clone();
         ui.on_set_cache_limit_mb(move |mb| {
             let Some(ui) = weak.upgrade() else { return };
-            let mb = mb.max(0);
-            let _ = local_store.set_setting("cache_limit_mb", &mb.to_string());
-            crate::thumbnails::set_cache_limit_mb_async(mb as usize);
-            let limit_str = crate::thumbnails::format_cache_limit(mb);
-            ui.set_cache_limit_label(format!("Cache Limit: {limit_str}").into());
-            ui.set_cache_limit_mb(mb);
-            let ui_weak = ui.as_weak();
-            std::thread::spawn(move || {
-                let used_bytes = crate::thumbnails::current_cache_size_bytes();
-                let used_str = crate::thumbnails::format_cache_bytes(used_bytes);
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = ui_weak.upgrade() {
-                        ui.set_cache_usage_text(
-                            format!("Used: {used_str} / Limit: {limit_str}").into(),
-                        );
-                    }
-                });
-            });
+            apply_cache_limit(&ui, &local_store, mb.max(0));
         });
     }
 
@@ -1513,6 +1474,30 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
             }
         });
     }
+}
+
+fn apply_seek_step(ui: &MainWindow, local_store: &adult_hub_storage::LocalStore, step: i32) {
+    let _ = local_store.set_setting("seek_step_sec", &step.to_string());
+    ui.set_seek_step_sec(step);
+    ui.set_seek_step_label(format!("Step: {step}s").into());
+}
+
+fn apply_cache_limit(ui: &MainWindow, local_store: &adult_hub_storage::LocalStore, mb: i32) {
+    let _ = local_store.set_setting("cache_limit_mb", &mb.to_string());
+    crate::thumbnails::set_cache_limit_mb_async(mb as usize);
+    let limit_str = crate::thumbnails::format_cache_limit(mb);
+    ui.set_cache_limit_label(format!("Cache Limit: {limit_str}").into());
+    ui.set_cache_limit_mb(mb);
+    let ui_weak = ui.as_weak();
+    std::thread::spawn(move || {
+        let used_bytes = crate::thumbnails::current_cache_size_bytes();
+        let used_str = crate::thumbnails::format_cache_bytes(used_bytes);
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_cache_usage_text(format!("Used: {used_str} / Limit: {limit_str}").into());
+            }
+        });
+    });
 }
 
 #[cfg(test)]
