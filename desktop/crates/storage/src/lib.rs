@@ -206,7 +206,7 @@ impl LocalStore {
     }
 
     fn run_migrations(&self) -> Result<()> {
-        let conn = self.conn()?;
+        let mut conn = self.conn()?;
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS schema_version (
@@ -224,9 +224,9 @@ impl LocalStore {
             .unwrap_or(0);
 
         if current_version < 1 {
-            conn.execute_batch(
+            let tx = conn.transaction()?;
+            tx.execute_batch(
                 "
-                BEGIN;
                 CREATE TABLE IF NOT EXISTS settings (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
@@ -251,31 +251,32 @@ impl LocalStore {
                 );
 
                 INSERT INTO schema_version (version) VALUES (1);
-                COMMIT;
                 ",
             )?;
+            tx.commit()?;
         }
 
-        let v2_needed = current_version < 2 && conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('local_progress') WHERE name = 'is_played'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .map(|count| count == 0)
-            .unwrap_or(false);
+        let v2_needed = current_version < 2
+            && conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('local_progress') WHERE name = 'is_played'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map(|count| count == 0)
+                .unwrap_or(false);
 
         if v2_needed {
-            conn.execute_batch(
+            let tx = conn.transaction()?;
+            tx.execute_batch(
                 "
-                BEGIN;
                 ALTER TABLE local_progress ADD COLUMN is_played INTEGER NOT NULL DEFAULT 0;
                 ALTER TABLE local_progress ADD COLUMN title TEXT NOT NULL DEFAULT '';
                 ALTER TABLE local_progress ADD COLUMN thumbnail_url TEXT;
                 INSERT INTO schema_version (version) VALUES (2);
-                COMMIT;
                 ",
             )?;
+            tx.commit()?;
         }
 
         let v3_needed = current_version < 3
@@ -289,9 +290,9 @@ impl LocalStore {
                 .unwrap_or(false);
 
         if v3_needed {
-            conn.execute_batch(
+            let tx = conn.transaction()?;
+            tx.execute_batch(
                 "
-                BEGIN;
                 CREATE TABLE IF NOT EXISTS phash_jobs (
                     video_id TEXT PRIMARY KEY,
                     job_id TEXT,
@@ -301,30 +302,30 @@ impl LocalStore {
                     updated_at INTEGER NOT NULL
                 );
                 INSERT INTO schema_version (version) VALUES (3);
-                COMMIT;
                 ",
             )?;
+            tx.commit()?;
         }
 
         if current_version < 4 {
-            conn.execute_batch(
+            let tx = conn.transaction()?;
+            tx.execute_batch(
                 "
-                BEGIN;
                 CREATE TABLE IF NOT EXISTS watch_history (
                     item_id TEXT PRIMARY KEY,
                     watched_at INTEGER NOT NULL,
                     item_json TEXT NOT NULL
                 );
                 INSERT INTO schema_version (version) VALUES (4);
-                COMMIT;
                 ",
             )?;
+            tx.commit()?;
         }
 
         if current_version < 5 {
-            conn.execute_batch(
+            let tx = conn.transaction()?;
+            tx.execute_batch(
                 "
-                BEGIN;
                 ALTER TABLE phash_jobs RENAME TO phash_jobs_v4;
                 CREATE TABLE phash_jobs (
                     resolver_scope TEXT NOT NULL,
@@ -340,15 +341,15 @@ impl LocalStore {
                     SELECT '', video_id, job_id, state, error_code, duration_us, updated_at FROM phash_jobs_v4;
                 DROP TABLE phash_jobs_v4;
                 INSERT INTO schema_version (version) VALUES (5);
-                COMMIT;
                 ",
             )?;
+            tx.commit()?;
         }
 
         if current_version < 6 {
-            conn.execute_batch(
+            let tx = conn.transaction()?;
+            tx.execute_batch(
                 "
-                BEGIN;
                 ALTER TABLE search_history RENAME TO search_history_v5;
                 CREATE TABLE search_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -363,35 +364,35 @@ impl LocalStore {
                 CREATE INDEX IF NOT EXISTS idx_search_history_ctx_date
                     ON search_history (context, created_at DESC);
                 INSERT INTO schema_version (version) VALUES (6);
-                COMMIT;
                 ",
             )?;
+            tx.commit()?;
         }
 
         if current_version < 7 {
-            conn.execute_batch(
+            let tx = conn.transaction()?;
+            tx.execute_batch(
                 "
-                BEGIN;
                 CREATE INDEX IF NOT EXISTS idx_local_progress_updated_at
                     ON local_progress (updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_watch_history_watched_at
                     ON watch_history (watched_at DESC);
                 INSERT INTO schema_version (version) VALUES (7);
-                COMMIT;
                 ",
             )?;
+            tx.commit()?;
         }
 
         if current_version < 8 {
-            conn.execute_batch(
+            let tx = conn.transaction()?;
+            tx.execute_batch(
                 "
-                BEGIN;
                 CREATE INDEX IF NOT EXISTS idx_local_progress_video_id
                     ON local_progress (video_id);
                 INSERT INTO schema_version (version) VALUES (8);
-                COMMIT;
                 ",
             )?;
+            tx.commit()?;
         }
 
         Ok(())
