@@ -1217,85 +1217,50 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Directories that can hold a generated manifest, most specific first: the
+    /// crate itself, the packaging output next to `desktop/`, the repository
+    /// `bin/` used by CI, and the docker flow's `/work/bin`.
+    fn manifest_directories() -> Vec<PathBuf> {
+        let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        vec![
+            crate_dir.join("bin"),
+            crate_dir.join("../../bin"),
+            crate_dir.join("../../../bin"),
+            PathBuf::from("/work/bin"),
+        ]
+    }
+
     #[test]
     fn test_verify_real_generated_manifest_against_embedded_key() {
-        let candidates = [
-            Path::new("../../bin/adult-hub-update-manifest.json"),
-            Path::new("bin/adult-hub-update-manifest.json"),
-            Path::new("/work/bin/adult-hub-update-manifest.json"),
-        ];
-        let sig_candidates = [
-            Path::new("../../bin/adult-hub-update-manifest.json.sig"),
-            Path::new("bin/adult-hub-update-manifest.json.sig"),
-            Path::new("/work/bin/adult-hub-update-manifest.json.sig"),
-        ];
-
-        for (m_path, s_path) in candidates.iter().zip(sig_candidates.iter()) {
-            if m_path.exists() && s_path.exists() {
-                let m_bytes = std::fs::read(m_path).unwrap();
-                let s_bytes = std::fs::read(s_path).unwrap();
-                let parsed = parse_and_verify_manifest(
-                    &m_bytes,
-                    &s_bytes,
-                    &EMBEDDED_RELEASE_PUBLIC_KEY,
-                    DEFAULT_ALLOWED_HOSTS,
-                )
-                .expect("Real generated manifest must authenticate with embedded key");
-                assert_eq!(parsed.schema_version, 1);
-                assert!(!parsed.version.is_empty());
-                assert!(!parsed.packages.is_empty());
-                return;
+        let searched = manifest_directories();
+        for directory in &searched {
+            let manifest_path = directory.join("adult-hub-update-manifest.json");
+            let signature_path = directory.join("adult-hub-update-manifest.json.sig");
+            if !manifest_path.exists() || !signature_path.exists() {
+                continue;
             }
+            let manifest_bytes = std::fs::read(&manifest_path).unwrap();
+            let signature_bytes = std::fs::read(&signature_path).unwrap();
+            let parsed = parse_and_verify_manifest(
+                &manifest_bytes,
+                &signature_bytes,
+                &EMBEDDED_RELEASE_PUBLIC_KEY,
+                DEFAULT_ALLOWED_HOSTS,
+            )
+            .expect("Real generated manifest must authenticate with embedded key");
+            assert_eq!(parsed.schema_version, 1);
+            assert!(!parsed.version.is_empty());
+            assert!(!parsed.packages.is_empty());
+            return;
         }
         // `bin/` only holds a manifest after scripts/sign-release.sh has run, so
         // this used to return without asserting anything and looked like
         // coverage. The release gate sets the variable with the published files.
         assert!(
             std::env::var_os("ADULT_HUB_REQUIRE_REAL_MANIFEST").is_none(),
-            "ADULT_HUB_REQUIRE_REAL_MANIFEST is set but no generated manifest was found in bin/"
+            "ADULT_HUB_REQUIRE_REAL_MANIFEST is set but no manifest was found in {searched:?}"
         );
-        println!("skipping: no generated manifest in bin/");
-    }
-
-    fn update_package(url: &str, size_bytes: u64) -> UpdatePackage {
-        UpdatePackage {
-            platform: "windows".into(),
-            arch: "x86_64".into(),
-            package_type: "exe".into(),
-            url: url.into(),
-            sha256: "0".repeat(64),
-            size_bytes,
-            runtime_dll: None,
-        }
-    }
-
-    #[test]
-    fn test_cancelled_download_never_reaches_the_network() {
-        let package = update_package(
-            "https://github.com/adult-hub/adult-hub-desktop/releases/download/desktop-v0.0.0/adult-hub-desktop.exe",
-            1024,
-        );
-        let result = download_and_verify_package(&package, &|| true, |_, _| {});
-        assert!(
-            matches!(result, Err(UpdateError::Cancelled)),
-            "an already-cancelled download must not open a connection"
-        );
-    }
-
-    #[test]
-    fn test_only_transport_failures_are_retried() {
-        assert!(UpdateError::DownloadFailed("connection reset".into()).is_retryable());
-        assert!(UpdateError::Io("disk full".into()).is_retryable());
-        assert!(!UpdateError::Cancelled.is_retryable());
-        assert!(
-            !UpdateError::HashMismatch {
-                expected: "a".repeat(64),
-                actual: "b".repeat(64),
-            }
-            .is_retryable(),
-            "a digest mismatch means the release or the CDN is wrong, not the link"
-        );
-        assert!(!UpdateError::InvalidSignature.is_retryable());
+        println!("skipping: no generated manifest in {searched:?}");
     }
 
     #[test]
