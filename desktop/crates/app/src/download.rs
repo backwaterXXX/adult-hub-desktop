@@ -126,6 +126,7 @@ impl DownloadManager {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(task) = lock.as_ref() {
+            task.resume_pending.store(false, Ordering::SeqCst);
             task.cancel_flag.store(true, Ordering::SeqCst);
             if let Ok(mut child_lock) = task.child_process.lock() {
                 if let Some(mut child) = child_lock.take() {
@@ -148,6 +149,13 @@ impl DownloadManager {
             .smoothed_speed_bps
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = 0.0;
+    }
+
+    /// Cancel the active download and immediately advance the queue (needed when
+    /// the active task is paused and no worker thread is running to advance it).
+    pub fn cancel_and_advance(&self, ctx: &crate::context::AppContext) {
+        self.cancel();
+        self.advance_queue_if_idle(ctx);
     }
 
     pub fn cancel_queued(&self, item_id: &str) {

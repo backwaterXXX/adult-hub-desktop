@@ -650,13 +650,7 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
         ui.on_cycle_speed(move || {
             let Some(ui) = weak.upgrade() else { return };
             let Some(player) = &player else { return };
-            // Read the current value from the UI so playback-start resets stay
-            // synchronized with this control across consecutive videos.
-            let current_speed = ui
-                .get_speed_label()
-                .trim_end_matches('x')
-                .parse::<f64>()
-                .unwrap_or(1.0);
+            let current_speed = player.get_f64("speed").unwrap_or(1.0);
             let current_index = SPEEDS
                 .iter()
                 .position(|speed| (*speed - current_speed).abs() < 0.001)
@@ -937,7 +931,7 @@ pub fn install_controls(ui: &MainWindow, ctx: &AppContext) {
         let ctx_dl = ctx.clone();
         ui.on_cancel_download(move || {
             let Some(ui) = ui_weak.upgrade() else { return };
-            ctx_dl.download_manager.cancel();
+            ctx_dl.download_manager.cancel_and_advance(&ctx_dl);
             ui.set_download_status("error".into());
             ui.set_download_error_text("Download cancelled".into());
         });
