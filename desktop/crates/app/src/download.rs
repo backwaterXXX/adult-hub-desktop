@@ -37,6 +37,8 @@ pub struct DownloadTask {
     pub rendition_id: Option<String>,
     pub status: Arc<Mutex<DownloadStatus>>,
     pub child_process: Arc<Mutex<Option<Child>>>,
+    pub worker_active: Arc<AtomicBool>,
+    pub resume_pending: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -162,6 +164,7 @@ impl DownloadManager {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(task) = lock.as_ref() {
+            task.resume_pending.store(false, Ordering::SeqCst);
             task.pause_flag.store(true, Ordering::SeqCst);
             *task
                 .status
@@ -187,12 +190,22 @@ impl DownloadManager {
                     .status
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = DownloadStatus::Preparing;
-                let mgr = self.clone();
-                let task_clone = task.clone();
-                let ctx_clone = ctx.clone();
-                std::thread::spawn(move || {
-                    run_download_task(&ctx_clone, task_clone, mgr);
-                });
+                if task
+                    .worker_active
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    let mgr = self.clone();
+                    let task_clone = task.clone();
+                    let ctx_clone = ctx.clone();
+                    std::thread::spawn(move || {
+                        run_download_task(&ctx_clone, task_clone, mgr);
+                    });
+                } else {
+                    // Previous worker is still unwinding (e.g., blocked in read/wait);
+                    // it will respawn on exit via WorkerGuard.
+                    task.resume_pending.store(true, Ordering::SeqCst);
+                }
             }
         }
     }
@@ -230,6 +243,8 @@ impl DownloadManager {
             rendition_id,
             status: Arc::new(Mutex::new(DownloadStatus::Queued)),
             child_process: Arc::new(Mutex::new(None)),
+            worker_active: Arc::new(AtomicBool::new(false)),
+            resume_pending: Arc::new(AtomicBool::new(false)),
         });
 
         {
@@ -291,6 +306,7 @@ impl DownloadManager {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Instant::now();
 
+                next_task.worker_active.store(true, Ordering::SeqCst);
                 let mgr = self.clone();
                 let ctx_clone = ctx.clone();
                 std::thread::spawn(move || {
@@ -956,6 +972,41 @@ fn run_download_task(
     task: Arc<DownloadTask>,
     manager: DownloadManager,
 ) {
+    struct WorkerGuard {
+        task: Arc<DownloadTask>,
+        manager: DownloadManager,
+        ctx: crate::context::AppContext,
+    }
+
+    impl Drop for WorkerGuard {
+        fn drop(&mut self) {
+            self.task.worker_active.store(false, Ordering::SeqCst);
+            if self.task.resume_pending.swap(false, Ordering::SeqCst)
+                && !self.task.cancel_flag.load(Ordering::SeqCst)
+                && !self.task.pause_flag.load(Ordering::SeqCst)
+                && self
+                    .task
+                    .worker_active
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+            {
+                let mgr = self.manager.clone();
+                let task_clone = self.task.clone();
+                let ctx_clone = self.ctx.clone();
+                std::thread::spawn(move || {
+                    run_download_task(&ctx_clone, task_clone, mgr);
+                });
+            }
+        }
+    }
+
+    task.worker_active.store(true, Ordering::SeqCst);
+    let _worker_guard = WorkerGuard {
+        task: task.clone(),
+        manager: manager.clone(),
+        ctx: ctx.clone(),
+    };
+
     let download_started = std::time::Instant::now();
     crate::log_debug("download: task picked up from queue");
 
@@ -1241,7 +1292,7 @@ fn run_download_task(
     };
 
     let client = match reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(300))
+        .connect_timeout(Duration::from_secs(15))
         .redirect(redirect_policy)
         .build()
     {
@@ -1502,6 +1553,7 @@ fn run_download_task(
                             if let Ok(mut ch) = task.child_process.lock() {
                                 if let Some(mut c) = ch.take() {
                                     let _ = c.kill();
+                                    let _ = c.wait();
                                 }
                             }
                             let _ = std::fs::remove_file(&task.temp_path);
@@ -1511,6 +1563,20 @@ fn run_download_task(
                                 .unwrap_or_else(std::sync::PoisonError::into_inner) =
                                 DownloadStatus::Error("Download cancelled".into());
                             manager.advance_queue_if_idle(ctx);
+                            return;
+                        }
+                        if task.pause_flag.load(Ordering::SeqCst) {
+                            if let Ok(mut ch) = task.child_process.lock() {
+                                if let Some(mut c) = ch.take() {
+                                    let _ = c.kill();
+                                    let _ = c.wait();
+                                }
+                            }
+                            *task
+                                .status
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                DownloadStatus::Paused;
                             return;
                         }
                         if let Ok(meta) = task.temp_path.metadata() {
@@ -1944,6 +2010,8 @@ mod tests {
             rendition_id: None,
             status: status.clone(),
             child_process: Arc::new(Mutex::new(None)),
+            worker_active: Arc::new(AtomicBool::new(false)),
+            resume_pending: Arc::new(AtomicBool::new(false)),
         });
 
         manager.set_task(task.clone());
@@ -1990,6 +2058,8 @@ mod tests {
             rendition_id: Some("alt_720".to_string()),
             status: Arc::new(Mutex::new(DownloadStatus::Queued)),
             child_process: Arc::new(Mutex::new(None)),
+            worker_active: Arc::new(AtomicBool::new(false)),
+            resume_pending: Arc::new(AtomicBool::new(false)),
         });
         manager
             .queue

@@ -3034,6 +3034,8 @@ mod tests {
             rendition_id: None,
             status: status.clone(),
             child_process: Arc::new(Mutex::new(None)),
+            worker_active: Arc::new(AtomicBool::new(false)),
+            resume_pending: Arc::new(AtomicBool::new(false)),
         });
 
         mgr.set_task(task);
