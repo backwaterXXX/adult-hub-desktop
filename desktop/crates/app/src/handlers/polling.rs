@@ -1,9 +1,7 @@
 use crate::MainWindow;
 use crate::context::AppContext;
 use crate::phash;
-use crate::playback::{
-    format_time, show_error, start_item_playback, stats_text, update_texture_size,
-};
+use crate::playback::{format_time, show_error, stats_text, update_texture_size};
 use adult_hub_player::{Player, PlayerEvent};
 use slint::{ComponentHandle, Timer, TimerMode};
 use std::path::Path;
@@ -575,8 +573,6 @@ fn handle_event(
     let session_ctrl = &ctx.session_ctrl;
     let current_item = &ctx.current_playing_item;
     let hwdec_active = &ctx.hwdec_active;
-    let headers = &ctx.headers;
-    let credential_store = &ctx.credential_store;
     let local_store = &ctx.local_store;
     let phash_coord = &ctx.phash_coord;
     let pending_resume = &ctx.pending_resume_position;
@@ -702,18 +698,7 @@ fn handle_event(
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .clone()
                     {
-                        start_item_playback(
-                            ui,
-                            player,
-                            item,
-                            headers,
-                            credential_store,
-                            local_store,
-                            reporter,
-                            session_ctrl,
-                            current_item,
-                            phash_coord,
-                        );
+                        crate::playback::start_item_playback_ctx(ui, ctx, item);
                         return;
                     } else {
                         // Direct URLs and local files have no catalog item to

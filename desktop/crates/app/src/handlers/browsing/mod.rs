@@ -2953,6 +2953,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     return;
                 }
 
+                let mut stage_a_error = String::new();
                 let movie_page = match stage_a_res {
                     Ok(page) => page,
                     Err(error) => {
@@ -2978,6 +2979,9 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                             );
                             return;
                         }
+                        crate::diagnostics::GLOBAL_LOG
+                            .w("Search", &format!("Adult Hub search failed: {error}"));
+                        stage_a_error = message;
                         CatalogPage {
                             items: Vec::new(),
                             total_count: 0,
@@ -3013,7 +3017,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                     totals,
                     movie_page.has_more,
                     supplemental_total,
-                    String::new(),
+                    stage_a_error.clone(),
                     false,
                     true,
                     String::new(),
@@ -3053,7 +3057,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                             totals,
                             movie_page.has_more,
                             supplemental_total,
-                            String::new(),
+                            stage_a_error,
                             false,
                             false,
                             String::new(),
@@ -3067,7 +3071,7 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
                             totals,
                             movie_page.has_more,
                             supplemental_total,
-                            String::new(),
+                            stage_a_error,
                             false,
                             false,
                             "Failed to load channel videos".into(),
@@ -3878,71 +3882,14 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
 
             // Locate via find_catalog_item or synthesize TvItem
             let target_item = ctx_play.find_catalog_item(&id).unwrap_or_else(|| {
-                if id == "sample" {
-                    sample_catalog_tv_items()[0].clone()
-                } else if id.starts_with("telegram:") {
-                    let prov_id = id.strip_prefix("telegram:").unwrap_or(&id).to_string();
-                    TvItem {
-                        id: id.clone(),
-                        title: format!("Telegram video {prov_id}"),
-                        overview: None,
-                        year: None,
-                        runtime_ticks: None,
-                        genres: vec!["Telegram".into()],
-                        tags: vec![],
-                        studios: vec![],
-                        people: vec![],
-                        primary_image_tag: None,
-                        backdrop_image_tag: None,
-                        thumb_image_tag: None,
-                        child_count: None,
-                        is_favorite: false,
-                        playback_position_ticks: 0,
-                        played_percentage: None,
-                        is_played: false,
-                        provider_video_id: Some(prov_id),
-                        source_provider: Some("telegram".into()),
-                        media_source_id: None,
-                        container: Some("mp4".into()),
-                        file_size_bytes: None,
-                        is_placeholder_source: false,
-                        width: None,
-                        height: None,
-                        community_rating: None,
-                    }
-                } else {
-                    TvItem {
-                        id: id.clone(),
-                        title: Path::new(&id)
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| id.clone()),
-                        overview: None,
-                        year: None,
-                        runtime_ticks: None,
-                        genres: vec![],
-                        tags: vec![],
-                        studios: vec![],
-                        people: vec![],
-                        primary_image_tag: None,
-                        backdrop_image_tag: None,
-                        thumb_image_tag: None,
-                        child_count: None,
-                        is_favorite: false,
-                        playback_position_ticks: 0,
-                        played_percentage: None,
-                        is_played: false,
-                        provider_video_id: None,
-                        source_provider: None,
-                        media_source_id: None,
-                        container: None,
-                        file_size_bytes: None,
-                        is_placeholder_source: false,
-                        width: None,
-                        height: None,
-                        community_rating: None,
-                    }
-                }
+                synthesize_item_from_id(&id).unwrap_or_else(|| TvItem {
+                    id: id.clone(),
+                    title: Path::new(&id)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| id.clone()),
+                    ..Default::default()
+                })
             });
 
             if target_item
@@ -3984,6 +3931,23 @@ pub fn install_stage2_handlers(ui: &MainWindow, ctx: &AppContext) {
             );
             crate::playback::start_item_playback_with_resume_ctx(&ui, &ctx_play, target_item, None);
         });
+    }
+}
+
+/// Synthesize a fallback `TvItem` for built-in sample or Telegram IDs when absent from cache.
+pub(crate) fn synthesize_item_from_id(id: &str) -> Option<TvItem> {
+    if id == "sample" {
+        Some(sample_catalog_tv_items()[0].clone())
+    } else {
+        id.strip_prefix("telegram:").map(|prov_id| TvItem {
+            id: id.to_string(),
+            title: format!("Telegram video {prov_id}"),
+            genres: vec!["Telegram".into()],
+            provider_video_id: Some(prov_id.to_string()),
+            source_provider: Some("telegram".into()),
+            container: Some("mp4".into()),
+            ..Default::default()
+        })
     }
 }
 

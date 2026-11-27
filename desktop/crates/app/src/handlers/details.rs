@@ -100,24 +100,9 @@ pub fn install_stage6_handlers(ui: &MainWindow, ctx: &AppContext) {
                 &ui,
                 &ctx_detail,
             ));
-            let target_item = ctx_detail.find_catalog_item(&id).or_else(|| {
-                if id == "sample" {
-                    Some(sample_catalog_tv_items()[0].clone())
-                } else if id.starts_with("telegram:") {
-                    let prov_id = id.strip_prefix("telegram:").unwrap_or(&id).to_string();
-                    Some(TvItem {
-                        id: id.clone(),
-                        title: format!("Telegram video {prov_id}"),
-                        genres: vec!["Telegram".into()],
-                        provider_video_id: Some(prov_id),
-                        source_provider: Some("telegram".into()),
-                        container: Some("mp4".into()),
-                        ..Default::default()
-                    })
-                } else {
-                    None
-                }
-            });
+            let target_item = ctx_detail
+                .find_catalog_item(&id)
+                .or_else(|| crate::handlers::browsing::synthesize_item_from_id(&id));
             let target_item = match target_item {
                 Some(item) => {
                     *ctx_detail
