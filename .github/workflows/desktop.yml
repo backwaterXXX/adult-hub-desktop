@@ -75,10 +75,8 @@ jobs:
         run: cargo install cargo-audit --locked
 
       - name: Audit dependencies
-        # Advisory only: report vulnerable or unmaintained dependencies in the
-        # log without turning the check red on transitive advisories that have
-        # no fixed release yet.
-        continue-on-error: true
+        # Advisory on branch/PR builds; release tags fail on unaddressed advisories.
+        continue-on-error: ${{ !startsWith(github.ref, 'refs/tags/') }}
         run: cargo audit --file desktop/Cargo.lock
 
   build-linux:
@@ -171,7 +169,7 @@ jobs:
     name: Publish Release & Manifest
     runs-on: ubuntu-24.04
     if: startsWith(github.ref, 'refs/tags/desktop-v')
-    needs: [build-linux, build-windows]
+    needs: [build-linux, build-windows, dependency-audit]
     permissions:
       contents: write
     steps:

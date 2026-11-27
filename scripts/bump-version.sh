@@ -54,7 +54,9 @@ if lock_path.exists():
 else
     sed -i "0,/^version = \"${CURRENT_VERSION}\"/s//version = \"${NEW_VERSION}\"/" "${CARGO_TOML}"
     if [[ -f "${CARGO_LOCK}" ]]; then
-        sed -i "s/version = \"${CURRENT_VERSION}\"/version = \"${NEW_VERSION}\"/g" "${CARGO_LOCK}"
+        for pkg in adult-hub-desktop adult-hub-client adult-hub-player adult-hub-storage; do
+            sed -i "/^name = \"${pkg}\"$/{n;s/^version = \"${CURRENT_VERSION}\"$/version = \"${NEW_VERSION}\"/}" "${CARGO_LOCK}"
+        done
     fi
 fi
 

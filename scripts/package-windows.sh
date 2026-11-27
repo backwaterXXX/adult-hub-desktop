@@ -9,6 +9,7 @@ TARGET="x86_64-pc-windows-gnu"
 MPV_VER="20261011-git-accb7b2821"
 MPV_URL="https://sourceforge.net/projects/mpv-player-windows/files/libmpv/mpv-dev-x86_64-${MPV_VER}.7z/download"
 MPV_DLL="${CACHE_DIR}/libmpv-2.dll"
+MPV_DLL_SHA256="e023856d0d2a96c66e75098c290dfd83b66a1c87740bb58152864e53e74f5ffb"
 EXE_PATH="${ROOT_DIR}/desktop/target/${TARGET}/release/adult-hub-desktop.exe"
 
 # 1. Automatically increment patch version once per application build
@@ -42,12 +43,28 @@ export ADULT_HUB_BUILD_ID="${VERSION}-${ADULT_HUB_COMMIT_HASH:-unknown}-${BUILD_
 echo "==> Preparing Windows build for Adult Hub Desktop v${VERSION} (${ADULT_HUB_COMMIT_HASH}, ${BUILD_TIMESTAMP})..."
 
 mkdir -p "${CACHE_DIR}" "${BIN_DIR}"
+verify_mpv_sha256() {
+    local actual
+    actual=$(sha256sum "${MPV_DLL}" | awk '{print $1}')
+    [[ "${actual}" == "${MPV_DLL_SHA256}" ]]
+}
+
+if [[ -s "${MPV_DLL}" ]] && ! verify_mpv_sha256; then
+    echo "==> Cached libmpv-2.dll failed SHA-256 verification; re-downloading..."
+    rm -f "${MPV_DLL}"
+fi
+
 if [[ ! -s "${MPV_DLL}" ]]; then
     echo "==> Downloading the pinned libmpv runtime..."
     archive="${CACHE_DIR}/mpv-dev.7z"
     curl --fail --location --silent --show-error "${MPV_URL}" -o "${archive}"
     7z e "${archive}" libmpv-2.dll -o"${CACHE_DIR}" -y
     rm -f "${archive}"
+    if ! verify_mpv_sha256; then
+        rm -f "${MPV_DLL}"
+        echo "Error: libmpv-2.dll SHA-256 mismatch (expected ${MPV_DLL_SHA256})" >&2
+        exit 1
+    fi
 fi
 
 "${ROOT_DIR}/scripts/warn-target-size.sh"

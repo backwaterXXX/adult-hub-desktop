@@ -67,6 +67,7 @@ files_map = [
     ("linux", "x86_64", "appimage", "Adult_Hub_Desktop-x86_64.AppImage"),
 ]
 
+missing = []
 for platform, arch, pkg_type, filename in files_map:
     path = os.path.join(bin_dir, filename)
     if os.path.isfile(path):
@@ -98,6 +99,13 @@ for platform, arch, pkg_type, filename in files_map:
             print(f"  [+] libmpv-2.dll: {len(runtime_bytes)} bytes, sha256={package['runtime_dll']['sha256']}")
         packages.append(package)
         print(f"  [+] {filename}: {size} bytes, sha256={digest}")
+    else:
+        missing.append(filename)
+
+if not packages:
+    raise SystemExit(f"No release packages found in {bin_dir}")
+if missing and os.environ.get("ALLOW_PARTIAL_MANIFEST") != "1":
+    raise SystemExit(f"Missing release packages (set ALLOW_PARTIAL_MANIFEST=1 to override): {', '.join(missing)}")
 
 manifest = {
     "schema_version": 1,
