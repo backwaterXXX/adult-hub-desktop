@@ -105,6 +105,60 @@ where
     (url, handle)
 }
 
+fn spawn_mock_server_n<F>(count: usize, mut handler: F) -> (String, thread::JoinHandle<()>)
+where
+    F: FnMut(usize, &str, &str, &str) -> (u16, Vec<(&'static str, &'static str)>, String)
+        + Send
+        + 'static,
+{
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
+    let addr = listener.local_addr().unwrap();
+    let url = format!("http://127.0.0.1:{}", addr.port());
+
+    let handle = thread::spawn(move || {
+        for attempt in 0..count {
+            let (mut stream, _) = listener.accept().expect("accept connection");
+            let mut raw_data = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = stream.read(&mut buf).expect("read request");
+                if n == 0 {
+                    break;
+                }
+                raw_data.extend_from_slice(&buf[..n]);
+                if raw_data.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let first_line = String::from_utf8_lossy(&raw_data)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .to_string();
+            let (status, headers, response_body) = handler(attempt, &first_line, "", "");
+            let status_text = match status {
+                200 => "200 OK",
+                502 => "502 Bad Gateway",
+                503 => "503 Service Unavailable",
+                other => panic!("unmapped mock status code: {other}"),
+            };
+            let mut resp = format!(
+                "HTTP/1.1 {status_text}\r\nConnection: close\r\nContent-Length: {}\r\n",
+                response_body.len()
+            );
+            for (k, v) in headers {
+                resp.push_str(&format!("{k}: {v}\r\n"));
+            }
+            resp.push_str("\r\n");
+            resp.push_str(&response_body);
+            stream.write_all(resp.as_bytes()).expect("write response");
+            stream.flush().expect("flush response");
+        }
+    });
+
+    (url, handle)
+}
+
 #[test]
 fn test_client_initialization_and_slash_safety() {
     let client = AdultHubClient::new("http://127.0.0.1:8090/").expect("client init");
@@ -1671,7 +1725,7 @@ fn test_wire_error_mapping_401_403_502() {
     }
 
     // 502 Bad Gateway with RFC 7807 problem details and code: SOURCE_UNAVAILABLE
-    let (server_url3, handle3) = spawn_mock_server(|_line, _headers, _body| {
+    let (server_url3, handle3) = spawn_mock_server_n(3, |_attempt, _line, _headers, _body| {
         (
                 502,
                 vec![("Content-Type", "application/problem+json")],
@@ -2810,4 +2864,30 @@ fn adult_hub_error_retryability() {
     assert!(!AdultHubError::NotFound("missing".into()).is_retryable());
     assert!(!AdultHubError::Conflict("conflict".into()).is_retryable());
     assert!(!AdultHubError::InvalidUrl("bad".into()).is_retryable());
+}
+
+#[test]
+fn test_wire_get_retries_transient_503_and_succeeds() {
+    let (server_url, handle) = spawn_mock_server_n(2, |attempt, _line, _headers, _body| {
+        if attempt == 0 {
+            (
+                503,
+                vec![("Content-Type", "application/json")],
+                r#"{"error": "temporary overload"}"#.to_string(),
+            )
+        } else {
+            (
+                200,
+                vec![("Content-Type", "application/json")],
+                r#"{"streaming_protocols":["http"],"supported_containers":["mp4"]}"#.to_string(),
+            )
+        }
+    });
+
+    let client = AdultHubClient::new(&server_url).expect("init client");
+    let caps = client
+        .get_playback_capabilities()
+        .expect("retry after 503 should succeed");
+    handle.join().unwrap();
+    assert_eq!(caps.supported_containers, vec!["mp4"]);
 }

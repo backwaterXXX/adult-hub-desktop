@@ -436,6 +436,29 @@ impl AdultHubClient {
         }
     }
 
+    fn get_json_with_retry<T: for<'de> Deserialize<'de>>(&self, url: Url, auth: bool) -> Result<T> {
+        const MAX_ATTEMPTS: usize = 3;
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let mut req = self.client.get(url.clone());
+            if auth {
+                req = self.attach_auth(req);
+            }
+            let outcome = match req.send() {
+                Ok(res) => self.handle_response(res),
+                Err(err) => Err(AdultHubError::Http(err)),
+            };
+            match outcome {
+                Ok(val) => return Ok(val),
+                Err(err) if attempt < MAX_ATTEMPTS && err.is_retryable() => {
+                    std::thread::sleep(Duration::from_millis(150 * attempt as u64));
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Discovery
     // -----------------------------------------------------------------------
@@ -443,8 +466,7 @@ impl AdultHubClient {
     /// Queries `GET /api/v1/version` for API version, capabilities, and service status.
     pub fn discover_version(&self) -> Result<ApiVersionResponse> {
         let url = self.build_url("/api/v1/version")?;
-        let res = self.client.get(url).send()?;
-        self.handle_response(res)
+        self.get_json_with_retry(url, false)
     }
 
     // -----------------------------------------------------------------------
@@ -581,9 +603,7 @@ impl AdultHubClient {
             }
         }
 
-        let req = self.attach_auth(self.client.get(url));
-        let res = req.send()?;
-        self.handle_response(res)
+        self.get_json_with_retry(url, true)
     }
 
     // -----------------------------------------------------------------------
@@ -606,9 +626,7 @@ impl AdultHubClient {
             }
         }
 
-        let req = self.attach_auth(self.client.get(url));
-        let res = req.send()?;
-        self.handle_response(res)
+        self.get_json_with_retry(url, true)
     }
 
     /// Queries `GET /api/v1/catalog/studios` with pagination and optional search filter.
@@ -627,9 +645,7 @@ impl AdultHubClient {
             }
         }
 
-        let req = self.attach_auth(self.client.get(url));
-        let res = req.send()?;
-        self.handle_response(res)
+        self.get_json_with_retry(url, true)
     }
 
     /// Queries `GET /api/v1/catalog/tags` with pagination and optional search filter.
@@ -648,9 +664,7 @@ impl AdultHubClient {
             }
         }
 
-        let req = self.attach_auth(self.client.get(url));
-        let res = req.send()?;
-        self.handle_response(res)
+        self.get_json_with_retry(url, true)
     }
 
     /// Queries `GET /api/v1/catalog/performers` with pagination, filters, and sort.
@@ -684,9 +698,7 @@ impl AdultHubClient {
             }
         }
 
-        let req = self.attach_auth(self.client.get(url));
-        let res = req.send()?;
-        self.handle_response(res)
+        self.get_json_with_retry(url, true)
     }
 
     /// Queries `GET /api/v1/catalog/performers/{performer_id}` for performer biographical details.
@@ -702,9 +714,7 @@ impl AdultHubClient {
         let endpoint = format!("/api/v1/catalog/performers/{encoded_id}");
         let url = self.build_url(&endpoint)?;
 
-        let req = self.attach_auth(self.client.get(url));
-        let res = req.send()?;
-        self.handle_response(res)
+        self.get_json_with_retry(url, true)
     }
 
     /// Alias for `get_performer_detail`.
@@ -728,9 +738,7 @@ impl AdultHubClient {
         let endpoint = format!("/api/v1/catalog/videos/{encoded_id}");
         let url = self.build_url(&endpoint)?;
 
-        let req = self.attach_auth(self.client.get(url));
-        let res = req.send()?;
-        self.handle_response(res)
+        self.get_json_with_retry(url, true)
     }
 
     // -----------------------------------------------------------------------
@@ -756,9 +764,7 @@ impl AdultHubClient {
             }
         }
 
-        let req = self.attach_auth(self.client.get(url));
-        let res = req.send()?;
-        self.handle_response(res)
+        self.get_json_with_retry(url, true)
     }
 
     /// Queries `GET /api/v1/catalog/channels/{channel_id}` for channel detail and video counts.
@@ -774,9 +780,7 @@ impl AdultHubClient {
         let endpoint = format!("/api/v1/catalog/channels/{encoded_id}");
         let url = self.build_url(&endpoint)?;
 
-        let req = self.attach_auth(self.client.get(url));
-        let res = req.send()?;
-        self.handle_response(res)
+        self.get_json_with_retry(url, true)
     }
 
     /// Returns the current bearer authorization header value (e.g. `Bearer <token>`) if set.
@@ -794,9 +798,7 @@ impl AdultHubClient {
     /// Queries `GET /api/v1/playback/capabilities` for playback engine streaming capabilities.
     pub fn get_playback_capabilities(&self) -> Result<PlaybackCapabilities> {
         let url = self.build_url("/api/v1/playback/capabilities")?;
-        let req = self.attach_auth(self.client.get(url));
-        let res = req.send()?;
-        self.handle_response(res)
+        self.get_json_with_retry(url, true)
     }
 
     /// Queries `GET /api/v1/playback/renditions/{video_id}` for playback descriptor and safe rendition choices.
@@ -808,9 +810,7 @@ impl AdultHubClient {
         let encoded_id = urlencoding(clean_id);
         let endpoint = format!("/api/v1/playback/renditions/{encoded_id}");
         let url = self.build_url(&endpoint)?;
-        let req = self.attach_auth(self.client.get(url));
-        let res = req.send()?;
-        self.handle_response(res)
+        self.get_json_with_retry(url, true)
     }
 
     /// Resolves and validates a stream path or absolute stream URL strictly enforcing single-origin policy.
@@ -981,9 +981,7 @@ impl AdultHubClient {
         let endpoint = format!("/api/v1/user/favorites/{encoded_id}");
         let url = self.build_url(&endpoint)?;
 
-        let req = self.attach_auth(self.client.get(url));
-        let res = req.send()?;
-        self.handle_response(res)
+        self.get_json_with_retry(url, true)
     }
 
     /// Adds a video to authenticated user favorites (`PUT /api/v1/user/favorites/{video_id}`).
@@ -1043,9 +1041,7 @@ impl AdultHubClient {
             }
         }
 
-        let req = self.attach_auth(self.client.get(url));
-        let res = req.send()?;
-        self.handle_response(res)
+        self.get_json_with_retry(url, true)
     }
 }
 
