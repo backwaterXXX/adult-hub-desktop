@@ -54,7 +54,9 @@ pub struct ResolverClient {
 impl ResolverClient {
     pub fn new() -> Self {
         let client = Client::builder()
+            .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_default();
 

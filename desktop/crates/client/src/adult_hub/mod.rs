@@ -310,45 +310,11 @@ impl AdultHubClient {
         let status_code = status.as_u16();
         if status.is_success() {
             const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
-            if let Some(cl) = res.content_length() {
-                if cl > MAX_IMAGE_BYTES as u64 {
-                    return Err(AdultHubError::PayloadTooLarge {
-                        limit: MAX_IMAGE_BYTES,
-                    });
-                }
-            }
-            use std::io::Read;
-            let mut buffer = Vec::new();
-            let mut limited = (&mut res).take((MAX_IMAGE_BYTES + 1) as u64);
-            limited
-                .read_to_end(&mut buffer)
-                .map_err(AdultHubError::Io)?;
-            if buffer.len() > MAX_IMAGE_BYTES {
-                return Err(AdultHubError::PayloadTooLarge {
-                    limit: MAX_IMAGE_BYTES,
-                });
-            }
-            return Ok(buffer);
+            return Self::read_bounded_bytes(&mut res, MAX_IMAGE_BYTES);
         }
         const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
-        use std::io::Read;
-        let mut err_buf = Vec::new();
-        let mut limited_err = (&mut res).take((MAX_ERROR_BODY_BYTES + 1) as u64);
-        limited_err
-            .read_to_end(&mut err_buf)
-            .map_err(AdultHubError::Io)?;
-        let err_text = String::from_utf8_lossy(&err_buf[..err_buf.len().min(MAX_ERROR_BODY_BYTES)]);
-        let detail = if let Ok(prob) = serde_json::from_str::<ProblemDetails>(&err_text) {
-            prob.detail
-                .or(prob.error)
-                .or(prob.message)
-                .or(prob.title)
-                .unwrap_or_else(|| format!("HTTP {status_code}"))
-        } else if !err_text.trim().is_empty() {
-            err_text.chars().take(250).collect()
-        } else {
-            format!("HTTP {status_code}")
-        };
+        let err_text = Self::read_error_body_lossy(&mut res, MAX_ERROR_BODY_BYTES)?;
+        let detail = Self::extract_error_detail(status_code, &err_text);
         match status_code {
             401 | 403 => Err(AdultHubError::Unauthorized {
                 status: status_code,
@@ -364,6 +330,48 @@ impl AdultHubClient {
         }
     }
 
+    fn read_bounded_bytes(res: &mut Response, max_bytes: usize) -> Result<Vec<u8>> {
+        if let Some(cl) = res.content_length() {
+            if cl > max_bytes as u64 {
+                return Err(AdultHubError::PayloadTooLarge { limit: max_bytes });
+            }
+        }
+        use std::io::Read;
+        let mut buffer = Vec::new();
+        let mut limited = res.take((max_bytes + 1) as u64);
+        limited
+            .read_to_end(&mut buffer)
+            .map_err(AdultHubError::Io)?;
+        if buffer.len() > max_bytes {
+            return Err(AdultHubError::PayloadTooLarge { limit: max_bytes });
+        }
+        Ok(buffer)
+    }
+
+    fn read_error_body_lossy(res: &mut Response, max_bytes: usize) -> Result<String> {
+        use std::io::Read;
+        let mut err_buf = Vec::new();
+        let mut limited_err = res.take((max_bytes + 1) as u64);
+        limited_err
+            .read_to_end(&mut err_buf)
+            .map_err(AdultHubError::Io)?;
+        Ok(String::from_utf8_lossy(&err_buf[..err_buf.len().min(max_bytes)]).into_owned())
+    }
+
+    fn extract_error_detail(status_code: u16, err_text: &str) -> String {
+        if let Ok(prob) = serde_json::from_str::<ProblemDetails>(err_text) {
+            prob.detail
+                .or(prob.error)
+                .or(prob.message)
+                .or(prob.title)
+                .unwrap_or_else(|| format!("HTTP {status_code}"))
+        } else if !err_text.trim().is_empty() {
+            err_text.chars().take(250).collect()
+        } else {
+            format!("HTTP {status_code}")
+        }
+    }
+
     fn attach_auth(&self, builder: RequestBuilder) -> RequestBuilder {
         if let Ok(guard) = self.token.read() {
             if let Some(token) = guard.as_deref() {
@@ -375,17 +383,20 @@ impl AdultHubClient {
         builder
     }
 
-    fn handle_response<T: for<'de> Deserialize<'de>>(&self, res: Response) -> Result<T> {
+    fn handle_response<T: for<'de> Deserialize<'de>>(&self, mut res: Response) -> Result<T> {
         let status = res.status();
         let status_code = status.as_u16();
 
         if status.is_success() {
-            let bytes = res.bytes().map_err(AdultHubError::Http)?;
+            const MAX_API_JSON_BYTES: usize = 8 * 1024 * 1024;
+            let bytes = Self::read_bounded_bytes(&mut res, MAX_API_JSON_BYTES)?;
             let body = serde_json::from_slice::<T>(&bytes).map_err(AdultHubError::Serialization)?;
             return Ok(body);
         }
 
-        let err_text = res.text().unwrap_or_default();
+        const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
+        let err_text =
+            Self::read_error_body_lossy(&mut res, MAX_ERROR_BODY_BYTES).unwrap_or_default();
         let mut code_out = None;
         let detail = if let Ok(prob) = serde_json::from_str::<ProblemDetails>(&err_text) {
             code_out = prob.code;
