@@ -284,10 +284,24 @@ pub fn install_stage5_handlers(ui: &MainWindow, ctx: &AppContext) {
                 .as_ref()
                 .map(|(_, p)| p.clone());
             if let Some(package) = pkg_opt {
-                let runtime_dll = package.runtime_dll.as_deref().cloned();
+                // The pinned mpv build is byte-identical between releases, so the
+                // runtime only has to be downloaded when the installed copy is
+                // missing or stale. The update then stays the size of the EXE.
+                let runtime_dll = package
+                    .runtime_dll
+                    .as_deref()
+                    .cloned()
+                    .filter(|dll| !updater::installed_runtime_matches(dll));
+                let keeps_installed_runtime =
+                    runtime_dll.is_none() && package.runtime_dll.is_some();
                 if let Some(ui) = weak.upgrade() {
                     ui.set_update_downloading(true);
-                    ui.set_update_status("Downloading update package...".into());
+                    let status = if keeps_installed_runtime {
+                        "Downloading the application (libmpv runtime is up to date)..."
+                    } else {
+                        "Downloading update package..."
+                    };
+                    ui.set_update_status(status.into());
                 }
                 let weak_thread = weak.clone();
                 let downloaded_thread = downloaded.clone();

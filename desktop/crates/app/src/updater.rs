@@ -411,6 +411,26 @@ fn hex_string(bytes: &[u8]) -> String {
     s
 }
 
+/// The mpv runtime that ships next to the executable.
+fn installed_runtime_library() -> Option<PathBuf> {
+    let executable = std::env::current_exe().ok()?;
+    let candidate = executable.parent()?.join("libmpv-2.dll");
+    candidate.is_file().then_some(candidate)
+}
+
+/// True when the runtime already installed next to the executable matches the
+/// signed package, so the release's copy does not need downloading again.
+/// The mpv build is pinned per release and its bytes repeat between versions;
+/// a missing or stale copy fails this check and is fetched as usual.
+pub fn installed_runtime_matches(package: &UpdatePackage) -> bool {
+    installed_runtime_library().is_some_and(|path| file_matches_package(&path, package))
+}
+
+/// Digest and size check shared by the download flow and the runtime probe.
+fn file_matches_package(path: &Path, package: &UpdatePackage) -> bool {
+    verify_file_integrity(path, &package.sha256, package.size_bytes).is_ok()
+}
+
 /// Download package into a temporary staging file and verify SHA-256 & size before returning verified path.
 pub fn download_and_verify_package(
     package: &UpdatePackage,
@@ -951,6 +971,40 @@ mod tests {
         assert!(verify_file_integrity(&test_file, wrong_hash, content.len() as u64).is_err());
 
         let _ = std::fs::remove_file(&test_file);
+    }
+
+    #[test]
+    fn test_runtime_probe_accepts_only_the_installed_build() {
+        let dir = std::env::temp_dir().join(format!("adult-hub-runtime-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let runtime = dir.join("libmpv-2.dll");
+        let content = b"pinned libmpv build";
+        std::fs::write(&runtime, content).unwrap();
+
+        let mut ctx = digest::Context::new(&SHA256);
+        ctx.update(content);
+        let package = UpdatePackage {
+            platform: "windows".into(),
+            arch: "x86_64".into(),
+            package_type: "runtime-dll".into(),
+            url: "https://github.com/adult-hub/adult-hub-desktop/releases/download/desktop-v0.0.0/libmpv-2.dll".into(),
+            sha256: hex_string(ctx.finish().as_ref()),
+            size_bytes: content.len() as u64,
+            runtime_dll: None,
+        };
+
+        // Installed by the same release the manifest describes: skip the download.
+        assert!(file_matches_package(&runtime, &package));
+
+        // Bumping the pinned mpv build changes the bytes, so it is fetched again.
+        std::fs::write(&runtime, b"next libmpv build").unwrap();
+        assert!(!file_matches_package(&runtime, &package));
+
+        // A runtime the user removed or moved is never treated as current.
+        std::fs::remove_file(&runtime).unwrap();
+        assert!(!file_matches_package(&runtime, &package));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
