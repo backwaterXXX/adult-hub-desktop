@@ -68,7 +68,11 @@ EOF
 chmod +x "${APPDIR}/AppRun"
 
 echo "==> Building AppImage with appimagetool..."
-ARCH=x86_64 "${APPIMAGETOOL}" --appimage-extract-and-run "${APPDIR}" "${BIN_DIR}/${OUTPUT_NAME}"
+# appimagetool looks for an appdata file named after the .desktop file, but
+# AppStream requires the reverse-DNS id in our filename, so its built-in check
+# can only warn. The metadata is validated on its own by `appstreamcli
+# validate` in CI, which is the check that actually has to pass.
+ARCH=x86_64 "${APPIMAGETOOL}" --appimage-extract-and-run --no-appstream "${APPDIR}" "${BIN_DIR}/${OUTPUT_NAME}"
 
 rm -rf "${APPDIR}"
 

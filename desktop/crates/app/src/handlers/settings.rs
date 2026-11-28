@@ -1486,6 +1486,20 @@ fn install_settings_config_handlers(ui: &MainWindow, ctx: &AppContext) {
         });
     }
 
+    // 15a. Show the redacted startup log tail in Settings, so a support report
+    // can quote it without leaving the app.
+    {
+        let weak = ui.as_weak();
+        ui.on_show_startup_log(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let tail = crate::diagnostics::redacted_startup_log_tail(
+                &crate::startup_log_path(),
+                64 * 1024,
+            );
+            ui.set_startup_log_text(tail.into());
+        });
+    }
+
     // 15b. Open the folder holding startup.log and store.db.
     {
         let weak = ui.as_weak();

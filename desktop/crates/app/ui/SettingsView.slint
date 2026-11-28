@@ -577,6 +577,9 @@ export component SettingsView inherits Rectangle {
     in property <bool> phash-active: false;
     in property <string> phash-status-text: "";
     in-out property <bool> diagnostics-expanded: false;
+    // Startup log tail is pulled on demand so opening Settings stays cheap.
+    in-out property <bool> startup-log-visible: false;
+    in property <string> startup-log-text: "";
 
     // Playback Preferences state
     in property <string> buffer-profile: "standard";
@@ -676,6 +679,7 @@ export component SettingsView inherits Rectangle {
     callback import-config();
     callback export-diagnostics();
     callback open-logs-folder();
+    callback show-startup-log();
 
     callback toggle-auto-update();
     callback check-for-updates();
@@ -2333,6 +2337,42 @@ export component SettingsView inherits Rectangle {
                                         custom-height: 40px;
                                         horizontal-stretch: 1;
                                         clicked => { root.open-logs-folder(); }
+                                    }
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 12px;
+
+                                    SettingsButton {
+                                        text: root.startup-log-visible ? "Hide Startup Log ▲" : "Show Startup Log ▼";
+                                        custom-height: 40px;
+                                        clicked => {
+                                            root.startup-log-visible = !root.startup-log-visible;
+                                            if root.startup-log-visible && root.startup-log-text == "" {
+                                                root.show-startup-log();
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if root.startup-log-visible : Rectangle {
+                                    background: HubTheme.navigation-background;
+                                    border-radius: HubTheme.control-radius;
+                                    height: 220px;
+
+                                    ScrollView {
+                                        content-width: self.width;
+                                        content-height: startup-log-text.height + 24px;
+
+                                        startup-log-text := Text {
+                                            x: 12px;
+                                            y: 12px;
+                                            width: parent.width - 24px;
+                                            text: root.startup-log-text == "" ? "Startup log is empty." : root.startup-log-text;
+                                            color: HubTheme.text-secondary;
+                                            font-size: HubTheme.metadata-size;
+                                            wrap: word-wrap;
+                                        }
                                     }
                                 }
                             }

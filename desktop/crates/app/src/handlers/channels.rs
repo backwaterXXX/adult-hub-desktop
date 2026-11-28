@@ -110,6 +110,7 @@ struct ChannelCacheEntry {
 
 /// Channel handlers share one offset cursor, one generation counter and one
 /// filtered cache, so they are installed from a single bundle.
+#[derive(Clone)]
 struct ChannelHandlerState {
     local_store: Arc<LocalStore>,
     credential_store: Arc<adult_hub_storage::CredentialStore>,
@@ -180,8 +181,6 @@ fn install_channel_category_handlers(ui: &MainWindow, state: &ChannelHandlerStat
     {
         let weak = ui.as_weak();
         let local_store = local_store.clone();
-        let credential_store = credential_store.clone();
-        let resolver = resolver.clone();
         let category_ids = category_ids.clone();
         ui.on_refresh_channel_categories(move || {
             let Some(_ui) = weak.upgrade() else { return };
@@ -415,6 +414,485 @@ fn install_channel_sort_handlers(ui: &MainWindow, state: &ChannelHandlerState) {
 }
 
 /// Category selection and paging for the channel grid.
+/// Channel-category fetch on a worker thread: resolver call, paging cursor
+/// update and the card refresh. The bundle is destructured back into the plain
+/// names the body uses.
+fn run_channel_category_worker(
+    weak: slint::Weak<MainWindow>,
+    state: ChannelHandlerState,
+    request_id: u64,
+    chan_id: String,
+    is_all: bool,
+    cat_str: String,
+) {
+    let ChannelHandlerState {
+        local_store,
+        credential_store,
+        resolver,
+        cached_catalog,
+        current_channel_id,
+        channel_generation,
+        category_ids,
+        channel_offset_id,
+        channel_items_cache,
+        channel_cache_map,
+        channel_sort_mode,
+        channel_duration_filter,
+        saved_sort_mode: _,
+    } = state;
+    let res_url = local_store
+        .get_setting("resolver_base_url")
+        .ok()
+        .flatten()
+        .or_else(|| credential_store.get().ok().flatten().map(|s| s.server_url))
+        .unwrap_or_default();
+
+    if res_url.is_empty() {
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak.upgrade() {
+                if channel_generation.load(Ordering::SeqCst) == request_id
+                    && *current_channel_id
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        == chan_id
+                {
+                    ui.set_channel_loading(false);
+                    ui.set_channel_error_kind("connection".into());
+                    ui.set_channel_error_message(
+                                    "Resolver URL is not configured. Add it in Settings to load channel videos.".into(),
+                                );
+                }
+            }
+        });
+        return;
+    }
+
+    if is_all {
+        let categories = match resolver.get_categories(&res_url) {
+            Ok(cats) => cats,
+            Err(err) => {
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        if channel_generation.load(Ordering::SeqCst) == request_id
+                            && *current_channel_id
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                == chan_id
+                        {
+                            ui.set_channel_loading(false);
+                            ui.set_channel_error_kind(resolver_error_kind(&err).into());
+                            ui.set_channel_error_message(
+                                format!(
+                                    "Could not load channel categories: {}.",
+                                    resolver_error_summary(&err)
+                                )
+                                .into(),
+                            );
+                        }
+                    }
+                });
+                return;
+            }
+        };
+
+        let hidden = local_store.get_hidden_channels().unwrap_or_default();
+        let mut ids = category_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for category in &categories {
+            ids.insert(category.title.clone(), category.id.clone());
+        }
+        drop(ids);
+
+        let visible_categories: Vec<_> = categories
+            .into_iter()
+            .filter(|category| !hidden.iter().any(|id| id == &category.id))
+            .collect();
+
+        let mut items = Vec::new();
+        let mut seen_ids = std::collections::HashSet::new();
+
+        // Stream results incrementally from each category
+        for cat in visible_categories.iter().take(6) {
+            if channel_generation.load(Ordering::SeqCst) != request_id
+                || *current_channel_id
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    != "main"
+            {
+                return;
+            }
+
+            let cat_videos = if let Some(cached) = channel_cache_map
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&cat.id)
+            {
+                cached.items.clone()
+            } else {
+                let fetched =
+                    if let Ok(history) = resolver.get_channel_history(&res_url, &cat.id, 8, None) {
+                        history
+                            .videos
+                            .into_iter()
+                            .map(TvItem::from)
+                            .collect::<Vec<_>>()
+                    } else if let Ok(videos) =
+                        resolver.get_category_videos(&res_url, &cat.id, 1, "recent", None)
+                    {
+                        videos.into_iter().map(TvItem::from).collect::<Vec<_>>()
+                    } else {
+                        Vec::new()
+                    };
+                if !fetched.is_empty() {
+                    channel_cache_map
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(
+                            cat.id.clone(),
+                            ChannelCacheEntry {
+                                items: fetched.clone(),
+                                next_offset: None,
+                                has_more: false,
+                            },
+                        );
+                }
+                fetched
+            };
+
+            for item in cat_videos {
+                if seen_ids.insert(item.id.clone()) {
+                    items.push(item);
+                }
+            }
+
+            // Incremental update to UI as each channel finishes
+            let partial_display = filter_sort_channel_items(
+                filter_catalog_items(items.clone(), &local_store),
+                "",
+                *channel_duration_filter
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+                *channel_sort_mode
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
+            let weak_partial = weak.clone();
+            let generation_partial = channel_generation.clone();
+            let current_channel_partial = current_channel_id.clone();
+
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak_partial.upgrade() {
+                    if generation_partial.load(Ordering::SeqCst) == request_id
+                        && *current_channel_partial
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            == "main"
+                    {
+                        let cards = partial_display
+                            .iter()
+                            .map(tv_item_to_card)
+                            .collect::<Vec<_>>();
+                        set_channel_catalog(&ui, cards);
+                        ui.set_channel_loading(false);
+                    }
+                }
+            });
+        }
+
+        if channel_generation.load(Ordering::SeqCst) != request_id
+            || *current_channel_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                != "main"
+        {
+            return;
+        }
+
+        let filtered = filter_catalog_items(items, &local_store);
+        *channel_offset_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        *channel_items_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = filtered.clone();
+
+        channel_cache_map
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                "main".to_string(),
+                ChannelCacheEntry {
+                    items: filtered.clone(),
+                    next_offset: None,
+                    has_more: false,
+                },
+            );
+
+        // Merge into cached_catalog
+        {
+            let mut cat_lock = cached_catalog
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for it in &filtered {
+                if !cat_lock.iter().any(|x| x.id == it.id) {
+                    cat_lock.push(it.clone());
+                }
+            }
+        }
+
+        let is_empty = filtered.is_empty() && !visible_categories.is_empty();
+        let display_items = filter_sort_channel_items(
+            filtered,
+            "",
+            *channel_duration_filter
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            *channel_sort_mode
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        let weak_final = weak.clone();
+        let generation_final = channel_generation.clone();
+        let channel_id_final = current_channel_id.clone();
+        let refresh_items = channel_items_cache.clone();
+
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak_final.upgrade() else {
+                return;
+            };
+            if generation_final.load(Ordering::SeqCst) != request_id
+                || *channel_id_final
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    != "main"
+            {
+                return;
+            }
+            let final_cards = display_items
+                .iter()
+                .map(tv_item_to_card)
+                .collect::<Vec<_>>();
+            set_channel_catalog(&ui, final_cards.clone());
+            ui.set_channel_has_more(false);
+            ui.set_channel_loading(false);
+            if is_empty {
+                ui.set_channel_error_kind("empty".into());
+                ui.set_channel_error_message(
+                    "No videos available across channel categories.".into(),
+                );
+            } else {
+                ui.set_channel_error_kind("".into());
+                ui.set_channel_error_message("".into());
+            }
+            refresh_channel_thumbnails_async(
+                ui.as_weak(),
+                final_cards,
+                refresh_items,
+                generation_final,
+                request_id,
+            );
+        });
+    } else {
+        // Single channel fetch
+        let mut effective_channel_id = chan_id.clone();
+        if let Ok(categories) = resolver.get_categories(&res_url) {
+            let mut ids = category_ids
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for category in &categories {
+                ids.insert(category.title.clone(), category.id.clone());
+            }
+            if let Some(category) = categories
+                .iter()
+                .find(|category| category.title.eq_ignore_ascii_case(&cat_str))
+            {
+                effective_channel_id = category.id.clone();
+            }
+        }
+
+        let mut items = Vec::new();
+        let mut next_offset = None;
+        let mut has_more = false;
+        let mut error_kind = "";
+        let mut error_message = None;
+
+        match resolver.get_channel_history(&res_url, &effective_channel_id, 20, None) {
+            Ok(history) => {
+                next_offset = history.next_offset_id;
+                has_more = history.has_more;
+                items.extend(history.videos.into_iter().map(TvItem::from));
+            }
+            Err(history_error) => {
+                match resolver.get_category_videos(
+                    &res_url,
+                    &effective_channel_id,
+                    1,
+                    "recent",
+                    None,
+                ) {
+                    Ok(videos) => items.extend(videos.into_iter().map(TvItem::from)),
+                    Err(fallback_error) => {
+                        error_kind = resolver_error_kind(&history_error);
+                        error_message = Some(format!(
+                            "Could not load channel history ({}); fallback request failed ({}).",
+                            resolver_error_summary(&history_error),
+                            resolver_error_summary(&fallback_error)
+                        ));
+                    }
+                }
+            }
+        }
+
+        let duration_filter = *channel_duration_filter
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let sort_mode = *channel_sort_mode
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut empty_page_attempts = 0;
+        loop {
+            let visible = filter_sort_channel_items(
+                filter_catalog_items(items.clone(), &local_store),
+                "",
+                duration_filter,
+                sort_mode,
+            );
+            if !visible.is_empty() || !has_more || empty_page_attempts >= 3 {
+                break;
+            }
+            let Some(offset) = next_offset else { break };
+            match resolver.get_channel_history(&res_url, &effective_channel_id, 20, Some(offset)) {
+                Ok(history) => {
+                    if history.next_offset_id == Some(offset) {
+                        has_more = false;
+                        break;
+                    }
+                    next_offset = history.next_offset_id;
+                    has_more = history.has_more;
+                    items.extend(history.videos.into_iter().map(TvItem::from));
+                }
+                Err(error) => {
+                    error_kind = resolver_error_kind(&error);
+                    error_message = Some(format!(
+                        "Could not continue past filtered channel items: {}.",
+                        resolver_error_summary(&error)
+                    ));
+                    has_more = false;
+                    break;
+                }
+            }
+            empty_page_attempts += 1;
+        }
+
+        // Strict currency check: verify BOTH request_id AND current channel ID
+        if channel_generation.load(Ordering::SeqCst) != request_id
+            || *current_channel_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                != chan_id
+        {
+            // Cache the result for future visits, but do NOT touch the UI
+            if !items.is_empty() {
+                channel_cache_map
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(
+                        chan_id,
+                        ChannelCacheEntry {
+                            items: filter_catalog_items(items, &local_store),
+                            next_offset,
+                            has_more,
+                        },
+                    );
+            }
+            return;
+        }
+
+        let filtered = filter_catalog_items(items, &local_store);
+        *channel_offset_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = next_offset;
+        *channel_items_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = filtered.clone();
+
+        channel_cache_map
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                chan_id.clone(),
+                ChannelCacheEntry {
+                    items: filtered.clone(),
+                    next_offset,
+                    has_more,
+                },
+            );
+
+        // Merge into cached_catalog
+        {
+            let mut cat_lock = cached_catalog
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for it in &filtered {
+                if !cat_lock.iter().any(|x| x.id == it.id) {
+                    cat_lock.push(it.clone());
+                }
+            }
+        }
+
+        let display_items = filter_sort_channel_items(
+            filtered.clone(),
+            "",
+            *channel_duration_filter
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            *channel_sort_mode
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        let refresh_items = channel_items_cache.clone();
+        let refresh_generation = channel_generation.clone();
+        let error_details = error_message.unwrap_or_default();
+        let error_message = if error_kind == "access-denied" {
+            "Access to this channel was denied. Check the Resolver connection and try again."
+                .to_owned()
+        } else {
+            error_details.clone()
+        };
+
+        slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            if channel_generation.load(Ordering::SeqCst) != request_id
+                || *current_channel_id
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    != chan_id
+            {
+                return;
+            }
+            let cards = display_items
+                .iter()
+                .map(tv_item_to_card)
+                .collect::<Vec<_>>();
+            set_channel_catalog(&ui, cards.clone());
+            ui.set_channel_error_message(error_message.into());
+            ui.set_channel_error_kind(error_kind.into());
+            ui.set_channel_error_details(error_details.into());
+            ui.set_channel_has_more(has_more);
+            ui.set_channel_loading(false);
+            refresh_channel_thumbnails_async(
+                ui.as_weak(),
+                cards,
+                refresh_items,
+                refresh_generation,
+                request_id,
+            );
+        })
+        .ok();
+    }
+}
+
 fn install_channel_browse_handlers(ui: &MainWindow, state: &ChannelHandlerState) {
     let local_store = state.local_store.clone();
     let credential_store = state.credential_store.clone();
@@ -433,9 +911,6 @@ fn install_channel_browse_handlers(ui: &MainWindow, state: &ChannelHandlerState)
     {
         let weak = ui.as_weak();
         let local_store = local_store.clone();
-        let credential_store = credential_store.clone();
-        let resolver = resolver.clone();
-        let cached_catalog = cached_catalog.clone();
         let current_channel_id = current_channel_id.clone();
         let category_ids = category_ids.clone();
         let channel_offset_id = channel_offset_id.clone();
@@ -445,6 +920,7 @@ fn install_channel_browse_handlers(ui: &MainWindow, state: &ChannelHandlerState)
         let channel_duration_filter = channel_duration_filter.clone();
 
         let channel_cache_map_sel = channel_cache_map.clone();
+        let owned_state = ChannelHandlerState::clone(state);
         ui.on_select_channel_category(move |cat| {
             let Some(ui) = weak.upgrade() else { return };
             let cat_str = cat.to_string();
@@ -475,22 +951,41 @@ fn install_channel_browse_handlers(ui: &MainWindow, state: &ChannelHandlerState)
                     .cloned()
                     .unwrap_or_else(|| cat_str.to_lowercase().replace(' ', "_"))
             };
-            *current_channel_id.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = chan_id.clone();
-            *channel_offset_id.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            *current_channel_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = chan_id.clone();
+            *channel_offset_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
             let request_id = channel_generation.fetch_add(1, Ordering::SeqCst) + 1;
 
             // Check cache first for instant display
-            let cached_entry = channel_cache_map_sel.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&chan_id).cloned();
+            let cached_entry = channel_cache_map_sel
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&chan_id)
+                .cloned();
             if let Some(entry) = cached_entry {
-                *channel_items_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = entry.items.clone();
-                *channel_offset_id.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = entry.next_offset;
+                *channel_items_cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = entry.items.clone();
+                *channel_offset_id
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = entry.next_offset;
                 let display_items = filter_sort_channel_items(
                     filter_catalog_items(entry.items.clone(), &local_store),
                     ui.get_channel_search_query().as_str(),
-                    *channel_duration_filter.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
-                    *channel_sort_mode.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+                    *channel_duration_filter
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                    *channel_sort_mode
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
                 );
-                let cards = display_items.iter().map(tv_item_to_card).collect::<Vec<_>>();
+                let cards = display_items
+                    .iter()
+                    .map(tv_item_to_card)
+                    .collect::<Vec<_>>();
                 set_channel_catalog(&ui, cards.clone());
                 ui.set_channel_has_more(entry.has_more);
                 ui.set_channel_loading(false);
@@ -506,370 +1001,23 @@ fn install_channel_browse_handlers(ui: &MainWindow, state: &ChannelHandlerState)
 
             // Not in cache: immediately clear previous cards so user does NOT see old items under new header!
             set_channel_catalog(&ui, vec![]);
-            *channel_items_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Vec::new();
+            *channel_items_cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Vec::new();
             ui.set_channel_loading(true);
             ui.set_channel_search_query("".into());
 
             let weak = weak.clone();
-            let local_store = local_store.clone();
-            let credential_store = credential_store.clone();
-            let resolver = resolver.clone();
-            let cached_catalog = cached_catalog.clone();
-            let category_ids = category_ids.clone();
-            let current_channel_id = current_channel_id.clone();
-            let channel_offset_id = channel_offset_id.clone();
-            let channel_items_cache = channel_items_cache.clone();
-            let channel_cache_map = channel_cache_map_sel.clone();
-            let channel_generation = channel_generation.clone();
-            let channel_sort_mode = channel_sort_mode.clone();
-            let channel_duration_filter = channel_duration_filter.clone();
-
+            let worker_state = owned_state.clone();
             std::thread::spawn(move || {
-                let res_url = local_store
-                    .get_setting("resolver_base_url")
-                    .ok()
-                    .flatten()
-                    .or_else(|| credential_store.get().ok().flatten().map(|s| s.server_url))
-                    .unwrap_or_default();
-
-                if res_url.is_empty() {
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = weak.upgrade() {
-                            if channel_generation.load(Ordering::SeqCst) == request_id
-                                && *current_channel_id.lock().unwrap_or_else(std::sync::PoisonError::into_inner) == chan_id
-                            {
-                                ui.set_channel_loading(false);
-                                ui.set_channel_error_kind("connection".into());
-                                ui.set_channel_error_message(
-                                    "Resolver URL is not configured. Add it in Settings to load channel videos.".into(),
-                                );
-                            }
-                        }
-                    });
-                    return;
-                }
-
-                if is_all {
-                    let categories = match resolver.get_categories(&res_url) {
-                        Ok(cats) => cats,
-                        Err(err) => {
-                            let _ = slint::invoke_from_event_loop(move || {
-                                if let Some(ui) = weak.upgrade() {
-                                    if channel_generation.load(Ordering::SeqCst) == request_id
-                                        && *current_channel_id.lock().unwrap_or_else(std::sync::PoisonError::into_inner) == chan_id
-                                    {
-                                        ui.set_channel_loading(false);
-                                        ui.set_channel_error_kind(resolver_error_kind(&err).into());
-                                        ui.set_channel_error_message(format!(
-                                            "Could not load channel categories: {}.",
-                                            resolver_error_summary(&err)
-                                        ).into());
-                                    }
-                                }
-                            });
-                            return;
-                        }
-                    };
-
-                    let hidden = local_store.get_hidden_channels().unwrap_or_default();
-                    let mut ids = category_ids.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                    for category in &categories {
-                        ids.insert(category.title.clone(), category.id.clone());
-                    }
-                    drop(ids);
-
-                    let visible_categories: Vec<_> = categories
-                        .into_iter()
-                        .filter(|category| !hidden.iter().any(|id| id == &category.id))
-                        .collect();
-
-                    let mut items = Vec::new();
-                    let mut seen_ids = std::collections::HashSet::new();
-
-                    // Stream results incrementally from each category
-                    for cat in visible_categories.iter().take(6) {
-                        if channel_generation.load(Ordering::SeqCst) != request_id
-                            || *current_channel_id.lock().unwrap_or_else(std::sync::PoisonError::into_inner) != "main"
-                        {
-                            return;
-                        }
-
-                        let cat_videos = if let Some(cached) = channel_cache_map.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&cat.id) {
-                            cached.items.clone()
-                        } else {
-                            let fetched = if let Ok(history) = resolver.get_channel_history(&res_url, &cat.id, 8, None) {
-                                history.videos.into_iter().map(TvItem::from).collect::<Vec<_>>()
-                            } else if let Ok(videos) = resolver.get_category_videos(&res_url, &cat.id, 1, "recent", None) {
-                                videos.into_iter().map(TvItem::from).collect::<Vec<_>>()
-                            } else {
-                                Vec::new()
-                            };
-                            if !fetched.is_empty() {
-                                channel_cache_map.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(cat.id.clone(), ChannelCacheEntry {
-                                    items: fetched.clone(),
-                                    next_offset: None,
-                                    has_more: false,
-                                });
-                            }
-                            fetched
-                        };
-
-                        for item in cat_videos {
-                            if seen_ids.insert(item.id.clone()) {
-                                items.push(item);
-                            }
-                        }
-
-                        // Incremental update to UI as each channel finishes
-                        let partial_display = filter_sort_channel_items(
-                            filter_catalog_items(items.clone(), &local_store),
-                            "",
-                            *channel_duration_filter.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
-                            *channel_sort_mode.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
-                        );
-                        let weak_partial = weak.clone();
-                        let generation_partial = channel_generation.clone();
-                        let current_channel_partial = current_channel_id.clone();
-
-                        let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(ui) = weak_partial.upgrade() {
-                                if generation_partial.load(Ordering::SeqCst) == request_id
-                                    && *current_channel_partial.lock().unwrap_or_else(std::sync::PoisonError::into_inner) == "main"
-                                {
-                                    let cards = partial_display.iter().map(tv_item_to_card).collect::<Vec<_>>();
-                                    set_channel_catalog(&ui, cards);
-                                    ui.set_channel_loading(false);
-                                }
-                            }
-                        });
-                    }
-
-                    if channel_generation.load(Ordering::SeqCst) != request_id
-                        || *current_channel_id.lock().unwrap_or_else(std::sync::PoisonError::into_inner) != "main"
-                    {
-                        return;
-                    }
-
-                    let filtered = filter_catalog_items(items, &local_store);
-                    *channel_offset_id.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-                    *channel_items_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = filtered.clone();
-
-                    channel_cache_map.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert("main".to_string(), ChannelCacheEntry {
-                        items: filtered.clone(),
-                        next_offset: None,
-                        has_more: false,
-                    });
-
-                    // Merge into cached_catalog
-                    {
-                        let mut cat_lock = cached_catalog.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                        for it in &filtered {
-                            if !cat_lock.iter().any(|x| x.id == it.id) {
-                                cat_lock.push(it.clone());
-                            }
-                        }
-                    }
-
-                    let is_empty = filtered.is_empty() && !visible_categories.is_empty();
-                    let display_items = filter_sort_channel_items(
-                        filtered,
-                        "",
-                        *channel_duration_filter.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
-                        *channel_sort_mode.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
-                    );
-                    let weak_final = weak.clone();
-                    let generation_final = channel_generation.clone();
-                    let channel_id_final = current_channel_id.clone();
-                    let refresh_items = channel_items_cache.clone();
-
-                    let _ = slint::invoke_from_event_loop(move || {
-                        let Some(ui) = weak_final.upgrade() else { return };
-                        if generation_final.load(Ordering::SeqCst) != request_id
-                            || *channel_id_final.lock().unwrap_or_else(std::sync::PoisonError::into_inner) != "main"
-                        {
-                            return;
-                        }
-                        let final_cards = display_items.iter().map(tv_item_to_card).collect::<Vec<_>>();
-                        set_channel_catalog(&ui, final_cards.clone());
-                        ui.set_channel_has_more(false);
-                        ui.set_channel_loading(false);
-                        if is_empty {
-                            ui.set_channel_error_kind("empty".into());
-                            ui.set_channel_error_message("No videos available across channel categories.".into());
-                        } else {
-                            ui.set_channel_error_kind("".into());
-                            ui.set_channel_error_message("".into());
-                        }
-                        refresh_channel_thumbnails_async(
-                            ui.as_weak(),
-                            final_cards,
-                            refresh_items,
-                            generation_final,
-                            request_id,
-                        );
-                    });
-                } else {
-                    // Single channel fetch
-                    let mut effective_channel_id = chan_id.clone();
-                    if let Ok(categories) = resolver.get_categories(&res_url) {
-                        let mut ids = category_ids.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                        for category in &categories {
-                            ids.insert(category.title.clone(), category.id.clone());
-                        }
-                        if let Some(category) = categories
-                            .iter()
-                            .find(|category| category.title.eq_ignore_ascii_case(&cat_str))
-                        {
-                            effective_channel_id = category.id.clone();
-                        }
-                    }
-
-                    let mut items = Vec::new();
-                    let mut next_offset = None;
-                    let mut has_more = false;
-                    let mut error_kind = "";
-                    let mut error_message = None;
-
-                    match resolver.get_channel_history(&res_url, &effective_channel_id, 20, None) {
-                        Ok(history) => {
-                            next_offset = history.next_offset_id;
-                            has_more = history.has_more;
-                            items.extend(history.videos.into_iter().map(TvItem::from));
-                        }
-                        Err(history_error) => {
-                            match resolver.get_category_videos(&res_url, &effective_channel_id, 1, "recent", None) {
-                                Ok(videos) => items.extend(videos.into_iter().map(TvItem::from)),
-                                Err(fallback_error) => {
-                                    error_kind = resolver_error_kind(&history_error);
-                                    error_message = Some(format!(
-                                        "Could not load channel history ({}); fallback request failed ({}).",
-                                        resolver_error_summary(&history_error),
-                                        resolver_error_summary(&fallback_error)
-                                    ));
-                                }
-                            }
-                        }
-                    }
-
-                    let duration_filter = *channel_duration_filter.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let sort_mode = *channel_sort_mode.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let mut empty_page_attempts = 0;
-                    loop {
-                        let visible = filter_sort_channel_items(
-                            filter_catalog_items(items.clone(), &local_store),
-                            "",
-                            duration_filter,
-                            sort_mode,
-                        );
-                        if !visible.is_empty() || !has_more || empty_page_attempts >= 3 {
-                            break;
-                        }
-                        let Some(offset) = next_offset else { break };
-                        match resolver.get_channel_history(
-                            &res_url,
-                            &effective_channel_id,
-                            20,
-                            Some(offset),
-                        ) {
-                            Ok(history) => {
-                                if history.next_offset_id == Some(offset) {
-                                    has_more = false;
-                                    break;
-                                }
-                                next_offset = history.next_offset_id;
-                                has_more = history.has_more;
-                                items.extend(history.videos.into_iter().map(TvItem::from));
-                            }
-                            Err(error) => {
-                                error_kind = resolver_error_kind(&error);
-                                error_message = Some(format!(
-                                    "Could not continue past filtered channel items: {}.",
-                                    resolver_error_summary(&error)
-                                ));
-                                has_more = false;
-                                break;
-                            }
-                        }
-                        empty_page_attempts += 1;
-                    }
-
-                    // Strict currency check: verify BOTH request_id AND current channel ID
-                    if channel_generation.load(Ordering::SeqCst) != request_id
-                        || *current_channel_id.lock().unwrap_or_else(std::sync::PoisonError::into_inner) != chan_id
-                    {
-                        // Cache the result for future visits, but do NOT touch the UI
-                        if !items.is_empty() {
-                            channel_cache_map.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(chan_id, ChannelCacheEntry {
-                                items: filter_catalog_items(items, &local_store),
-                                next_offset,
-                                has_more,
-                            });
-                        }
-                        return;
-                    }
-
-                    let filtered = filter_catalog_items(items, &local_store);
-                    *channel_offset_id.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = next_offset;
-                    *channel_items_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = filtered.clone();
-
-                    channel_cache_map.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(chan_id.clone(), ChannelCacheEntry {
-                        items: filtered.clone(),
-                        next_offset,
-                        has_more,
-                    });
-
-                    // Merge into cached_catalog
-                    {
-                        let mut cat_lock = cached_catalog.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                        for it in &filtered {
-                            if !cat_lock.iter().any(|x| x.id == it.id) {
-                                cat_lock.push(it.clone());
-                            }
-                        }
-                    }
-
-                    let display_items = filter_sort_channel_items(
-                        filtered.clone(),
-                        "",
-                        *channel_duration_filter.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
-                        *channel_sort_mode.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
-                    );
-                    let refresh_items = channel_items_cache.clone();
-                    let refresh_generation = channel_generation.clone();
-                    let error_details = error_message.unwrap_or_default();
-                    let error_message = if error_kind == "access-denied" {
-                        "Access to this channel was denied. Check the Resolver connection and try again.".to_owned()
-                    } else {
-                        error_details.clone()
-                    };
-
-                    slint::invoke_from_event_loop(move || {
-                        let Some(ui) = weak.upgrade() else { return };
-                        if channel_generation.load(Ordering::SeqCst) != request_id
-                            || *current_channel_id.lock().unwrap_or_else(std::sync::PoisonError::into_inner) != chan_id
-                        {
-                            return;
-                        }
-                        let cards = display_items
-                            .iter()
-                            .map(tv_item_to_card)
-                            .collect::<Vec<_>>();
-                        set_channel_catalog(&ui, cards.clone());
-                        ui.set_channel_error_message(error_message.into());
-                        ui.set_channel_error_kind(error_kind.into());
-                        ui.set_channel_error_details(error_details.into());
-                        ui.set_channel_has_more(has_more);
-                        ui.set_channel_loading(false);
-                        refresh_channel_thumbnails_async(
-                            ui.as_weak(),
-                            cards,
-                            refresh_items,
-                            refresh_generation,
-                            request_id,
-                        );
-                    })
-                    .ok();
-                }
+                run_channel_category_worker(
+                    weak,
+                    worker_state,
+                    request_id,
+                    chan_id,
+                    is_all,
+                    cat_str,
+                );
             });
         });
     }

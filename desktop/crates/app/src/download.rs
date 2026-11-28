@@ -974,6 +974,105 @@ pub(crate) fn refresh_adult_hub_session_if_current(
     }
 }
 
+/// Streams an HLS playlist through ffmpeg with cancel/pause handling.
+/// Returns `true` when the task was completed or stopped here, `false` when
+/// the caller must fall back to the plain HTTP path.
+fn download_hls_stream(
+    ctx: &crate::context::AppContext,
+    task: &DownloadTask,
+    manager: &DownloadManager,
+    url: &str,
+    headers: &[(String, String)],
+) -> bool {
+    if let Some(ffmpeg_bin) = is_ffmpeg_available() {
+        let mut cmd = Command::new(&ffmpeg_bin);
+        cmd.args(ffmpeg_hls_args(url, &task.temp_path, headers));
+        cmd.stdout(Stdio::null());
+        cmd.stderr(Stdio::null());
+
+        match cmd.spawn() {
+            Ok(child) => {
+                *task
+                    .child_process
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(child);
+                loop {
+                    std::thread::sleep(Duration::from_millis(250));
+                    if task.cancel_flag.load(Ordering::SeqCst) {
+                        if let Ok(mut ch) = task.child_process.lock() {
+                            if let Some(mut c) = ch.take() {
+                                let _ = c.kill();
+                                let _ = c.wait();
+                            }
+                        }
+                        let _ = std::fs::remove_file(&task.temp_path);
+                        *task
+                            .status
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            DownloadStatus::Error("Download cancelled".into());
+                        manager.advance_queue_if_idle(ctx);
+                        return true;
+                    }
+                    if task.pause_flag.load(Ordering::SeqCst) {
+                        if let Ok(mut ch) = task.child_process.lock() {
+                            if let Some(mut c) = ch.take() {
+                                let _ = c.kill();
+                                let _ = c.wait();
+                            }
+                        }
+                        *task
+                            .status
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            DownloadStatus::Paused;
+                        return true;
+                    }
+                    if let Ok(meta) = task.temp_path.metadata() {
+                        task.bytes_downloaded.store(meta.len(), Ordering::SeqCst);
+                    }
+                    if let Ok(mut ch) = task.child_process.lock() {
+                        if let Some(ref mut c) = *ch {
+                            if let Ok(Some(exit)) = c.try_wait() {
+                                if exit.success() {
+                                    break;
+                                } else {
+                                    let _ = std::fs::remove_file(&task.temp_path);
+                                    *task
+                                        .status
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                        DownloadStatus::Error("Transcoding stream failed".into());
+                                    manager.advance_queue_if_idle(ctx);
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(final_dest) =
+                    finalize_download(&task.temp_path, &task.target_path, &task.status)
+                {
+                    let size = task.bytes_downloaded.load(Ordering::SeqCst);
+                    manager.add_history_item(CompletedDownloadItem {
+                        item_id: task.item_id.clone(),
+                        title: task.item_title.clone(),
+                        file_path: final_dest,
+                        file_size_bytes: size,
+                    });
+                }
+                manager.advance_queue_if_idle(ctx);
+                return true;
+            }
+            Err(e) => {
+                crate::diagnostics::GLOBAL_LOG
+                    .w("Download", &format!("Could not spawn ffmpeg: {e}"));
+            }
+        }
+    }
+    false
+}
+
 /// Where a queued download actually reads from, plus the identity that lets a
 /// partial file be matched to its source.
 struct ResolvedDownloadSource {
@@ -1539,99 +1638,8 @@ fn run_download_task(
         || content_type.contains("application/x-mpegurl");
 
     // Step 5: Segmented stream handling (HLS)
-    if is_m3u8 {
-        if let Some(ffmpeg_bin) = is_ffmpeg_available() {
-            let mut cmd = Command::new(&ffmpeg_bin);
-            cmd.args(ffmpeg_hls_args(
-                &download_url,
-                &task.temp_path,
-                &download_headers,
-            ));
-            cmd.stdout(Stdio::null());
-            cmd.stderr(Stdio::null());
-
-            match cmd.spawn() {
-                Ok(child) => {
-                    *task
-                        .child_process
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(child);
-                    loop {
-                        std::thread::sleep(Duration::from_millis(250));
-                        if task.cancel_flag.load(Ordering::SeqCst) {
-                            if let Ok(mut ch) = task.child_process.lock() {
-                                if let Some(mut c) = ch.take() {
-                                    let _ = c.kill();
-                                    let _ = c.wait();
-                                }
-                            }
-                            let _ = std::fs::remove_file(&task.temp_path);
-                            *task
-                                .status
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                                DownloadStatus::Error("Download cancelled".into());
-                            manager.advance_queue_if_idle(ctx);
-                            return;
-                        }
-                        if task.pause_flag.load(Ordering::SeqCst) {
-                            if let Ok(mut ch) = task.child_process.lock() {
-                                if let Some(mut c) = ch.take() {
-                                    let _ = c.kill();
-                                    let _ = c.wait();
-                                }
-                            }
-                            *task
-                                .status
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                                DownloadStatus::Paused;
-                            return;
-                        }
-                        if let Ok(meta) = task.temp_path.metadata() {
-                            task.bytes_downloaded.store(meta.len(), Ordering::SeqCst);
-                        }
-                        if let Ok(mut ch) = task.child_process.lock() {
-                            if let Some(ref mut c) = *ch {
-                                if let Ok(Some(exit)) = c.try_wait() {
-                                    if exit.success() {
-                                        break;
-                                    } else {
-                                        let _ = std::fs::remove_file(&task.temp_path);
-                                        *task
-                                            .status
-                                            .lock()
-                                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                                            DownloadStatus::Error(
-                                                "Transcoding stream failed".into(),
-                                            );
-                                        manager.advance_queue_if_idle(ctx);
-                                        return;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if let Some(final_dest) =
-                        finalize_download(&task.temp_path, &task.target_path, &task.status)
-                    {
-                        let size = task.bytes_downloaded.load(Ordering::SeqCst);
-                        manager.add_history_item(CompletedDownloadItem {
-                            item_id: task.item_id.clone(),
-                            title: task.item_title.clone(),
-                            file_path: final_dest,
-                            file_size_bytes: size,
-                        });
-                    }
-                    manager.advance_queue_if_idle(ctx);
-                    return;
-                }
-                Err(e) => {
-                    crate::diagnostics::GLOBAL_LOG
-                        .w("Download", &format!("Could not spawn ffmpeg: {e}"));
-                }
-            }
-        }
+    if is_m3u8 && download_hls_stream(ctx, &task, &manager, &download_url, &download_headers) {
+        return;
     }
 
     // Step 6: Direct stream download with Range append or fresh create

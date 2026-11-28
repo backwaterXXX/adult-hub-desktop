@@ -297,64 +297,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let _session_keepalive = install_session_keepalive(&ui, &ctx);
 
-    // Synchronize initial settings to UI
-    match local_store.export_non_secret_config() {
-        Ok(config) => {
-            let limit_mb = config.cache_limit_mb;
-            thumbnails::set_cache_limit_mb_async(limit_mb.max(0) as usize);
-            thumbnails::set_low_ram_mode(config.low_ram_mode);
-            autoplay_active.store(config.autoplay_next, std::sync::atomic::Ordering::SeqCst);
-            ui.set_autoplay_active(config.autoplay_next);
-            ui.set_seek_step_sec(config.seek_step_sec);
-            ui.set_seek_step_label(format!("Step: {}s", config.seek_step_sec).into());
-            let limit_str = thumbnails::format_cache_limit(limit_mb);
-            ui.set_cache_limit_label(format!("Cache Limit: {limit_str}").into());
-            ui.set_cache_limit_mb(limit_mb);
-            let used_bytes = thumbnails::current_cache_size_bytes();
-            let used_str = thumbnails::format_cache_bytes(used_bytes);
-            ui.set_cache_usage_text(format!("Used: {used_str} / Limit: {limit_str}").into());
-            ui.set_phash_active(config.phash_on_playback);
-            ui.set_low_ram_active(config.low_ram_mode);
-            if let Some(url) = config
-                .resolver_base_url
-                .clone()
-                .or_else(|| local_store.get_setting("resolver_url").ok().flatten())
-            {
-                ui.set_resolver_url_input(url.clone().into());
-                ui.set_saved_resolver_url(url.into());
-                ui.set_resolver_url_dirty(false);
-            } else if !initial_resolver_url.is_empty() {
-                ui.set_resolver_url_input(initial_resolver_url.clone().into());
-                ui.set_saved_resolver_url(initial_resolver_url.clone().into());
-                ui.set_resolver_url_dirty(false);
-            }
-            if let Some(lib_name) = config.selected_library_name {
-                ui.set_current_library(lib_name.into());
-            }
-            let tags_model = Rc::new(slint::VecModel::from(
-                config
-                    .excluded_tags
-                    .into_iter()
-                    .map(slint::SharedString::from)
-                    .collect::<Vec<_>>(),
-            ));
-            ui.set_excluded_tags_list(tags_model.into());
-            let channels_model = Rc::new(slint::VecModel::from(
-                config
-                    .hidden_channel_ids
-                    .into_iter()
-                    .map(slint::SharedString::from)
-                    .collect::<Vec<_>>(),
-            ));
-            ui.set_hidden_channels_list(channels_model.into());
-        }
-        Err(err) => {
-            log::error!("Failed to load configuration: {err}");
-            ui.set_status(format!("Failed to load configuration: {err}").into());
-            ui.set_status_color(slint::Color::from_rgb_u8(240, 100, 100));
-        }
+    // Deleting watch/search history leaves free pages behind; reclaim them off
+    // the UI thread, and only when there is something worth rewriting.
+    {
+        let local_store = local_store.clone();
+        std::thread::spawn(move || compact_local_store(&local_store));
     }
-    handlers::refresh_approved_http_origins(&ui, &local_store);
+
+    sync_initial_settings(&ui, &local_store, &autoplay_active, &initial_resolver_url);
 
     let frame_pending = Arc::new(AtomicBool::new(false));
     let _polling_timer = handlers::install_all_handlers(&ui, &ctx, frame_pending.clone());
@@ -392,311 +342,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // Persist playback position and flush pending progress when the user
-    // closes the desktop window with the native title-bar control.
-    {
-        let weak = ui.as_weak();
-        let player = player.clone();
-        let reporter = reporter.clone();
-        let session_ctrl = session_ctrl.clone();
-        let current_item = current_playing_item.clone();
-        let local_store = local_store.clone();
-        let geometry_applied = geometry_applied_successfully.clone();
-        ui.window().on_close_requested(move || {
-            crate::log_debug("window: native close requested");
-            if let Some(ui) = weak.upgrade() {
-                if geometry_applied.load(std::sync::atomic::Ordering::SeqCst) {
-                    persist_window_geometry(&ui, &local_store, "close");
-                } else {
-                    log_startup("window: close requested before geometry restore completed; skipping persist to protect saved rect");
-                }
-                if ui.get_active_screen() == "player" {
-                    crate::log_debug("player: stopping playback before window close");
-                    playback::stop_active_playback_for_navigation(
-                        &ui,
-                        player.as_deref(),
-                        &reporter,
-                        &session_ctrl,
-                        &current_item,
-                    );
-                }
-                if let Some(player) = &player {
-                    let _ = player.stop();
-                }
-                let _ = slint::quit_event_loop();
-            }
-            slint::CloseRequestResponse::HideWindow
-        });
-    }
+    install_window_close_handler(
+        &ui,
+        &player,
+        &reporter,
+        &session_ctrl,
+        &current_playing_item,
+        &local_store,
+        &geometry_applied_successfully,
+    );
 
-    // Restore an HTTP session only after explicit consent for its origin.
     let pending_http_restore = Arc::new(Mutex::new(None::<Session>));
-    if let Ok(Some(session)) = credential_store.get() {
-        if session_origin_approved {
-            activate_session(
-                &ui,
-                &session,
-                &reporter,
-                &phash_coord,
-                &initial_resolver_url,
-                &local_store,
-                &home_catalog,
-            );
-            // A session saved by a pre-API build can point at a Jellyfin
-            // server, or carry an expired Adult Hub token. Validate it in the
-            // background and clear it only for definitive auth/API failures;
-            // transient network errors must not log the user out.
-            let weak = ui.as_weak();
-            let credential_store = credential_store.clone();
-            let local_store = local_store.clone();
-            let server_url = session.server_url.clone();
-            let access_token = session.access_token.clone();
-            let ctx_refresh = ctx.clone();
-            std::thread::spawn(move || {
-                let check = adult_hub_client::AdultHubClient::new(&server_url)
-                    .map(|client| client.with_token(&access_token))
-                    .and_then(|client| {
-                        client.get_categories(&adult_hub_client::CatalogTaxonomyQuery {
-                            offset: Some(0),
-                            limit: Some(1),
-                            q: None,
-                        })
-                    });
-                match saved_session_action(&check) {
-                    SavedSessionAction::Keep => return,
-                    SavedSessionAction::Refresh => {
-                        // Prefer the refresh token over a forced logout: access
-                        // tokens live 15 minutes while the refresh token lives
-                        // 30 days. Only a definitive rejection signs the user
-                        // out; a transient failure keeps the session.
-                        match crate::download::refresh_adult_hub_session_if_current(
-                            &ctx_refresh,
-                            &access_token,
-                        ) {
-                            Ok(_) => {
-                                let _ = slint::invoke_from_event_loop(move || {
-                                    if let Some(ui) = weak.upgrade() {
-                                        ui.invoke_refresh_home();
-                                    }
-                                });
-                                return;
-                            }
-                            Err(error) if refresh_failure_signs_out(&error) => {}
-                            Err(error) => {
-                                crate::log_debug(&format!(
-                                    "auth: startup refresh kept the saved session: {error:?}"
-                                ));
-                                return;
-                            }
-                        }
-                    }
-                    SavedSessionAction::SignOut => {}
-                }
-                let _ = credential_store.clear();
-                let _ = local_store.clear_session();
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = weak.upgrade() {
-                        ui.set_is_logged_in(false);
-                        ui.set_logged_in_user("".into());
-                        ui.set_login_modal_visible(true);
-                        ui.set_login_modal_message(
-                            "The saved session is not an Adult Hub server. Sign in again.".into(),
-                        );
-                        ui.set_toast_message(
-                            "Saved session expired or belongs to an old server. Sign in to Adult Hub again.".into(),
-                        );
-                        ui.set_toast_type("warning".into());
-                        ui.set_toast_action_text("Sign In".into());
-                        ui.set_toast_visible(true);
-                    }
-                });
-            });
-        } else {
-            *pending_http_restore
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(session.clone());
-            if let ServiceUrlValidation::Valid(url) =
-                ServiceUrlPolicy::inspect(&session.server_url, false)
-            {
-                ui.set_cleartext_consent_url(url.normalized.into());
-                ui.set_cleartext_consent_action("restore-session".into());
-                ui.set_cleartext_consent_visible(true);
-            }
-            ui.set_server_url_input(session.server_url.into());
-            ui.set_logged_in_user(session.username.into());
-        }
-    } else {
-        set_catalog(&ui, Vec::new());
-    }
+    restore_saved_session(
+        &ui,
+        &ctx,
+        session_origin_approved,
+        &initial_resolver_url,
+        &pending_http_restore,
+    );
 
-    // Register Toast and Modal Callbacks
-    {
-        let weak = ui.as_weak();
-        ui.on_open_resolver_settings(move || {
-            let Some(ui) = weak.upgrade() else { return };
-            ui.set_resolver_prompt_dialog_visible(false);
-            ui.set_toast_visible(false);
-            ui.set_active_screen("settings".into());
-        });
-    }
-
-    {
-        let weak = ui.as_weak();
-        ui.on_close_resolver_prompt(move || {
-            let Some(ui) = weak.upgrade() else { return };
-            ui.set_resolver_prompt_dialog_visible(false);
-        });
-    }
-
-    {
-        let weak = ui.as_weak();
-        ui.on_close_login_modal(move || {
-            let Some(ui) = weak.upgrade() else { return };
-            ui.set_login_modal_visible(false);
-        });
-    }
-
-    {
-        let weak = ui.as_weak();
-        let local_store = local_store.clone();
-        let home_catalog = home_catalog.clone();
-        let pending_http_restore = pending_http_restore.clone();
-        let reporter = reporter.clone();
-        let phash_coord = phash_coord.clone();
-        let initial_resolver_url = initial_resolver_url.clone();
-        ui.on_accept_cleartext_http_consent(move || {
-            let Some(ui) = weak.upgrade() else { return };
-            let url = ui.get_cleartext_consent_url().to_string();
-            let service_url = match ServiceUrlPolicy::inspect(&url, false) {
-                ServiceUrlValidation::Valid(url) if url.uses_cleartext => url,
-                ServiceUrlValidation::Valid(_) => {
-                    ui.set_cleartext_consent_visible(false);
-                    show_error(&ui, "Consent is only required for local HTTP servers");
-                    return;
-                }
-                ServiceUrlValidation::Invalid(error) => {
-                    ui.set_cleartext_consent_visible(false);
-                    show_error(&ui, error);
-                    return;
-                }
-            };
-            if let Err(error) = local_store.approve_cleartext_origin(&service_url.origin) {
-                show_error(&ui, format!("Could not save HTTP consent: {error}"));
-                return;
-            }
-
-            let action = ui.get_cleartext_consent_action().to_string();
-            ui.set_cleartext_consent_visible(false);
-            ui.set_cleartext_consent_action("".into());
-            handlers::refresh_approved_http_origins(&ui, &local_store);
-
-            match action.as_str() {
-                "login" => ui.invoke_perform_login(
-                    ui.get_server_url_input(),
-                    ui.get_username_input(),
-                    ui.get_password_input(),
-                ),
-                "resolver-save" => ui.invoke_save_resolver_url(ui.get_resolver_url_input()),
-                "resolver-test" => ui.invoke_test_resolver_connection(),
-                "check-connections" => ui.invoke_check_connections(),
-                "restore-session" => {
-                    if let Some(session) = pending_http_restore
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .take()
-                    {
-                        let resolver_url = if initial_resolver_url.is_empty() {
-                            session.server_url.clone()
-                        } else {
-                            initial_resolver_url.clone()
-                        };
-                        activate_session(
-                            &ui,
-                            &session,
-                            &reporter,
-                            &phash_coord,
-                            &resolver_url,
-                            &local_store,
-                            &home_catalog,
-                        );
-                    }
-                }
-                _ => {}
-            }
-        });
-    }
-
-    {
-        let weak = ui.as_weak();
-        ui.on_dismiss_cleartext_http_consent(move || {
-            let Some(ui) = weak.upgrade() else { return };
-            ui.set_cleartext_consent_visible(false);
-            ui.set_cleartext_consent_action("".into());
-        });
-    }
-
-    {
-        let weak = ui.as_weak();
-        let local_store = local_store.clone();
-        ui.on_toast_action_clicked(move || {
-            let Some(ui) = weak.upgrade() else { return };
-            let action = ui.get_toast_action_text().to_string();
-            let remove_id = ui.get_toast_remove_item_id().to_string();
-            ui.set_toast_visible(false);
-            ui.set_toast_remove_item_id("".into());
-            if action == "Configure" {
-                ui.set_resolver_prompt_dialog_visible(false);
-                ui.set_active_screen("settings".into());
-            } else if action == "Sign In" {
-                ui.set_login_modal_visible(true);
-            } else if action == "Remove" && !remove_id.is_empty() {
-                if let Err(error) = local_store.forget_item(&remove_id) {
-                    ui.set_status(format!("Could not remove unavailable item: {error}").into());
-                    ui.set_status_color(slint::Color::from_rgb_u8(244, 67, 54));
-                } else {
-                    ui.set_status("Unavailable item removed from history".into());
-                    ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
-                    ui.invoke_refresh_home();
-                }
-            }
-        });
-    }
-
-    {
-        let weak = ui.as_weak();
-        ui.on_toast_dismiss(move || {
-            let Some(ui) = weak.upgrade() else { return };
-            ui.set_toast_visible(false);
-            ui.set_toast_remove_item_id("".into());
-        });
-    }
-
-    {
-        let weak = ui.as_weak();
-        ui.on_activate_focused_card(move || {
-            let Some(ui) = weak.upgrade() else { return };
-            let idx = ui.get_focused_card_index();
-            if idx < 0 {
-                return;
-            }
-            let items = ui.get_catalog_items();
-            if let Some(card) = items.row_data(idx as usize) {
-                ui.invoke_play_item(card.id);
-            }
-        });
-    }
-
-    {
-        let weak = ui.as_weak();
-        ui.on_activate_focused_channel_card(move || {
-            let Some(ui) = weak.upgrade() else { return };
-            let idx = ui.get_focused_channel_card_index() as usize;
-            let items = ui.get_channel_items();
-            if let Some(card) = items.row_data(idx) {
-                ui.invoke_play_item(card.id);
-            }
-        });
-    }
+    install_shell_handlers(
+        &ui,
+        &ctx,
+        &pending_http_restore,
+        &initial_resolver_url,
+        &phash_coord,
+    );
 
     if let Some(ref p) = player {
         let on_renderer_ready: Box<dyn FnOnce()> = if let Some(initial) = initial_media(&options) {
@@ -1117,6 +788,412 @@ fn probe_opengl() -> Result<String, String> {
     result
 }
 
+/// Applies the persisted configuration before the first frame, so the UI
+/// never flashes defaults that the user already changed.
+fn sync_initial_settings(
+    ui: &MainWindow,
+    local_store: &LocalStore,
+    autoplay_active: &Arc<AtomicBool>,
+    initial_resolver_url: &str,
+) {
+    // Synchronize initial settings to UI
+    match local_store.export_non_secret_config() {
+        Ok(config) => {
+            let limit_mb = config.cache_limit_mb;
+            thumbnails::set_cache_limit_mb_async(limit_mb.max(0) as usize);
+            thumbnails::set_low_ram_mode(config.low_ram_mode);
+            autoplay_active.store(config.autoplay_next, std::sync::atomic::Ordering::SeqCst);
+            ui.set_autoplay_active(config.autoplay_next);
+            ui.set_seek_step_sec(config.seek_step_sec);
+            ui.set_seek_step_label(format!("Step: {}s", config.seek_step_sec).into());
+            let limit_str = thumbnails::format_cache_limit(limit_mb);
+            ui.set_cache_limit_label(format!("Cache Limit: {limit_str}").into());
+            ui.set_cache_limit_mb(limit_mb);
+            let used_bytes = thumbnails::current_cache_size_bytes();
+            let used_str = thumbnails::format_cache_bytes(used_bytes);
+            ui.set_cache_usage_text(format!("Used: {used_str} / Limit: {limit_str}").into());
+            ui.set_phash_active(config.phash_on_playback);
+            ui.set_low_ram_active(config.low_ram_mode);
+            if let Some(url) = config
+                .resolver_base_url
+                .clone()
+                .or_else(|| local_store.get_setting("resolver_url").ok().flatten())
+            {
+                ui.set_resolver_url_input(url.clone().into());
+                ui.set_saved_resolver_url(url.into());
+                ui.set_resolver_url_dirty(false);
+            } else if !initial_resolver_url.is_empty() {
+                ui.set_resolver_url_input(initial_resolver_url.into());
+                ui.set_saved_resolver_url(initial_resolver_url.into());
+                ui.set_resolver_url_dirty(false);
+            }
+            if let Some(lib_name) = config.selected_library_name {
+                ui.set_current_library(lib_name.into());
+            }
+            let tags_model = Rc::new(slint::VecModel::from(
+                config
+                    .excluded_tags
+                    .into_iter()
+                    .map(slint::SharedString::from)
+                    .collect::<Vec<_>>(),
+            ));
+            ui.set_excluded_tags_list(tags_model.into());
+            let channels_model = Rc::new(slint::VecModel::from(
+                config
+                    .hidden_channel_ids
+                    .into_iter()
+                    .map(slint::SharedString::from)
+                    .collect::<Vec<_>>(),
+            ));
+            ui.set_hidden_channels_list(channels_model.into());
+        }
+        Err(err) => {
+            log::error!("Failed to load configuration: {err}");
+            ui.set_status(format!("Failed to load configuration: {err}").into());
+            ui.set_status_color(slint::Color::from_rgb_u8(240, 100, 100));
+        }
+    }
+    handlers::refresh_approved_http_origins(ui, local_store);
+}
+
+/// Persists geometry and progress when the native title-bar close button is
+/// used; the event loop is quit only after the flush.
+#[allow(clippy::too_many_arguments)]
+fn install_window_close_handler(
+    ui: &MainWindow,
+    player: &Option<Arc<adult_hub_player::Player>>,
+    reporter: &Arc<PlaybackReporter>,
+    session_ctrl: &Arc<PlaybackSessionController>,
+    current_playing_item: &Arc<Mutex<Option<TvItem>>>,
+    local_store: &Arc<LocalStore>,
+    geometry_applied_successfully: &Arc<AtomicBool>,
+) {
+    // Persist playback position and flush pending progress when the user
+    // closes the desktop window with the native title-bar control.
+    {
+        let weak = ui.as_weak();
+        let player = player.clone();
+        let reporter = reporter.clone();
+        let session_ctrl = session_ctrl.clone();
+        let current_item = current_playing_item.clone();
+        let local_store = local_store.clone();
+        let geometry_applied = geometry_applied_successfully.clone();
+        ui.window().on_close_requested(move || {
+        crate::log_debug("window: native close requested");
+        if let Some(ui) = weak.upgrade() {
+            if geometry_applied.load(std::sync::atomic::Ordering::SeqCst) {
+                persist_window_geometry(&ui, &local_store, "close");
+            } else {
+                log_startup("window: close requested before geometry restore completed; skipping persist to protect saved rect");
+            }
+            if ui.get_active_screen() == "player" {
+                crate::log_debug("player: stopping playback before window close");
+                playback::stop_active_playback_for_navigation(
+                    &ui,
+                    player.as_deref(),
+                    &reporter,
+                    &session_ctrl,
+                    &current_item,
+                );
+            }
+            if let Some(player) = &player {
+                let _ = player.stop();
+            }
+            let _ = slint::quit_event_loop();
+        }
+        slint::CloseRequestResponse::HideWindow
+    });
+    }
+}
+
+/// Restores the saved session only when the user already approved cleartext
+/// HTTP for its origin. Validation runs off-thread and signs the user out
+/// only on definitive auth failures.
+fn restore_saved_session(
+    ui: &MainWindow,
+    ctx: &AppContext,
+    session_origin_approved: bool,
+    initial_resolver_url: &str,
+    pending_http_restore: &Arc<Mutex<Option<Session>>>,
+) {
+    let credential_store = ctx.credential_store.clone();
+    let local_store = ctx.local_store.clone();
+    let home_catalog = ctx.catalog.home_catalog.clone();
+    let reporter = ctx.reporter.clone();
+    let phash_coord = ctx.phash_coord.clone();
+    let initial_resolver_url = initial_resolver_url.to_string();
+    if let Ok(Some(session)) = credential_store.get() {
+        if session_origin_approved {
+            activate_session(
+                ui,
+                &session,
+                &reporter,
+                &phash_coord,
+                &initial_resolver_url,
+                &local_store,
+                &home_catalog,
+            );
+            // A session saved by a pre-API build can point at a Jellyfin
+            // server, or carry an expired Adult Hub token. Validate it in the
+            // background and clear it only for definitive auth/API failures;
+            // transient network errors must not log the user out.
+            let weak = ui.as_weak();
+            let credential_store = credential_store.clone();
+            let local_store = local_store.clone();
+            let server_url = session.server_url.clone();
+            let access_token = session.access_token.clone();
+            let ctx_refresh = ctx.clone();
+            std::thread::spawn(move || {
+                let check = adult_hub_client::AdultHubClient::new(&server_url)
+                    .map(|client| client.with_token(&access_token))
+                    .and_then(|client| {
+                        client.get_categories(&adult_hub_client::CatalogTaxonomyQuery {
+                            offset: Some(0),
+                            limit: Some(1),
+                            q: None,
+                        })
+                    });
+                match saved_session_action(&check) {
+                    SavedSessionAction::Keep => return,
+                    SavedSessionAction::Refresh => {
+                        // Prefer the refresh token over a forced logout: access
+                        // tokens live 15 minutes while the refresh token lives
+                        // 30 days. Only a definitive rejection signs the user
+                        // out; a transient failure keeps the session.
+                        match crate::download::refresh_adult_hub_session_if_current(
+                            &ctx_refresh,
+                            &access_token,
+                        ) {
+                            Ok(_) => {
+                                let _ = slint::invoke_from_event_loop(move || {
+                                    if let Some(ui) = weak.upgrade() {
+                                        ui.invoke_refresh_home();
+                                    }
+                                });
+                                return;
+                            }
+                            Err(error) if refresh_failure_signs_out(&error) => {}
+                            Err(error) => {
+                                crate::log_debug(&format!(
+                                    "auth: startup refresh kept the saved session: {error:?}"
+                                ));
+                                return;
+                            }
+                        }
+                    }
+                    SavedSessionAction::SignOut => {}
+                }
+                let _ = credential_store.clear();
+                let _ = local_store.clear_session();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_is_logged_in(false);
+                        ui.set_logged_in_user("".into());
+                        ui.set_login_modal_visible(true);
+                        ui.set_login_modal_message(
+                            "The saved session is not an Adult Hub server. Sign in again.".into(),
+                        );
+                        ui.set_toast_message(
+                        "Saved session expired or belongs to an old server. Sign in to Adult Hub again.".into(),
+                    );
+                        ui.set_toast_type("warning".into());
+                        ui.set_toast_action_text("Sign In".into());
+                        ui.set_toast_visible(true);
+                    }
+                });
+            });
+        } else {
+            *pending_http_restore
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(session.clone());
+            if let ServiceUrlValidation::Valid(url) =
+                ServiceUrlPolicy::inspect(&session.server_url, false)
+            {
+                ui.set_cleartext_consent_url(url.normalized.into());
+                ui.set_cleartext_consent_action("restore-session".into());
+                ui.set_cleartext_consent_visible(true);
+            }
+            ui.set_server_url_input(session.server_url.into());
+            ui.set_logged_in_user(session.username.into());
+        }
+    } else {
+        set_catalog(ui, Vec::new());
+    }
+}
+
+/// Handlers for the toast, modal and focus chrome that does not belong to a
+/// single screen.
+fn install_shell_handlers(
+    ui: &MainWindow,
+    ctx: &AppContext,
+    pending_http_restore: &Arc<Mutex<Option<Session>>>,
+    initial_resolver_url: &str,
+    phash_coord: &Arc<phash::PhashCoordinator>,
+) {
+    let local_store = ctx.local_store.clone();
+    let home_catalog = ctx.catalog.home_catalog.clone();
+    let reporter = ctx.reporter.clone();
+    let initial_resolver_url = initial_resolver_url.to_string();
+    let pending_http_restore = pending_http_restore.clone();
+    {
+        let weak = ui.as_weak();
+        ui.on_open_resolver_settings(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            ui.set_resolver_prompt_dialog_visible(false);
+            ui.set_toast_visible(false);
+            ui.set_active_screen("settings".into());
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_close_resolver_prompt(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            ui.set_resolver_prompt_dialog_visible(false);
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_close_login_modal(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            ui.set_login_modal_visible(false);
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let local_store = local_store.clone();
+        let home_catalog = home_catalog.clone();
+        let pending_http_restore = pending_http_restore.clone();
+        let reporter = reporter.clone();
+        let phash_coord = phash_coord.clone();
+        let initial_resolver_url = initial_resolver_url.clone();
+        ui.on_accept_cleartext_http_consent(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let url = ui.get_cleartext_consent_url().to_string();
+            let service_url = match ServiceUrlPolicy::inspect(&url, false) {
+                ServiceUrlValidation::Valid(url) if url.uses_cleartext => url,
+                ServiceUrlValidation::Valid(_) => {
+                    ui.set_cleartext_consent_visible(false);
+                    show_error(&ui, "Consent is only required for local HTTP servers");
+                    return;
+                }
+                ServiceUrlValidation::Invalid(error) => {
+                    ui.set_cleartext_consent_visible(false);
+                    show_error(&ui, error);
+                    return;
+                }
+            };
+            if let Err(error) = local_store.approve_cleartext_origin(&service_url.origin) {
+                show_error(&ui, format!("Could not save HTTP consent: {error}"));
+                return;
+            }
+            let action = ui.get_cleartext_consent_action().to_string();
+            ui.set_cleartext_consent_visible(false);
+            ui.set_cleartext_consent_action("".into());
+            handlers::refresh_approved_http_origins(&ui, &local_store);
+            match action.as_str() {
+                "login" => ui.invoke_perform_login(
+                    ui.get_server_url_input(),
+                    ui.get_username_input(),
+                    ui.get_password_input(),
+                ),
+                "resolver-save" => ui.invoke_save_resolver_url(ui.get_resolver_url_input()),
+                "resolver-test" => ui.invoke_test_resolver_connection(),
+                "check-connections" => ui.invoke_check_connections(),
+                "restore-session" => {
+                    if let Some(session) = pending_http_restore
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take()
+                    {
+                        let resolver_url = if initial_resolver_url.is_empty() {
+                            session.server_url.clone()
+                        } else {
+                            initial_resolver_url.clone()
+                        };
+                        activate_session(
+                            &ui,
+                            &session,
+                            &reporter,
+                            &phash_coord,
+                            &resolver_url,
+                            &local_store,
+                            &home_catalog,
+                        );
+                    }
+                }
+                _ => {}
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_dismiss_cleartext_http_consent(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            ui.set_cleartext_consent_visible(false);
+            ui.set_cleartext_consent_action("".into());
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let local_store = local_store.clone();
+        ui.on_toast_action_clicked(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let action = ui.get_toast_action_text().to_string();
+            let remove_id = ui.get_toast_remove_item_id().to_string();
+            ui.set_toast_visible(false);
+            ui.set_toast_remove_item_id("".into());
+            if action == "Configure" {
+                ui.set_resolver_prompt_dialog_visible(false);
+                ui.set_active_screen("settings".into());
+            } else if action == "Sign In" {
+                ui.set_login_modal_visible(true);
+            } else if action == "Remove" && !remove_id.is_empty() {
+                if let Err(error) = local_store.forget_item(&remove_id) {
+                    ui.set_status(format!("Could not remove unavailable item: {error}").into());
+                    ui.set_status_color(slint::Color::from_rgb_u8(244, 67, 54));
+                } else {
+                    ui.set_status("Unavailable item removed from history".into());
+                    ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
+                    ui.invoke_refresh_home();
+                }
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_toast_dismiss(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            ui.set_toast_visible(false);
+            ui.set_toast_remove_item_id("".into());
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_activate_focused_card(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let idx = ui.get_focused_card_index();
+            if idx < 0 {
+                return;
+            }
+            let items = ui.get_catalog_items();
+            if let Some(card) = items.row_data(idx as usize) {
+                ui.invoke_play_item(card.id);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_activate_focused_channel_card(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let idx = ui.get_focused_channel_card_index() as usize;
+            let items = ui.get_channel_items();
+            if let Some(card) = items.row_data(idx) {
+                ui.invoke_play_item(card.id);
+            }
+        });
+    }
+}
+
 /// A panic used to leave nothing behind: the window vanished and the startup
 /// log stayed silent. Every panic is now recorded (redacted) before the default
 /// hook prints it, so a support case starts from the log line.
@@ -1144,6 +1221,22 @@ fn install_panic_logger() {
 /// make a reported crash impossible to place.
 fn format_panic(thread: &str, location: &str, payload: &str) -> String {
     format!("panic in thread '{thread}' at {location}: {payload}")
+}
+
+/// Below this the rewrite costs more than it frees.
+const MIN_RECLAIM_BYTES: i64 = 16 * 1024 * 1024;
+
+/// Runs on a background thread at start-up: hands SQLite free pages back to the
+/// filesystem once enough of them piled up.
+fn compact_local_store(local_store: &adult_hub_storage::LocalStore) {
+    match local_store.reclaimable_bytes() {
+        Ok(bytes) if bytes >= MIN_RECLAIM_BYTES => match local_store.vacuum() {
+            Ok(()) => crate::log_debug(&format!("store: vacuum reclaimed {bytes} bytes")),
+            Err(error) => crate::log_debug(&format!("store: vacuum failed: {error}")),
+        },
+        Ok(_) => {}
+        Err(error) => crate::log_debug(&format!("store: cannot read freelist: {error}")),
+    }
 }
 
 pub(crate) fn startup_log_path() -> std::path::PathBuf {

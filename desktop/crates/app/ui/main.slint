@@ -2766,6 +2766,10 @@ export component MainWindow inherits Window {
     callback import-config();
     callback export-diagnostics();
     callback open-logs-folder();
+    callback show-startup-log();
+    // Startup log viewer in Settings; text is filled on demand.
+    in-out property <bool> startup-log-visible: false;
+    in property <string> startup-log-text: "";
 
     // Stage 5 Update State & Callbacks
     in-out property <bool> auto-update-enabled: true;
@@ -7981,6 +7985,8 @@ export component MainWindow inherits Window {
                 stream-connection-state: root.stream-connection-state;
                 stream-check-status: root.stream-check-status;
                 connection-diagnostics: root.connection-diagnostics;
+                startup-log-visible <=> root.startup-log-visible;
+                startup-log-text: root.startup-log-text;
                 phash-active: root.phash-active;
                 phash-status-text: root.phash-status-text;
                 buffer-profile: root.buffer-profile;
@@ -8056,6 +8062,7 @@ export component MainWindow inherits Window {
                 import-config => { root.import-config(); }
                 export-diagnostics => { root.export-diagnostics(); }
                 open-logs-folder => { root.open-logs-folder(); }
+                show-startup-log => { root.show-startup-log(); }
                 toggle-auto-update => { root.toggle-auto-update(); }
                 check-for-updates => { root.check-for-updates(); }
                 start-update-download => { root.start-update-download(); }

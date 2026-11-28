@@ -205,6 +205,23 @@ impl LocalStore {
         Ok(store)
     }
 
+    /// Space SQLite still reserves for rows that were deleted (watch history,
+    /// search history). `VACUUM` only pays off once this is meaningful.
+    pub fn reclaimable_bytes(&self) -> Result<i64> {
+        let conn = self.conn()?;
+        let free_pages: i64 = conn.query_row("PRAGMA freelist_count", [], |row| row.get(0))?;
+        let page_size: i64 = conn.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+        Ok(free_pages.saturating_mul(page_size))
+    }
+
+    /// Hands the free pages back to the filesystem. Start-up cost is one table
+    /// rewrite, so callers gate it on [`Self::reclaimable_bytes`].
+    pub fn vacuum(&self) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM;")?;
+        Ok(())
+    }
+
     fn run_migrations(&self) -> Result<()> {
         let mut conn = self.conn()?;
         conn.execute_batch(
@@ -1785,6 +1802,26 @@ fn clear_platform_session(session_file: &std::path::Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vacuum_reclaims_pages_left_by_deletes() {
+        let store = LocalStore::open_in_memory().unwrap();
+        for i in 0..400 {
+            store
+                .add_search_query(&format!("query {i} with some padding text"))
+                .unwrap();
+        }
+        assert_eq!(store.reclaimable_bytes().unwrap(), 0);
+
+        store.clear_search_history().unwrap();
+        assert!(
+            store.reclaimable_bytes().unwrap() > 0,
+            "deleting rows must leave free pages behind"
+        );
+
+        store.vacuum().unwrap();
+        assert_eq!(store.reclaimable_bytes().unwrap(), 0);
+    }
 
     #[test]
     fn settings_crud() {
