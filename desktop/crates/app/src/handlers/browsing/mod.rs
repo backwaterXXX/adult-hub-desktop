@@ -278,6 +278,13 @@ struct CatalogViewSnapshot {
     search_all_total_count: i32,
 }
 
+/// The count the grid reports for a freshly fetched page. While more pages
+/// exist the server total is authoritative; on the last page only the loaded
+/// cards can be counted.
+fn catalog_total_for_page(has_more: bool, server_total: usize, loaded: usize) -> usize {
+    if has_more { server_total } else { loaded }
+}
+
 fn catalog_view_key(page: &CatalogPageState) -> String {
     format!(
         "{}\0{}\0{}\0{}\0{}\0{:?}",
@@ -2769,11 +2776,7 @@ fn apply_category_page(
         .collect::<Vec<_>>();
     set_catalog(ui, cards.clone());
     ui.set_catalog_has_more(data.has_more);
-    let reported_total = if data.has_more {
-        data.total_count
-    } else {
-        cards.len()
-    };
+    let reported_total = catalog_total_for_page(data.has_more, data.total_count, cards.len());
     ui.set_catalog_total_count(reported_total as i32);
     ui.set_is_loading_more(false);
     ui.set_is_loading_catalog(false);

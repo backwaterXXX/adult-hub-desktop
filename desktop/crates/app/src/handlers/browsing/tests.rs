@@ -772,3 +772,45 @@ fn load_more_catalog_merge_keeps_one_card_per_studio() {
     merge_browse_page("Latest", &mut plain, vec![studio_item("second", "vixen")]);
     assert_eq!(catalog_ids(&plain), vec!["first", "second"]);
 }
+
+#[test]
+fn reported_total_uses_the_server_count_only_while_more_pages_exist() {
+    // Mid-pagination the server total is the only number that covers the rest.
+    assert_eq!(catalog_total_for_page(true, 5_000, 50), 5_000);
+    // On the last page the server total can lag behind the loaded cards.
+    assert_eq!(catalog_total_for_page(false, 900, 950), 950);
+    assert_eq!(catalog_total_for_page(false, 0, 12), 12);
+}
+
+#[test]
+fn catalog_view_key_separates_views_that_only_differ_in_state() {
+    let base = CatalogPageState {
+        category: "Latest".into(),
+        query: String::new(),
+        library_id: "lib-1".into(),
+        ..CatalogPageState::default()
+    };
+    let key = catalog_view_key(&base);
+
+    let mut filtered = base.clone();
+    filtered.filters.genre = "Anal".into();
+    assert_ne!(key, catalog_view_key(&filtered), "filters must take part");
+
+    let mut drilled = base.clone();
+    drilled.drilldown = true;
+    assert_ne!(key, catalog_view_key(&drilled), "drilldown must take part");
+
+    let mut other_library = base.clone();
+    other_library.library_id = "lib-2".into();
+    assert_ne!(
+        key,
+        catalog_view_key(&other_library),
+        "libraries must not share a cached view"
+    );
+
+    let mut search = base.clone();
+    search.is_search = true;
+    assert_ne!(key, catalog_view_key(&search), "search must take part");
+
+    assert_eq!(key, catalog_view_key(&base.clone()));
+}
