@@ -21,12 +21,404 @@ fn read_limited(response: reqwest::blocking::Response, limit: u64) -> Option<Vec
     (bytes.len() as u64 <= limit).then_some(bytes)
 }
 
+/// Release the user accepted, kept until the download finishes or is cancelled.
+type PendingUpdate = Arc<Mutex<Option<(updater::UpdateManifest, updater::UpdatePackage)>>>;
+
+/// Staged installer plus the runtime DLL that came with it.
+type StagedInstaller = Arc<Mutex<Option<(PathBuf, Option<PathBuf>)>>>;
+
 fn set_checking_ui(weak: slint::Weak<MainWindow>, checking: bool, status: Option<String>) {
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = weak.upgrade() {
             ui.set_update_checking(checking);
             if let Some(status) = status {
                 ui.set_update_status(status.into());
+            }
+        }
+    });
+}
+
+/// The check shared by the button and the start-up auto-check. It runs the
+/// network work on its own thread and keeps only one check in flight.
+fn make_update_check(
+    weak: slint::Weak<MainWindow>,
+    pending_update: PendingUpdate,
+    check_in_flight: Arc<AtomicBool>,
+) -> Arc<dyn Fn(bool) + Send + Sync> {
+    let pending = pending_update;
+    Arc::new(move |silent_if_uptodate: bool| {
+        if check_in_flight.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        set_checking_ui(
+            weak.clone(),
+            true,
+            Some("Checking for updates...".to_owned()),
+        );
+        let weak_thread = weak.clone();
+        let pending_thread = pending.clone();
+        let check_in_flight_thread = check_in_flight.clone();
+
+        std::thread::spawn(move || {
+            let default_release_url = concat!(
+                "https://github.com/",
+                env!("ADULT_HUB_UPDATE_REPOSITORY"),
+                "/releases/latest/download/adult-hub-update-manifest.json"
+            );
+            let release_url = std::env::var("ADULT_HUB_UPDATE_URL")
+                .unwrap_or_else(|_| default_release_url.to_owned());
+            let valid_scheme = release_url.starts_with("https://")
+                || release_url.starts_with("http://127.0.0.1")
+                || release_url.starts_with("http://localhost");
+            if !valid_scheme {
+                check_in_flight_thread.store(false, Ordering::Release);
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak_thread.upgrade() {
+                        ui.set_update_checking(false);
+                        ui.set_update_status(
+                            "Update check error: invalid update URL scheme".into(),
+                        );
+                    }
+                });
+                return;
+            }
+            let sig_url = format!("{release_url}.sig");
+
+            let client = match reqwest::blocking::Client::builder()
+                .connect_timeout(Duration::from_secs(15))
+                .timeout(Duration::from_secs(30))
+                .build()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    check_in_flight_thread.store(false, Ordering::Release);
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak_thread.upgrade() {
+                            ui.set_update_checking(false);
+                            ui.set_update_status(format!("Update check error: {e}").into());
+                        }
+                    });
+                    return;
+                }
+            };
+
+            let manifest_res = client.get(&release_url).send();
+            let sig_res = client.get(&sig_url).send();
+
+            match (manifest_res, sig_res) {
+                (Ok(m_resp), Ok(s_resp))
+                    if m_resp.status().is_success() && s_resp.status().is_success() =>
+                {
+                    let m_bytes = read_limited(m_resp, MAX_MANIFEST_BYTES).unwrap_or_default();
+                    let s_bytes = read_limited(s_resp, MAX_SIGNATURE_BYTES).unwrap_or_default();
+
+                    match updater::parse_and_verify_manifest(
+                        &m_bytes,
+                        &s_bytes,
+                        &updater::EMBEDDED_RELEASE_PUBLIC_KEY,
+                        updater::DEFAULT_ALLOWED_HOSTS,
+                    ) {
+                        Ok(manifest) => {
+                            let curr_ver = env!("CARGO_PKG_VERSION");
+                            let is_newer = updater::is_newer_version(&manifest.version, curr_ver);
+                            let is_appimage = std::env::var("APPIMAGE").is_ok();
+                            let target_os = if cfg!(windows) { "windows" } else { "linux" };
+                            let pkg = updater::select_best_package(
+                                &manifest.packages,
+                                target_os,
+                                "x86_64",
+                                is_appimage,
+                            )
+                            .cloned();
+                            let manifest_clone = manifest.clone();
+
+                            check_in_flight_thread.store(false, Ordering::Release);
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(ui) = weak_thread.upgrade() {
+                                    ui.set_update_checking(false);
+                                    if is_newer {
+                                        if let Some(p) = pkg {
+                                            ui.set_update_available(true);
+                                            ui.set_update_ready(false);
+                                            ui.set_update_version(
+                                                manifest_clone.version.clone().into(),
+                                            );
+                                            ui.set_update_release_notes(
+                                                manifest_clone
+                                                    .release_notes
+                                                    .clone()
+                                                    .unwrap_or_default()
+                                                    .into(),
+                                            );
+                                            let total_size = p.size_bytes
+                                                + p.runtime_dll
+                                                    .as_ref()
+                                                    .map_or(0, |dll| dll.size_bytes);
+                                            let size_mb = total_size / (1024 * 1024);
+                                            ui.set_update_status(
+                                                format!(
+                                                    "Update available: v{} ({} MB)",
+                                                    manifest_clone.version, size_mb
+                                                )
+                                                .into(),
+                                            );
+                                            *pending_thread.lock().unwrap_or_else(
+                                                std::sync::PoisonError::into_inner,
+                                            ) = Some((manifest_clone, p));
+                                        } else {
+                                            ui.set_update_available(false);
+                                            ui.set_update_ready(false);
+                                            *pending_thread.lock().unwrap_or_else(
+                                                std::sync::PoisonError::into_inner,
+                                            ) = None;
+                                            if !silent_if_uptodate {
+                                                ui.set_update_status(format!(
+                                                    "Version {} is available, but this platform has no supported installer package.",
+                                                    manifest_clone.version
+                                                ).into());
+                                            } else {
+                                                ui.set_update_status("".into());
+                                            }
+                                        }
+                                    } else if !silent_if_uptodate {
+                                        ui.set_update_available(false);
+                                        ui.set_update_ready(false);
+                                        *pending_thread
+                                            .lock()
+                                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                            None;
+                                        ui.set_update_status(
+                                            format!(
+                                                "You are on the latest version (v{}).",
+                                                curr_ver
+                                            )
+                                            .into(),
+                                        );
+                                    } else {
+                                        ui.set_update_status("".into());
+                                    }
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            check_in_flight_thread.store(false, Ordering::Release);
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(ui) = weak_thread.upgrade() {
+                                    ui.set_update_checking(false);
+                                    ui.set_update_status(
+                                        format!("Manifest verification failed: {e}").into(),
+                                    );
+                                }
+                            });
+                        }
+                    }
+                }
+                _ => {
+                    check_in_flight_thread.store(false, Ordering::Release);
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak_thread.upgrade() {
+                            ui.set_update_checking(false);
+                            if !silent_if_uptodate {
+                                ui.set_update_status(
+                                    "Up to date or no release manifest reachable.".into(),
+                                );
+                            } else {
+                                ui.set_update_status("".into());
+                            }
+                        }
+                    });
+                }
+            }
+        });
+    })
+}
+
+/// Callback: Start Update Download, split out of `install_stage5_handlers`.
+fn install_update_download_handler(
+    ui: &MainWindow,
+    pending_update: &PendingUpdate,
+    downloaded_installer: &StagedInstaller,
+    cancel_download: &Arc<AtomicBool>,
+) {
+    let weak = ui.as_weak();
+    let pending = pending_update.clone();
+    let downloaded = downloaded_installer.clone();
+    let cancel = cancel_download.clone();
+    ui.on_start_update_download(move || {
+        let pkg_opt = pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|(_, p)| p.clone());
+        if let Some(package) = pkg_opt {
+            cancel.store(false, Ordering::SeqCst);
+            if let Some(ui) = weak.upgrade() {
+                ui.set_update_downloading(true);
+                ui.set_update_ready(false);
+                ui.set_update_progress(0.0);
+                ui.set_update_status("Preparing update...".into());
+            }
+            let weak_thread = weak.clone();
+            let downloaded_thread = downloaded.clone();
+            let cancel_thread = cancel.clone();
+            std::thread::spawn(move || {
+                // Deciding whether the runtime is current reads 120 MB, so it
+                // runs here instead of between the click and the download.
+                let runtime_dll = package
+                    .runtime_dll
+                    .as_deref()
+                    .cloned()
+                    .filter(|dll| !updater::installed_runtime_matches(dll));
+                let keeps_installed_runtime =
+                    runtime_dll.is_none() && package.runtime_dll.is_some();
+                let main_size = package.size_bytes;
+                let combined_size =
+                    main_size + runtime_dll.as_ref().map_or(0, |dll| dll.size_bytes);
+                let total_mb = (combined_size as f64) / (1024.0 * 1024.0);
+                if keeps_installed_runtime {
+                    let weak_status = weak_thread.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak_status.upgrade() {
+                            ui.set_update_status(
+                                "Downloading the application (libmpv runtime is up to date)..."
+                                    .into(),
+                            );
+                        }
+                    });
+                }
+                let is_cancelled = {
+                    let cancel = cancel_thread.clone();
+                    move || cancel.load(Ordering::SeqCst)
+                };
+                let report = |weak: slint::Weak<MainWindow>, done: u64| {
+                    if combined_size == 0 {
+                        return;
+                    }
+                    let progress = (done as f32) / (combined_size as f32);
+                    let done_mb = (done as f64) / (1024.0 * 1024.0);
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak.upgrade() {
+                            ui.set_update_progress(progress);
+                            ui.set_update_status(
+                                format!(
+                                    "Downloading: {:.1}% ({:.1} MB / {:.1} MB)",
+                                    progress * 100.0,
+                                    done_mb,
+                                    total_mb
+                                )
+                                .into(),
+                            );
+                        }
+                    });
+                };
+
+                let res = updater::download_and_verify_package(
+                    &package,
+                    &is_cancelled,
+                    |bytes, _total| report(weak_thread.clone(), bytes),
+                )
+                .and_then(|exe_path| {
+                    let dll_path = runtime_dll
+                        .as_ref()
+                        .map(|dll| {
+                            updater::download_and_verify_package(
+                                dll,
+                                &is_cancelled,
+                                |bytes, _total| report(weak_thread.clone(), main_size + bytes),
+                            )
+                        })
+                        .transpose()?;
+                    Ok((exe_path, dll_path))
+                });
+
+                match res {
+                    Ok(verified_paths) => {
+                        *downloaded_thread
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            Some(verified_paths);
+                        let weak_done = weak_thread.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = weak_done.upgrade() {
+                                ui.set_update_downloading(false);
+                                ui.set_update_ready(true);
+                                ui.set_update_status("Update verified! Ready to install.".into());
+                            }
+                        });
+                    }
+                    Err(updater::UpdateError::Cancelled) => {
+                        let weak_cancelled = weak_thread.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = weak_cancelled.upgrade() {
+                                ui.set_update_downloading(false);
+                                ui.set_update_ready(false);
+                                ui.set_update_progress(0.0);
+                                ui.set_update_status("Update download cancelled.".into());
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        let weak_failed = weak_thread.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = weak_failed.upgrade() {
+                                ui.set_update_downloading(false);
+                                ui.set_update_status(format!("Download failed: {e}").into());
+                            }
+                        });
+                    }
+                }
+            });
+        }
+    });
+}
+
+/// Callback: Install Update, split out of `install_stage5_handlers`.
+fn install_update_install_handler(
+    ui: &MainWindow,
+    pending_update: &PendingUpdate,
+    downloaded_installer: &StagedInstaller,
+) {
+    let weak = ui.as_weak();
+    let pending = pending_update.clone();
+    let downloaded = downloaded_installer.clone();
+    ui.on_install_update(move || {
+        let pkg_opt = pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|(_, p)| p.clone());
+        let paths_opt = downloaded
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let (Some(pkg), Some((path, runtime_dll))) = (pkg_opt, paths_opt) {
+            let playback_active = weak.upgrade().is_some_and(|ui| {
+                ui.get_active_screen() == "player"
+                    && ui.get_status() != "Ready"
+                    && !ui.get_url_text().trim().is_empty()
+            });
+            let runtime_integrity = pkg
+                .runtime_dll
+                .as_deref()
+                .map(|dll| (dll.sha256.as_str(), dll.size_bytes));
+            match updater::launch_installation(
+                &pkg.package_type,
+                &path,
+                Some((&pkg.sha256, pkg.size_bytes)),
+                runtime_dll.as_deref(),
+                runtime_integrity,
+                playback_active,
+            ) {
+                Ok(()) => {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_update_status("Update launched. Closing application...".into());
+                    }
+                }
+                Err(e) => {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_update_status(format!("Failed to launch installation: {e}").into());
+                    }
+                }
             }
         }
     });
@@ -67,10 +459,11 @@ pub fn install_stage5_handlers(ui: &MainWindow, ctx: &AppContext) {
         .unwrap_or(true);
     ui.set_auto_update_enabled(initial_auto_update);
 
-    let pending_update = Arc::new(Mutex::new(
+    let pending_update: PendingUpdate = Arc::new(Mutex::new(
         None::<(updater::UpdateManifest, updater::UpdatePackage)>,
     ));
-    let downloaded_installer = Arc::new(Mutex::new(None::<(PathBuf, Option<PathBuf>)>));
+    let downloaded_installer: StagedInstaller =
+        Arc::new(Mutex::new(None::<(PathBuf, Option<PathBuf>)>));
     let cancel_download = Arc::new(AtomicBool::new(false));
 
     // Callback: Toggle Auto Update
@@ -99,196 +492,11 @@ pub fn install_stage5_handlers(ui: &MainWindow, ctx: &AppContext) {
     let check_in_flight = Arc::new(AtomicBool::new(false));
 
     // Helper closure: run update check
-    let check_updates_logic = {
-        let weak = ui.as_weak();
-        let pending = pending_update.clone();
-        let check_in_flight = check_in_flight.clone();
-        Arc::new(move |silent_if_uptodate: bool| {
-            if check_in_flight.swap(true, Ordering::AcqRel) {
-                return;
-            }
-            set_checking_ui(
-                weak.clone(),
-                true,
-                Some("Checking for updates...".to_owned()),
-            );
-            let weak_thread = weak.clone();
-            let pending_thread = pending.clone();
-            let check_in_flight_thread = check_in_flight.clone();
-
-            std::thread::spawn(move || {
-                let default_release_url = concat!(
-                    "https://github.com/",
-                    env!("ADULT_HUB_UPDATE_REPOSITORY"),
-                    "/releases/latest/download/adult-hub-update-manifest.json"
-                );
-                let release_url = std::env::var("ADULT_HUB_UPDATE_URL")
-                    .unwrap_or_else(|_| default_release_url.to_owned());
-                let valid_scheme = release_url.starts_with("https://")
-                    || release_url.starts_with("http://127.0.0.1")
-                    || release_url.starts_with("http://localhost");
-                if !valid_scheme {
-                    check_in_flight_thread.store(false, Ordering::Release);
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = weak_thread.upgrade() {
-                            ui.set_update_checking(false);
-                            ui.set_update_status(
-                                "Update check error: invalid update URL scheme".into(),
-                            );
-                        }
-                    });
-                    return;
-                }
-                let sig_url = format!("{release_url}.sig");
-
-                let client = match reqwest::blocking::Client::builder()
-                    .connect_timeout(Duration::from_secs(15))
-                    .timeout(Duration::from_secs(30))
-                    .build()
-                {
-                    Ok(c) => c,
-                    Err(e) => {
-                        check_in_flight_thread.store(false, Ordering::Release);
-                        let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(ui) = weak_thread.upgrade() {
-                                ui.set_update_checking(false);
-                                ui.set_update_status(format!("Update check error: {e}").into());
-                            }
-                        });
-                        return;
-                    }
-                };
-
-                let manifest_res = client.get(&release_url).send();
-                let sig_res = client.get(&sig_url).send();
-
-                match (manifest_res, sig_res) {
-                    (Ok(m_resp), Ok(s_resp))
-                        if m_resp.status().is_success() && s_resp.status().is_success() =>
-                    {
-                        let m_bytes = read_limited(m_resp, MAX_MANIFEST_BYTES).unwrap_or_default();
-                        let s_bytes = read_limited(s_resp, MAX_SIGNATURE_BYTES).unwrap_or_default();
-
-                        match updater::parse_and_verify_manifest(
-                            &m_bytes,
-                            &s_bytes,
-                            &updater::EMBEDDED_RELEASE_PUBLIC_KEY,
-                            updater::DEFAULT_ALLOWED_HOSTS,
-                        ) {
-                            Ok(manifest) => {
-                                let curr_ver = env!("CARGO_PKG_VERSION");
-                                let is_newer =
-                                    updater::is_newer_version(&manifest.version, curr_ver);
-                                let is_appimage = std::env::var("APPIMAGE").is_ok();
-                                let target_os = if cfg!(windows) { "windows" } else { "linux" };
-                                let pkg = updater::select_best_package(
-                                    &manifest.packages,
-                                    target_os,
-                                    "x86_64",
-                                    is_appimage,
-                                )
-                                .cloned();
-                                let manifest_clone = manifest.clone();
-
-                                check_in_flight_thread.store(false, Ordering::Release);
-                                let _ = slint::invoke_from_event_loop(move || {
-                                    if let Some(ui) = weak_thread.upgrade() {
-                                        ui.set_update_checking(false);
-                                        if is_newer {
-                                            if let Some(p) = pkg {
-                                                ui.set_update_available(true);
-                                                ui.set_update_ready(false);
-                                                ui.set_update_version(
-                                                    manifest_clone.version.clone().into(),
-                                                );
-                                                ui.set_update_release_notes(
-                                                    manifest_clone
-                                                        .release_notes
-                                                        .clone()
-                                                        .unwrap_or_default()
-                                                        .into(),
-                                                );
-                                                let total_size = p.size_bytes
-                                                    + p.runtime_dll
-                                                        .as_ref()
-                                                        .map_or(0, |dll| dll.size_bytes);
-                                                let size_mb = total_size / (1024 * 1024);
-                                                ui.set_update_status(
-                                                    format!(
-                                                        "Update available: v{} ({} MB)",
-                                                        manifest_clone.version, size_mb
-                                                    )
-                                                    .into(),
-                                                );
-                                                *pending_thread.lock().unwrap_or_else(
-                                                    std::sync::PoisonError::into_inner,
-                                                ) = Some((manifest_clone, p));
-                                            } else {
-                                                ui.set_update_available(false);
-                                                ui.set_update_ready(false);
-                                                *pending_thread.lock().unwrap_or_else(
-                                                    std::sync::PoisonError::into_inner,
-                                                ) = None;
-                                                if !silent_if_uptodate {
-                                                    ui.set_update_status(format!(
-                                                        "Version {} is available, but this platform has no supported installer package.",
-                                                        manifest_clone.version
-                                                    ).into());
-                                                } else {
-                                                    ui.set_update_status("".into());
-                                                }
-                                            }
-                                        } else if !silent_if_uptodate {
-                                            ui.set_update_available(false);
-                                            ui.set_update_ready(false);
-                                            *pending_thread.lock().unwrap_or_else(
-                                                std::sync::PoisonError::into_inner,
-                                            ) = None;
-                                            ui.set_update_status(
-                                                format!(
-                                                    "You are on the latest version (v{}).",
-                                                    curr_ver
-                                                )
-                                                .into(),
-                                            );
-                                        } else {
-                                            ui.set_update_status("".into());
-                                        }
-                                    }
-                                });
-                            }
-                            Err(e) => {
-                                check_in_flight_thread.store(false, Ordering::Release);
-                                let _ = slint::invoke_from_event_loop(move || {
-                                    if let Some(ui) = weak_thread.upgrade() {
-                                        ui.set_update_checking(false);
-                                        ui.set_update_status(
-                                            format!("Manifest verification failed: {e}").into(),
-                                        );
-                                    }
-                                });
-                            }
-                        }
-                    }
-                    _ => {
-                        check_in_flight_thread.store(false, Ordering::Release);
-                        let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(ui) = weak_thread.upgrade() {
-                                ui.set_update_checking(false);
-                                if !silent_if_uptodate {
-                                    ui.set_update_status(
-                                        "Up to date or no release manifest reachable.".into(),
-                                    );
-                                } else {
-                                    ui.set_update_status("".into());
-                                }
-                            }
-                        });
-                    }
-                }
-            });
-        })
-    };
+    let check_updates_logic = make_update_check(
+        ui.as_weak(),
+        pending_update.clone(),
+        check_in_flight.clone(),
+    );
 
     // Callback: Check for updates (manual)
     {
@@ -299,140 +507,7 @@ pub fn install_stage5_handlers(ui: &MainWindow, ctx: &AppContext) {
     }
 
     // Callback: Start Update Download
-    {
-        let weak = ui.as_weak();
-        let pending = pending_update.clone();
-        let downloaded = downloaded_installer.clone();
-        let cancel = cancel_download.clone();
-        ui.on_start_update_download(move || {
-            let pkg_opt = pending
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .as_ref()
-                .map(|(_, p)| p.clone());
-            if let Some(package) = pkg_opt {
-                cancel.store(false, Ordering::SeqCst);
-                if let Some(ui) = weak.upgrade() {
-                    ui.set_update_downloading(true);
-                    ui.set_update_ready(false);
-                    ui.set_update_progress(0.0);
-                    ui.set_update_status("Preparing update...".into());
-                }
-                let weak_thread = weak.clone();
-                let downloaded_thread = downloaded.clone();
-                let cancel_thread = cancel.clone();
-                std::thread::spawn(move || {
-                    // Deciding whether the runtime is current reads 120 MB, so it
-                    // runs here instead of between the click and the download.
-                    let runtime_dll = package
-                        .runtime_dll
-                        .as_deref()
-                        .cloned()
-                        .filter(|dll| !updater::installed_runtime_matches(dll));
-                    let keeps_installed_runtime =
-                        runtime_dll.is_none() && package.runtime_dll.is_some();
-                    let main_size = package.size_bytes;
-                    let combined_size =
-                        main_size + runtime_dll.as_ref().map_or(0, |dll| dll.size_bytes);
-                    let total_mb = (combined_size as f64) / (1024.0 * 1024.0);
-                    if keeps_installed_runtime {
-                        let weak_status = weak_thread.clone();
-                        let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(ui) = weak_status.upgrade() {
-                                ui.set_update_status(
-                                    "Downloading the application (libmpv runtime is up to date)..."
-                                        .into(),
-                                );
-                            }
-                        });
-                    }
-                    let is_cancelled = {
-                        let cancel = cancel_thread.clone();
-                        move || cancel.load(Ordering::SeqCst)
-                    };
-                    let report = |weak: slint::Weak<MainWindow>, done: u64| {
-                        if combined_size == 0 {
-                            return;
-                        }
-                        let progress = (done as f32) / (combined_size as f32);
-                        let done_mb = (done as f64) / (1024.0 * 1024.0);
-                        let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(ui) = weak.upgrade() {
-                                ui.set_update_progress(progress);
-                                ui.set_update_status(
-                                    format!(
-                                        "Downloading: {:.1}% ({:.1} MB / {:.1} MB)",
-                                        progress * 100.0,
-                                        done_mb,
-                                        total_mb
-                                    )
-                                    .into(),
-                                );
-                            }
-                        });
-                    };
-
-                    let res = updater::download_and_verify_package(
-                        &package,
-                        &is_cancelled,
-                        |bytes, _total| report(weak_thread.clone(), bytes),
-                    )
-                    .and_then(|exe_path| {
-                        let dll_path = runtime_dll
-                            .as_ref()
-                            .map(|dll| {
-                                updater::download_and_verify_package(
-                                    dll,
-                                    &is_cancelled,
-                                    |bytes, _total| report(weak_thread.clone(), main_size + bytes),
-                                )
-                            })
-                            .transpose()?;
-                        Ok((exe_path, dll_path))
-                    });
-
-                    match res {
-                        Ok(verified_paths) => {
-                            *downloaded_thread
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                                Some(verified_paths);
-                            let weak_done = weak_thread.clone();
-                            let _ = slint::invoke_from_event_loop(move || {
-                                if let Some(ui) = weak_done.upgrade() {
-                                    ui.set_update_downloading(false);
-                                    ui.set_update_ready(true);
-                                    ui.set_update_status(
-                                        "Update verified! Ready to install.".into(),
-                                    );
-                                }
-                            });
-                        }
-                        Err(updater::UpdateError::Cancelled) => {
-                            let weak_cancelled = weak_thread.clone();
-                            let _ = slint::invoke_from_event_loop(move || {
-                                if let Some(ui) = weak_cancelled.upgrade() {
-                                    ui.set_update_downloading(false);
-                                    ui.set_update_ready(false);
-                                    ui.set_update_progress(0.0);
-                                    ui.set_update_status("Update download cancelled.".into());
-                                }
-                            });
-                        }
-                        Err(e) => {
-                            let weak_failed = weak_thread.clone();
-                            let _ = slint::invoke_from_event_loop(move || {
-                                if let Some(ui) = weak_failed.upgrade() {
-                                    ui.set_update_downloading(false);
-                                    ui.set_update_status(format!("Download failed: {e}").into());
-                                }
-                            });
-                        }
-                    }
-                });
-            }
-        });
-    }
+    install_update_download_handler(ui, &pending_update, &downloaded_installer, &cancel_download);
 
     // Callback: Cancel Update Download
     {
@@ -447,54 +522,7 @@ pub fn install_stage5_handlers(ui: &MainWindow, ctx: &AppContext) {
     }
 
     // Callback: Install Update
-    {
-        let weak = ui.as_weak();
-        let pending = pending_update.clone();
-        let downloaded = downloaded_installer.clone();
-        ui.on_install_update(move || {
-            let pkg_opt = pending
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .as_ref()
-                .map(|(_, p)| p.clone());
-            let paths_opt = downloaded
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            if let (Some(pkg), Some((path, runtime_dll))) = (pkg_opt, paths_opt) {
-                let playback_active = weak.upgrade().is_some_and(|ui| {
-                    ui.get_active_screen() == "player"
-                        && ui.get_status() != "Ready"
-                        && !ui.get_url_text().trim().is_empty()
-                });
-                let runtime_integrity = pkg
-                    .runtime_dll
-                    .as_deref()
-                    .map(|dll| (dll.sha256.as_str(), dll.size_bytes));
-                match updater::launch_installation(
-                    &pkg.package_type,
-                    &path,
-                    Some((&pkg.sha256, pkg.size_bytes)),
-                    runtime_dll.as_deref(),
-                    runtime_integrity,
-                    playback_active,
-                ) {
-                    Ok(()) => {
-                        if let Some(ui) = weak.upgrade() {
-                            ui.set_update_status("Update launched. Closing application...".into());
-                        }
-                    }
-                    Err(e) => {
-                        if let Some(ui) = weak.upgrade() {
-                            ui.set_update_status(
-                                format!("Failed to launch installation: {e}").into(),
-                            );
-                        }
-                    }
-                }
-            }
-        });
-    }
+    install_update_install_handler(ui, &pending_update, &downloaded_installer);
 
     // Auto-check on startup (after 3 seconds) if enabled
     if initial_auto_update {
