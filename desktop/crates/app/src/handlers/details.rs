@@ -116,6 +116,7 @@ fn install_open_item_detail_handler(ui: &MainWindow, ctx: &AppContext) {
             let target_item = match target_item {
                 Some(item) => {
                     *ctx_detail
+                        .playback
                         .detail_active_item
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(item.clone());
@@ -474,7 +475,7 @@ fn install_open_item_detail_handler(ui: &MainWindow, ctx: &AppContext) {
                 &target_item,
                 artwork_session.as_ref(),
                 artwork_token.clone(),
-                ctx_detail.similar_catalog.clone(),
+                ctx_detail.catalog.similar_catalog.clone(),
             );
 
             ui.set_detail_visible(false);
@@ -618,6 +619,7 @@ fn install_detail_close_handler(ui: &MainWindow, ctx: &AppContext) {
                 }
                 if ui.get_active_screen() == "player" {
                     let was_playing = ctx_close
+                        .playback
                         .player_paused_for_details
                         .swap(false, std::sync::atomic::Ordering::SeqCst);
                     if was_playing {
@@ -636,9 +638,9 @@ fn install_detail_close_handler(ui: &MainWindow, ctx: &AppContext) {
 fn install_detail_flag_handlers(ui: &MainWindow, ctx: &AppContext) {
     let local_store = ctx.local_store.clone();
     let credential_store = ctx.credential_store.clone();
-    let cached_catalog = ctx.cached_catalog.clone();
-    let home_catalog = ctx.home_catalog.clone();
-    let current_item = ctx.current_playing_item.clone();
+    let cached_catalog = ctx.catalog.cached_catalog.clone();
+    let home_catalog = ctx.catalog.home_catalog.clone();
+    let current_item = ctx.playback.current_playing_item.clone();
 
     {
         let weak = ui.as_weak();
@@ -896,7 +898,7 @@ fn install_detail_flag_handlers(ui: &MainWindow, ctx: &AppContext) {
 
 /// Play/resume from the Details screen and the random-contextual start.
 fn install_detail_playback_handlers(ui: &MainWindow, ctx: &AppContext) {
-    let cached_catalog = ctx.cached_catalog.clone();
+    let cached_catalog = ctx.catalog.cached_catalog.clone();
 
     {
         let weak = ui.as_weak();
@@ -910,6 +912,7 @@ fn install_detail_playback_handlers(ui: &MainWindow, ctx: &AppContext) {
 
             if ui.get_active_screen() == "player" {
                 let current_id = ctx_play
+                    .playback
                     .current_playing_item
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -917,6 +920,7 @@ fn install_detail_playback_handlers(ui: &MainWindow, ctx: &AppContext) {
                     .map(|i| i.id.clone());
                 if current_id.as_deref() == Some(&id) {
                     ctx_play
+                        .playback
                         .player_paused_for_details
                         .store(false, std::sync::atomic::Ordering::SeqCst);
                     if resume {
@@ -942,6 +946,7 @@ fn install_detail_playback_handlers(ui: &MainWindow, ctx: &AppContext) {
                 .find_catalog_item(&id)
                 .or_else(|| {
                     ctx_play
+                        .playback
                         .detail_active_item
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1347,6 +1352,7 @@ fn resolve_real_media_size(
     }
 
     let playing_matches = ctx
+        .playback
         .current_playing_item
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)

@@ -38,6 +38,27 @@ pub fn install_stage5_handlers(ui: &MainWindow, ctx: &AppContext) {
     let app_version = env!("CARGO_PKG_VERSION");
     ui.set_app_version(app_version.into());
 
+    // An attempt that failed or was abandoned leaves its package in the temp
+    // directory; reclaim it in the background so 170 MB never becomes permanent.
+    std::thread::spawn(|| {
+        let removed = updater::prune_stale_packages();
+        if removed > 0 {
+            log::info!("removed {removed} stale update package(s) from the temp directory");
+        }
+    });
+
+    // A helper that could not finish leaves its reason in its own log; the app
+    // quits before it can report anything, so surface it here.
+    if let Some(failure) = updater::last_helper_failure(Duration::from_secs(24 * 60 * 60)) {
+        ui.set_update_status(
+            format!(
+                "Previous update failed: {failure} (log: {})",
+                updater::update_helper_log_path().display()
+            )
+            .into(),
+        );
+    }
+
     let initial_auto_update = local_store
         .get_setting("auto_update_enabled")
         .ok()

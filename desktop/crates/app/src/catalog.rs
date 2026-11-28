@@ -1090,6 +1090,77 @@ pub fn extract_title_tags_and_clean_title(raw_title: &str) -> (String, Vec<Strin
     (clean_title, extracted_tags)
 }
 
+/// Title built from metadata: performers, then studio, then year.
+fn title_from_metadata(item: &TvItem) -> Option<String> {
+    if !item.people.is_empty() {
+        let performers: Vec<String> = item
+            .people
+            .iter()
+            .filter(|p| {
+                p.person_type
+                    .as_deref()
+                    .is_none_or(|k| k.eq_ignore_ascii_case("actor"))
+            })
+            .take(2)
+            .map(|p| p.name.clone())
+            .collect();
+        if !performers.is_empty() {
+            let perf_str = performers.join(" & ");
+            if let Some(studio) = item.studios.first().filter(|s| !s.trim().is_empty()) {
+                return Some(format!("{perf_str} - {studio}"));
+            }
+            if let Some(year) = item.year {
+                return Some(format!("{perf_str} ({year})"));
+            }
+            return Some(perf_str);
+        }
+    }
+    if let Some(studio) = item.studios.first().filter(|s| !s.trim().is_empty()) {
+        if let Some(year) = item.year {
+            return Some(format!("{studio} ({year})"));
+        }
+        return Some(format!("{studio} Video"));
+    }
+
+    None
+}
+
+/// Title built from the provider context (telegram channel id, provider name).
+fn title_from_source_context(item: &TvItem) -> Option<String> {
+    // 3. Kanał lub źródło wraz z datą albo innym dostępnym kontekstem
+    let tg_source = if item.id.starts_with("telegram:") {
+        Some(item.id.as_str())
+    } else if let Some(ref pid) = item.provider_video_id {
+        Some(pid.as_str())
+    } else if item.is_telegram() {
+        Some(item.id.as_str())
+    } else {
+        None
+    };
+    if let Some(source) = tg_source {
+        let clean_source = source.strip_prefix("telegram:").unwrap_or(source);
+        let parts: Vec<&str> = clean_source.split(':').collect();
+        if parts.len() >= 2 {
+            let channel_raw = parts[0].replace(['_', '-'], " ");
+            let channel = titlecase(&channel_raw);
+            let msg_id = parts[1];
+            if !channel.is_empty() {
+                if let Some(year) = item.year {
+                    return Some(format!("{channel} ({year}) #{msg_id}"));
+                }
+                return Some(format!("{channel} #{msg_id}"));
+            }
+        }
+    }
+    if let Some(provider) = item.source_provider.as_deref() {
+        if let Some(year) = item.year {
+            return Some(format!("{provider} ({year})"));
+        }
+    }
+
+    None
+}
+
 pub(crate) fn display_title(item: &TvItem) -> String {
     let title = item.title.trim();
     let is_hash = |s: &str| -> bool {
@@ -1128,37 +1199,11 @@ pub(crate) fn display_title(item: &TvItem) -> String {
     }
 
     // 2. Readable title derived from metadata (performers, studio, year)
-    if !item.people.is_empty() {
-        let performers: Vec<String> = item
-            .people
-            .iter()
-            .filter(|p| {
-                p.person_type
-                    .as_deref()
-                    .is_none_or(|k| k.eq_ignore_ascii_case("actor"))
-            })
-            .take(2)
-            .map(|p| p.name.clone())
-            .collect();
-        if !performers.is_empty() {
-            let perf_str = performers.join(" & ");
-            if let Some(studio) = item.studios.first().filter(|s| !s.trim().is_empty()) {
-                return format!("{perf_str} - {studio}");
-            }
-            if let Some(year) = item.year {
-                return format!("{perf_str} ({year})");
-            }
-            return perf_str;
-        }
-    }
-    if let Some(studio) = item.studios.first().filter(|s| !s.trim().is_empty()) {
-        if let Some(year) = item.year {
-            return format!("{studio} ({year})");
-        }
-        return format!("{studio} Video");
+    if let Some(title) = title_from_metadata(item) {
+        return title;
     }
 
-    // 2. Sensowna nazwa pliku z item.id, provider_video_id lub ścieżki
+    // 3. Sensowna nazwa pliku z item.id, provider_video_id lub ścieżki
     for source in [&item.id, item.provider_video_id.as_deref().unwrap_or("")] {
         let source_id = source.strip_prefix("direct:").unwrap_or(source);
         if let Some(pos) = source_id.rfind('.') {
@@ -1178,38 +1223,12 @@ pub(crate) fn display_title(item: &TvItem) -> String {
         }
     }
 
-    // 3. Kanał lub źródło wraz z datą albo innym dostępnym kontekstem
-    let tg_source = if item.id.starts_with("telegram:") {
-        Some(item.id.as_str())
-    } else if let Some(ref pid) = item.provider_video_id {
-        Some(pid.as_str())
-    } else if item.is_telegram() {
-        Some(item.id.as_str())
-    } else {
-        None
-    };
-    if let Some(source) = tg_source {
-        let clean_source = source.strip_prefix("telegram:").unwrap_or(source);
-        let parts: Vec<&str> = clean_source.split(':').collect();
-        if parts.len() >= 2 {
-            let channel_raw = parts[0].replace(['_', '-'], " ");
-            let channel = titlecase(&channel_raw);
-            let msg_id = parts[1];
-            if !channel.is_empty() {
-                if let Some(year) = item.year {
-                    return format!("{channel} ({year}) #{msg_id}");
-                }
-                return format!("{channel} #{msg_id}");
-            }
-        }
-    }
-    if let Some(provider) = item.source_provider.as_deref() {
-        if let Some(year) = item.year {
-            return format!("{provider} ({year})");
-        }
+    // 4. Kanał lub źródło wraz z datą albo innym dostępnym kontekstem
+    if let Some(title) = title_from_source_context(item) {
+        return title;
     }
 
-    // 4. Neutralna nazwa z krótkim rozróżniającym oznaczeniem jako ostateczność
+    // 5. Neutralna nazwa z krótkim rozróżniającym oznaczeniem jako ostateczność
     let short_marker = if let Some(pos) = item.id.rfind(':') {
         &item.id[pos + 1..]
     } else if item.id.len() >= 6 {
@@ -2205,6 +2224,34 @@ mod tests {
             "Rock & Roll: The Movie - Part 2 (Director's Cut)"
         );
         assert!(tags_punct.is_empty());
+    }
+
+    #[test]
+    fn title_helpers_split_metadata_from_source_context() {
+        let perf_item = TvItem {
+            id: "uuid-123".into(),
+            title: String::new(),
+            people: vec![make_sample_person("Eva Green")],
+            studios: vec!["Lust Cinema".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            title_from_metadata(&perf_item).as_deref(),
+            Some("Eva Green - Lust Cinema")
+        );
+        assert_eq!(title_from_source_context(&perf_item), None);
+
+        let ch_item = TvItem {
+            id: "telegram:neon_pulse:456".into(),
+            title: String::new(),
+            year: Some(2026),
+            ..Default::default()
+        };
+        assert_eq!(title_from_metadata(&ch_item), None);
+        assert_eq!(
+            title_from_source_context(&ch_item).as_deref(),
+            Some("Neon Pulse (2026) #456")
+        );
     }
 
     #[test]

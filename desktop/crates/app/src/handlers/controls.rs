@@ -111,6 +111,7 @@ pub fn select_random_candidate(ctx: &AppContext, current_id: Option<&str>) -> Op
 
     chosen_item.or_else(|| {
         let catalog = ctx
+            .catalog
             .cached_catalog
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -146,6 +147,7 @@ pub fn trigger_movie_switch(ui: &MainWindow, ctx: &AppContext, is_random: bool) 
     let dur_ms = (dur * 1000.0) as u64;
 
     let outgoing = ctx
+        .playback
         .current_playing_item
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -184,10 +186,12 @@ pub fn trigger_movie_switch(ui: &MainWindow, ctx: &AppContext, is_random: bool) 
     ui.set_player_selected_quality_id("original".into());
     ui.set_player_selected_quality_label("Original".into());
     ui.set_player_quality_options(slint::ModelRc::default());
-    *ctx.active_quality_id
+    *ctx.playback
+        .active_quality_id
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = "original".to_string();
-    *ctx.current_video_variants
+    *ctx.playback
+        .current_video_variants
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Vec::new();
     if let Some(player) = &ctx.player {
@@ -232,6 +236,7 @@ pub fn trigger_movie_switch(ui: &MainWindow, ctx: &AppContext, is_random: bool) 
             match final_item {
                 Some(target) => {
                     if ctx_worker
+                        .playback
                         .active_playback_context
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -239,6 +244,7 @@ pub fn trigger_movie_switch(ui: &MainWindow, ctx: &AppContext, is_random: bool) 
                     {
                         ctx_worker.set_playback_context(
                             ctx_worker
+                                .catalog
                                 .cached_catalog
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -330,6 +336,7 @@ fn install_playback_transport_handlers(ui: &MainWindow, ctx: &AppContext) {
             let Some(ui) = weak.upgrade() else { return };
             ui.set_player_error_message(String::new().into());
             let current_item = ctx_retry
+                .playback
                 .current_playing_item
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -659,9 +666,9 @@ fn install_display_handlers(ui: &MainWindow, ctx: &AppContext) {
 /// Speed, buffer profile, hardware decoding, autoplay and the queue controls.
 fn install_playback_option_handlers(ui: &MainWindow, ctx: &AppContext) {
     let player = ctx.player.clone();
-    let autoplay_active = ctx.autoplay_active.clone();
-    let hwdec_active = ctx.hwdec_active.clone();
-    let current_item = ctx.current_playing_item.clone();
+    let autoplay_active = ctx.playback.autoplay_active.clone();
+    let hwdec_active = ctx.playback.hwdec_active.clone();
+    let current_item = ctx.playback.current_playing_item.clone();
     let local_store = ctx.local_store.clone();
 
     {
@@ -801,6 +808,7 @@ fn install_playback_option_handlers(ui: &MainWindow, ctx: &AppContext) {
             if let Some(item) = maybe_item {
                 let was_playing = ui.get_playing();
                 ctx_det
+                    .playback
                     .player_paused_for_details
                     .store(was_playing, std::sync::atomic::Ordering::SeqCst);
                 if was_playing {
@@ -893,6 +901,7 @@ fn install_download_handlers(ui: &MainWindow, ctx: &AppContext) {
         ui.on_trigger_download(move || {
             let Some(ui) = ui_weak.upgrade() else { return };
             let current_item = ctx_dl
+                .playback
                 .current_playing_item
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1002,6 +1011,7 @@ fn install_download_handlers(ui: &MainWindow, ctx: &AppContext) {
             let Some(task) = task else { return };
             let item = ctx_dl.find_catalog_item(&task.item_id).or_else(|| {
                 ctx_dl
+                    .playback
                     .current_playing_item
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)

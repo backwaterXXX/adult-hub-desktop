@@ -1247,6 +1247,7 @@ pub fn current_nav_destination(
             // be started from a card without ever populating `detail_id`, and
             // a stale id here sent Back to Home instead of the real screen.
             id: ctx
+                .playback
                 .current_playing_item
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1264,7 +1265,7 @@ pub fn restore_nav_destination(
     dest: crate::context::NavDestination,
 ) {
     use crate::context::NavDestination;
-    ctx.is_navigating_back.store(true, Ordering::SeqCst);
+    ctx.nav.is_navigating_back.store(true, Ordering::SeqCst);
     match dest {
         NavDestination::Home => {
             ui.invoke_switch_screen("home".into());
@@ -1330,6 +1331,7 @@ pub fn restore_nav_destination(
             // Returning to the player must keep material, position and pause
             // state; only re-open media when the player no longer holds it.
             let matches_loaded = ctx
+                .playback
                 .current_playing_item
                 .lock()
                 .unwrap()
@@ -1345,7 +1347,7 @@ pub fn restore_nav_destination(
             }
         }
     }
-    ctx.is_navigating_back.store(false, Ordering::SeqCst);
+    ctx.nav.is_navigating_back.store(false, Ordering::SeqCst);
 }
 
 struct BrowsingHandlerState {
@@ -1640,7 +1642,7 @@ fn install_catalog_filter_picker_handlers(
 fn install_surprise_me_handler(ui: &MainWindow, ctx: &AppContext, state: &BrowsingHandlerState) {
     let credential_store = ctx.credential_store.clone();
     let local_store = ctx.local_store.clone();
-    let cached_catalog = ctx.cached_catalog.clone();
+    let cached_catalog = ctx.catalog.cached_catalog.clone();
     let catalog_generation = state.catalog_generation.clone();
     let catalog_filters = state.catalog_filters.clone();
 
@@ -1916,7 +1918,7 @@ fn install_search_handlers(ui: &MainWindow, ctx: &AppContext, state: &BrowsingHa
     let resolver = ctx.resolver.clone();
     let local_store = ctx.local_store.clone();
     let credential_store = ctx.credential_store.clone();
-    let cached_catalog = ctx.cached_catalog.clone();
+    let cached_catalog = ctx.catalog.cached_catalog.clone();
     let catalog_generation = state.catalog_generation.clone();
     let search_debounce_generation = state.search_debounce_generation.clone();
     let catalog_paging = state.catalog_paging.clone();
@@ -2384,7 +2386,7 @@ fn install_search_result_filter_handler(
     ctx: &AppContext,
     state: &BrowsingHandlerState,
 ) {
-    let cached_catalog = ctx.cached_catalog.clone();
+    let cached_catalog = ctx.catalog.cached_catalog.clone();
     let catalog_generation = state.catalog_generation.clone();
     let catalog_paging = state.catalog_paging.clone();
     let credential_store = ctx.credential_store.clone();
@@ -2511,7 +2513,7 @@ impl CatalogBrowseDeps {
             ctx: ctx.clone(),
             local_store: ctx.local_store.clone(),
             credential_store: ctx.credential_store.clone(),
-            cached_catalog: ctx.cached_catalog.clone(),
+            cached_catalog: ctx.catalog.cached_catalog.clone(),
             catalog_generation: state.catalog_generation.clone(),
             search_debounce_generation: state.search_debounce_generation.clone(),
             performer_search_generation: state.performer_search_generation.clone(),
@@ -2607,6 +2609,200 @@ fn category_loading_message(category: &str) -> &'static str {
 }
 
 /// Builds the tab switch shared by `filter_category` and the clear-search reset.
+/// Everything one catalog page fetch needs, bundled so the worker stays short.
+struct CategoryPageRequest {
+    category: String,
+    query: String,
+    filters: CatalogFilters,
+    performers_photo_only: bool,
+    performer_letter: String,
+}
+
+/// One fetched page plus the auth material the UI needs afterwards.
+struct CategoryPageData {
+    raw_items: Vec<TvItem>,
+    display_items: Vec<TvItem>,
+    next_start: usize,
+    total_count: usize,
+    has_more: bool,
+    supplemental_total: usize,
+    image_server: Option<String>,
+    token_for_refresh: Option<String>,
+    is_unauth: bool,
+    error_message: Option<String>,
+}
+
+/// Runs on a worker thread: session lookup, a single token refresh on 401,
+/// paging, then the studio/performer post-filters.
+fn fetch_category_page(
+    ctx: &AppContext,
+    credential_store: &adult_hub_storage::CredentialStore,
+    local_store: &LocalStore,
+    request: &CategoryPageRequest,
+) -> CategoryPageData {
+    let cat = request.category.as_str();
+    let query = request.query.as_str();
+    let performers_photo_only = request.performers_photo_only;
+    let mut is_unauth = false;
+    let mut image_auth = None;
+    let mut error_message: Option<String> = None;
+    let (raw_items, next_start, total_count, has_more, supplemental_total) =
+        if let Some(mut session) = credential_store.get().ok().flatten() {
+            image_auth = Some((session.server_url.clone(), session.access_token.clone()));
+            let mut result = get_catalog_page_with_empty_page_fetch(
+                &session,
+                local_store,
+                cat,
+                query,
+                0,
+                request.filters.clone(),
+                performers_photo_only,
+            );
+            // The access token lives 15 minutes. Refresh it once and retry
+            // before showing the login modal.
+            if result
+                .as_ref()
+                .err()
+                .is_some_and(CatalogError::is_unauthorized)
+                && crate::download::refresh_adult_hub_session_if_current(ctx, &session.access_token)
+                    .is_ok()
+                && let Some(updated) = credential_store.get().ok().flatten()
+            {
+                session = updated;
+                image_auth = Some((session.server_url.clone(), session.access_token.clone()));
+                result = get_catalog_page_with_empty_page_fetch(
+                    &session,
+                    local_store,
+                    cat,
+                    query,
+                    0,
+                    request.filters.clone(),
+                    performers_photo_only,
+                );
+            }
+            match result {
+                Ok(page) => (
+                    page.items,
+                    page.next_start,
+                    page.total_count,
+                    page.has_more,
+                    page.supplemental_total,
+                ),
+                Err(error) => {
+                    is_unauth = error.is_unauthorized();
+                    error_message = Some(error.to_string());
+                    (Vec::new(), 0, 0, false, 0)
+                }
+            }
+        } else {
+            (Vec::new(), 0, 0, false, 0)
+        };
+    let raw_items = if cat == "Studios" {
+        crate::catalog::aggregate_studio_items(raw_items)
+    } else {
+        raw_items
+    };
+    let raw_items = filter_catalog_items(raw_items, local_store);
+    let display_items = if cat == "Performers" {
+        filter_performer_results(
+            &raw_items,
+            &request.performer_letter,
+            performers_photo_only,
+            query,
+        )
+    } else {
+        raw_items.clone()
+    };
+    let (image_server, token_for_refresh) = match image_auth {
+        Some((server, token)) => (Some(server), Some(token)),
+        None => (None, None),
+    };
+    CategoryPageData {
+        raw_items,
+        display_items,
+        next_start,
+        total_count,
+        has_more,
+        supplemental_total,
+        image_server,
+        token_for_refresh,
+        is_unauth,
+        error_message,
+    }
+}
+
+/// Publishes a fetched page: caches first, then the grid and its counters, so
+/// the UI never shows a total that belongs to a different page.
+fn apply_category_page(
+    ui: &MainWindow,
+    data: CategoryPageData,
+    mut page_state: CatalogPageState,
+    started: std::time::Instant,
+    request_id: u64,
+    catalog_generation: &Arc<AtomicU64>,
+    catalog_paging: &Arc<Mutex<CatalogPageState>>,
+    cached_catalog: &Arc<Mutex<Vec<TvItem>>>,
+    cat_label: &str,
+) {
+    if !catalog_generation_is_current(catalog_generation, request_id) {
+        return;
+    }
+    *cached_catalog
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = data.raw_items;
+    page_state.next_start = data.next_start;
+    page_state.has_more = data.has_more;
+    page_state.loading_more = false;
+    page_state.supplemental_total = data.supplemental_total;
+    *catalog_paging
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = page_state;
+    let cards = data
+        .display_items
+        .iter()
+        .map(|item| {
+            data.image_server.as_ref().map_or_else(
+                || tv_item_to_card(item),
+                |server| tv_item_to_card_for_server(item, server),
+            )
+        })
+        .collect::<Vec<_>>();
+    set_catalog(ui, cards.clone());
+    ui.set_catalog_has_more(data.has_more);
+    let reported_total = if data.has_more {
+        data.total_count
+    } else {
+        cards.len()
+    };
+    ui.set_catalog_total_count(reported_total as i32);
+    ui.set_is_loading_more(false);
+    ui.set_is_loading_catalog(false);
+    crate::log_debug(&format!(
+        "catalog [{cat_label}]: {} card(s), {reported_total} reported total in {} ms",
+        cards.len(),
+        started.elapsed().as_millis()
+    ));
+    if let Some(ref err_msg) = data.error_message {
+        ui.set_status(format!("Catalog error: {err_msg}").into());
+        ui.set_status_color(slint::Color::from_rgb_u8(240, 100, 100));
+    } else {
+        ui.set_status("Ready".into());
+        ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
+    }
+    if let Some(token) = data.token_for_refresh {
+        refresh_catalog_thumbnails_async(
+            ui.as_weak(),
+            cards,
+            token,
+            cached_catalog.clone(),
+            Some((catalog_generation.clone(), request_id)),
+        );
+    }
+    if data.is_unauth {
+        crate::playback::show_session_expired_prompt(ui);
+    }
+}
+
 fn make_category_filter_handler(
     deps: &CatalogBrowseDeps,
 ) -> Rc<dyn Fn(MainWindow, slint::SharedString, bool)> {
@@ -2620,285 +2816,165 @@ fn make_category_filter_handler(
     let catalog_views = deps.catalog_views.clone();
     let catalog_filters = deps.catalog_filters.clone();
     let ctx = deps.ctx.clone();
-    let filter_category = move |ui: MainWindow,
-                                cat: slint::SharedString,
-                                save_current_view: bool| {
-        let normalized = legacy_catalog_category(cat.as_str()).to_string();
-        if normalized != cat.as_str() {
-            ui.set_active_category(normalized.clone().into());
-        }
-        let cat = slint::SharedString::from(normalized);
-        if cat != "Latest" {
-            ui.set_catalog_category_drilldown(false);
-        } else if !ui.get_catalog_category_drilldown() {
-            ui.set_catalog_genre_query("".into());
-            if let Ok(mut map) = catalog_filters.lock() {
-                if let Some(f) = map.get_mut("Latest") {
-                    f.genre.clear();
+    let filter_category =
+        move |ui: MainWindow, cat: slint::SharedString, save_current_view: bool| {
+            let normalized = legacy_catalog_category(cat.as_str()).to_string();
+            if normalized != cat.as_str() {
+                ui.set_active_category(normalized.clone().into());
+            }
+            let cat = slint::SharedString::from(normalized);
+            if cat != "Latest" {
+                ui.set_catalog_category_drilldown(false);
+            } else if !ui.get_catalog_category_drilldown() {
+                ui.set_catalog_genre_query("".into());
+                if let Ok(mut map) = catalog_filters.lock() {
+                    if let Some(f) = map.get_mut("Latest") {
+                        f.genre.clear();
+                    }
                 }
             }
-        }
-        let is_reclick_refresh = is_category_reclick_refresh(
-            &cat,
-            &ui.get_active_screen(),
-            &ui.get_active_category(),
-            ui.get_catalog_category_drilldown(),
-            &ui.get_search_query(),
-        );
-        if is_reclick_refresh {
-            catalog_views
-                .borrow_mut()
-                .retain(|k, _| !k.starts_with(cat.as_str()));
-        } else if save_current_view {
-            save_catalog_view(&ui, &catalog_paging, &cached_catalog, &catalog_views);
-        }
-        performer_search_generation.fetch_add(1, Ordering::SeqCst);
-        search_debounce_generation.fetch_add(1, Ordering::SeqCst);
-        if cat == "Channels" {
-            catalog_generation.fetch_add(1, Ordering::SeqCst);
-            ui.set_active_screen("channels".into());
-            let current_cat = ui.get_active_channel_category();
-            if !current_cat.is_empty() {
-                ui.invoke_select_channel_category(current_cat);
-            } else if let Ok(Some(saved)) = local_store.get_selected_channel() {
-                ui.invoke_select_channel_category(saved.into());
-            } else {
-                ui.invoke_refresh_channel_categories();
+            let is_reclick_refresh = is_category_reclick_refresh(
+                &cat,
+                &ui.get_active_screen(),
+                &ui.get_active_category(),
+                ui.get_catalog_category_drilldown(),
+                &ui.get_search_query(),
+            );
+            if is_reclick_refresh {
+                catalog_views
+                    .borrow_mut()
+                    .retain(|k, _| !k.starts_with(cat.as_str()));
+            } else if save_current_view {
+                save_catalog_view(&ui, &catalog_paging, &cached_catalog, &catalog_views);
             }
-            return;
-        }
-        let performer_letter = ui.get_performer_letter().to_string();
-        let performers_photo_only = ui.get_performers_photo_only();
-        let query = category_query(
-            &cat,
-            ui.get_catalog_category_drilldown(),
-            &ui.get_performer_search_query(),
-            &ui.get_search_applied_query(),
-        );
-        ui.set_search_applied_query(query.clone().into());
-        let search_context = active_search_context(&ui);
-        let trimmed_q = query.trim();
-        if !trimmed_q.is_empty() {
-            let _ = local_store.add_search_query_context(&search_context, trimmed_q);
-        }
-        refresh_recent_searches_for_context(&ui, &local_store);
-        let cat = cat.to_string();
-        let mut filters = get_category_filters(&catalog_filters, &cat);
-        if cat == "Performers" {
-            filters.performer_letter = performer_letter.clone();
-            filters.performer_photo_only = performers_photo_only;
-            set_category_filters(&catalog_filters, &cat, filters.clone());
-        }
-        // The map is the single source of truth for every tab; persist it
-        // whenever a view is (re)built so the next launch restores it.
-        if let Ok(guard) = catalog_filters.lock() {
-            save_catalog_filters(&local_store, &guard);
-        }
-        let library_id = local_store
-            .get_setting("selected_library_id")
-            .ok()
-            .flatten()
-            .unwrap_or_default();
-        let target_page = CatalogPageState {
-            category: cat.clone(),
-            query: query.clone(),
-            drilldown: cat == "Latest" && ui.get_catalog_category_drilldown(),
-            library_id: library_id.clone(),
-            filters: filters.clone(),
-            ..CatalogPageState::default()
-        };
-        if let Some((request_id, cards)) = restore_catalog_view(
-            &ui,
-            &catalog_view_key(&target_page),
-            &catalog_paging,
-            &cached_catalog,
-            &catalog_views,
-            &catalog_generation,
-            &search_debounce_generation,
-        ) {
-            if let Some(session) = credential_store.get().ok().flatten() {
-                refresh_catalog_thumbnails_async(
-                    ui.as_weak(),
-                    cards,
-                    session.access_token,
-                    cached_catalog.clone(),
-                    Some((catalog_generation.clone(), request_id)),
-                );
-            }
-            return;
-        }
-        let request_id = catalog_generation.fetch_add(1, Ordering::SeqCst) + 1;
-        ui.set_is_catalog_search_results(false);
-        ui.set_search_error_message("".into());
-        ui.set_search_results_filter("all".into());
-        ui.set_is_loading_catalog(true);
-        ui.set_is_loading_more(false);
-        ui.set_catalog_has_more(false);
-        ui.set_catalog_total_count(0);
-        ui.set_catalog_more_error("".into());
-        set_catalog(&ui, Vec::new());
-        set_search_sections(&ui, &[]);
-        ui.set_status(category_loading_message(&cat).into());
-        ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
-        let weak = ui.as_weak();
-        let credential_store = credential_store.clone();
-        let local_store = local_store.clone();
-        let cached_catalog = cached_catalog.clone();
-        let catalog_generation = catalog_generation.clone();
-        let catalog_paging = catalog_paging.clone();
-        let library_id = library_id.clone();
-        let drilldown = target_page.drilldown;
-        sync_catalog_filters_to_ui(&ui, &cat, &filters);
-
-        // Clone per call: the worker consumes its own copy, which keeps the
-        // enclosing callback an `Fn` instead of `FnOnce`.
-        let ctx = ctx.clone();
-        std::thread::spawn(move || {
-            let started = std::time::Instant::now();
-            let cat_label = cat.clone();
-            let mut is_unauth = false;
-            let mut image_auth = None;
-            let mut catalog_error_message: Option<String> = None;
-            let (raw_items, next_start, total_count, has_more, supplemental_total) =
-                if let Some(mut session) = credential_store.get().ok().flatten() {
-                    image_auth = Some((session.server_url.clone(), session.access_token.clone()));
-                    let mut result = get_catalog_page_with_empty_page_fetch(
-                        &session,
-                        &local_store,
-                        &cat,
-                        &query,
-                        0,
-                        filters.clone(),
-                        performers_photo_only,
-                    );
-                    // The access token lives 15 minutes. Refresh it once and
-                    // retry before showing the login modal.
-                    if result
-                        .as_ref()
-                        .err()
-                        .is_some_and(CatalogError::is_unauthorized)
-                        && crate::download::refresh_adult_hub_session_if_current(
-                            &ctx,
-                            &session.access_token,
-                        )
-                        .is_ok()
-                        && let Some(updated) = credential_store.get().ok().flatten()
-                    {
-                        session = updated;
-                        image_auth =
-                            Some((session.server_url.clone(), session.access_token.clone()));
-                        result = get_catalog_page_with_empty_page_fetch(
-                            &session,
-                            &local_store,
-                            &cat,
-                            &query,
-                            0,
-                            filters.clone(),
-                            performers_photo_only,
-                        );
-                    }
-                    match result {
-                        Ok(page) => (
-                            page.items,
-                            page.next_start,
-                            page.total_count,
-                            page.has_more,
-                            page.supplemental_total,
-                        ),
-                        Err(error) => {
-                            is_unauth = error.is_unauthorized();
-                            catalog_error_message = Some(error.to_string());
-                            (Vec::new(), 0, 0, false, 0)
-                        }
-                    }
+            performer_search_generation.fetch_add(1, Ordering::SeqCst);
+            search_debounce_generation.fetch_add(1, Ordering::SeqCst);
+            if cat == "Channels" {
+                catalog_generation.fetch_add(1, Ordering::SeqCst);
+                ui.set_active_screen("channels".into());
+                let current_cat = ui.get_active_channel_category();
+                if !current_cat.is_empty() {
+                    ui.invoke_select_channel_category(current_cat);
+                } else if let Ok(Some(saved)) = local_store.get_selected_channel() {
+                    ui.invoke_select_channel_category(saved.into());
                 } else {
-                    (Vec::new(), 0, 0, false, 0)
-                };
-            let raw_items = if cat == "Studios" {
-                crate::catalog::aggregate_studio_items(raw_items)
-            } else {
-                raw_items
+                    ui.invoke_refresh_channel_categories();
+                }
+                return;
+            }
+            let performer_letter = ui.get_performer_letter().to_string();
+            let performers_photo_only = ui.get_performers_photo_only();
+            let query = category_query(
+                &cat,
+                ui.get_catalog_category_drilldown(),
+                &ui.get_performer_search_query(),
+                &ui.get_search_applied_query(),
+            );
+            ui.set_search_applied_query(query.clone().into());
+            let search_context = active_search_context(&ui);
+            let trimmed_q = query.trim();
+            if !trimmed_q.is_empty() {
+                let _ = local_store.add_search_query_context(&search_context, trimmed_q);
+            }
+            refresh_recent_searches_for_context(&ui, &local_store);
+            let cat = cat.to_string();
+            let mut filters = get_category_filters(&catalog_filters, &cat);
+            if cat == "Performers" {
+                filters.performer_letter = performer_letter.clone();
+                filters.performer_photo_only = performers_photo_only;
+                set_category_filters(&catalog_filters, &cat, filters.clone());
+            }
+            // The map is the single source of truth for every tab; persist it
+            // whenever a view is (re)built so the next launch restores it.
+            if let Ok(guard) = catalog_filters.lock() {
+                save_catalog_filters(&local_store, &guard);
+            }
+            let library_id = local_store
+                .get_setting("selected_library_id")
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            let target_page = CatalogPageState {
+                category: cat.clone(),
+                query: query.clone(),
+                drilldown: cat == "Latest" && ui.get_catalog_category_drilldown(),
+                library_id: library_id.clone(),
+                filters: filters.clone(),
+                ..CatalogPageState::default()
             };
-            let raw_items = filter_catalog_items(raw_items, &local_store);
-            let display_items = if cat == "Performers" {
-                filter_performer_results(
-                    &raw_items,
-                    &performer_letter,
-                    performers_photo_only,
-                    &query,
-                )
-            } else {
-                raw_items.clone()
+            if let Some((request_id, cards)) = restore_catalog_view(
+                &ui,
+                &catalog_view_key(&target_page),
+                &catalog_paging,
+                &cached_catalog,
+                &catalog_views,
+                &catalog_generation,
+                &search_debounce_generation,
+            ) {
+                if let Some(session) = credential_store.get().ok().flatten() {
+                    refresh_catalog_thumbnails_async(
+                        ui.as_weak(),
+                        cards,
+                        session.access_token,
+                        cached_catalog.clone(),
+                        Some((catalog_generation.clone(), request_id)),
+                    );
+                }
+                return;
+            }
+            let request_id = catalog_generation.fetch_add(1, Ordering::SeqCst) + 1;
+            ui.set_is_catalog_search_results(false);
+            ui.set_search_error_message("".into());
+            ui.set_search_results_filter("all".into());
+            ui.set_is_loading_catalog(true);
+            ui.set_is_loading_more(false);
+            ui.set_catalog_has_more(false);
+            ui.set_catalog_total_count(0);
+            ui.set_catalog_more_error("".into());
+            set_catalog(&ui, Vec::new());
+            set_search_sections(&ui, &[]);
+            ui.set_status(category_loading_message(&cat).into());
+            ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
+            let weak = ui.as_weak();
+            sync_catalog_filters_to_ui(&ui, &cat, &filters);
+            let request = CategoryPageRequest {
+                category: cat,
+                query,
+                filters,
+                performers_photo_only,
+                performer_letter,
             };
-            let image_server = image_auth.as_ref().map(|(server, _)| server.clone());
-            let token_for_refresh = image_auth.map(|(_, token)| token);
-            slint::invoke_from_event_loop(move || {
+            let page_state = target_page;
+            // Clone per call: the worker consumes its own copies, which keeps the
+            // enclosing callback an `Fn` instead of `FnOnce`.
+            let ctx = ctx.clone();
+            let credential_store = credential_store.clone();
+            let local_store = local_store.clone();
+            let cached_catalog = cached_catalog.clone();
+            let catalog_paging = catalog_paging.clone();
+            let catalog_generation = catalog_generation.clone();
+            std::thread::spawn(move || {
+                let started = std::time::Instant::now();
+                let cat_label = request.category.clone();
+                let data = fetch_category_page(&ctx, &credential_store, &local_store, &request);
+                slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
-                        if !catalog_generation_is_current(&catalog_generation, request_id) {
-                            return;
-                        }
-                        *cached_catalog
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner) = raw_items;
-                        *catalog_paging
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                            CatalogPageState {
-                                category: cat,
-                                query,
-                                drilldown,
-                                is_search: false,
-                                library_id,
-                                next_start,
-                                has_more,
-                                loading_more: false,
-                                filters,
-                                supplemental_total,
-                            };
-                        let cards = display_items
-                            .iter()
-                            .map(|item| {
-                                image_server.as_ref().map_or_else(
-                                    || tv_item_to_card(item),
-                                    |server| tv_item_to_card_for_server(item, server),
-                                )
-                            })
-                            .collect::<Vec<_>>();
-                        set_catalog(&ui, cards.clone());
-                        ui.set_catalog_has_more(has_more);
-                        let reported_total = if has_more { total_count } else { cards.len() };
-                        ui.set_catalog_total_count(reported_total as i32);
-                        ui.set_is_loading_more(false);
-                        ui.set_is_loading_catalog(false);
-                        crate::log_debug(&format!(
-                            "catalog [{cat_label}]: {} card(s), {reported_total} reported total in {} ms",
-                            cards.len(),
-                            started.elapsed().as_millis()
-                        ));
-                        if let Some(ref err_msg) = catalog_error_message {
-                            ui.set_status(format!("Catalog error: {err_msg}").into());
-                            ui.set_status_color(slint::Color::from_rgb_u8(240, 100, 100));
-                        } else {
-                            ui.set_status("Ready".into());
-                            ui.set_status_color(slint::Color::from_rgb_u8(140, 200, 160));
-                        }
-                        if let Some(token) = token_for_refresh {
-                            refresh_catalog_thumbnails_async(
-                                ui.as_weak(),
-                                cards,
-                                token,
-                                cached_catalog.clone(),
-                                Some((catalog_generation.clone(), request_id)),
-                            );
-                        }
-                        if is_unauth {
-                            crate::playback::show_session_expired_prompt(&ui);
-                        }
+                        apply_category_page(
+                            &ui,
+                            data,
+                            page_state,
+                            started,
+                            request_id,
+                            &catalog_generation,
+                            &catalog_paging,
+                            &cached_catalog,
+                            &cat_label,
+                        );
                     }
                 })
                 .ok();
-        });
-    };
+            });
+        };
     Rc::new(filter_category)
 }
 
@@ -3395,7 +3471,7 @@ fn install_screen_navigation_handlers(ui: &MainWindow, ctx: &AppContext) {
     let local_store = ctx.local_store.clone();
     let reporter = ctx.reporter.clone();
     let session_ctrl = ctx.session_ctrl.clone();
-    let current_item = ctx.current_playing_item.clone();
+    let current_item = ctx.playback.current_playing_item.clone();
 
     {
         let weak = ui.as_weak();
@@ -3507,7 +3583,7 @@ fn install_auth_handlers(ui: &MainWindow, ctx: &AppContext) {
     let credential_store = ctx.credential_store.clone();
     let reporter = ctx.reporter.clone();
     let phash_coord = ctx.phash_coord.clone();
-    let cached_catalog = ctx.cached_catalog.clone();
+    let cached_catalog = ctx.catalog.cached_catalog.clone();
 
     {
         let weak = ui.as_weak();
@@ -3627,7 +3703,7 @@ fn install_auth_handlers(ui: &MainWindow, ctx: &AppContext) {
         let credential_store = credential_store.clone();
         let reporter = reporter.clone();
         let cached_catalog = cached_catalog.clone();
-        let home_catalog = ctx.home_catalog.clone();
+        let home_catalog = ctx.catalog.home_catalog.clone();
         let phash_coord = phash_coord.clone();
         ui.on_perform_logout(move || {
             let Some(ui) = weak.upgrade() else { return };
@@ -3753,7 +3829,7 @@ fn install_home_refresh_handler(
 ) {
     let local_store = ctx.local_store.clone();
     let credential_store = ctx.credential_store.clone();
-    let home_catalog = ctx.home_catalog.clone();
+    let home_catalog = ctx.catalog.home_catalog.clone();
     let weak = ui.as_weak();
     let catalog_views_for_home = catalog_views.clone();
     let ctx_home = ctx.clone();

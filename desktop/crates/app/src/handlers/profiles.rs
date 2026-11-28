@@ -147,9 +147,9 @@ fn load_performer_profile_data(ui: &MainWindow, ctx: &AppContext, p_key: String)
     let weak = ui.as_weak();
     let local_store = ctx.local_store.clone();
     let credential_store = ctx.credential_store.clone();
-    let cached_catalog = ctx.cached_catalog.clone();
-    let home_catalog = ctx.home_catalog.clone();
-    let performer_catalog = ctx.performer_catalog.clone();
+    let cached_catalog = ctx.catalog.cached_catalog.clone();
+    let home_catalog = ctx.catalog.home_catalog.clone();
+    let performer_catalog = ctx.catalog.performer_catalog.clone();
 
     // 1. Find matching local items
     let mut local_items = Vec::new();
@@ -346,9 +346,9 @@ fn load_studio_profile_data(ui: &MainWindow, ctx: &AppContext, s_name: String) {
     let weak = ui.as_weak();
     let local_store = ctx.local_store.clone();
     let credential_store = ctx.credential_store.clone();
-    let cached_catalog = ctx.cached_catalog.clone();
-    let home_catalog = ctx.home_catalog.clone();
-    let studio_catalog = ctx.studio_catalog.clone();
+    let cached_catalog = ctx.catalog.cached_catalog.clone();
+    let home_catalog = ctx.catalog.home_catalog.clone();
+    let studio_catalog = ctx.catalog.studio_catalog.clone();
 
     // 1. Find matching local items
     let mut local_items = Vec::new();

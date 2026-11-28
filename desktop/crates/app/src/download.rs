@@ -838,13 +838,15 @@ pub fn start_item_download(
 ) {
     let rendition_id = {
         let is_playing = ctx
+            .playback
             .current_playing_item
             .lock()
             .ok()
             .and_then(|opt| opt.as_ref().map(|it| it.id == item.id))
             .unwrap_or(false);
         if is_playing {
-            ctx.active_quality_id
+            ctx.playback
+                .active_quality_id
                 .lock()
                 .ok()
                 .map(|q| q.clone())
@@ -972,6 +974,150 @@ pub(crate) fn refresh_adult_hub_session_if_current(
     }
 }
 
+/// Where a queued download actually reads from, plus the identity that lets a
+/// partial file be matched to its source.
+struct ResolvedDownloadSource {
+    url: String,
+    headers: Vec<(String, String)>,
+    is_local_file: bool,
+    identity: String,
+}
+
+/// Resolves the media URL and headers for a queued task, refreshing the token
+/// once when the descriptor endpoint answers 401. The error is the message the
+/// task should surface.
+fn resolve_download_source(
+    ctx: &crate::context::AppContext,
+    task: &DownloadTask,
+) -> Result<ResolvedDownloadSource, String> {
+    let session = ctx.credential_store.get().ok().flatten();
+    let download_url;
+    let mut download_headers = Vec::new();
+    let mut is_local_file = false;
+    let source_identity;
+
+    if task.item_id == "sample" || task.item_id == "sample2" {
+        let filename = if task.item_id == "sample2" {
+            "sample2.mp4"
+        } else {
+            "sample.mp4"
+        };
+        download_url = crate::options::resolve_named_sample_media(filename);
+        if !download_url.starts_with("http://") && !download_url.starts_with("https://") {
+            is_local_file = true;
+        }
+        source_identity = format!("sample:{filename}");
+    } else if task.item_id.starts_with("direct:") {
+        download_url = task
+            .item_id
+            .strip_prefix("direct:")
+            .unwrap_or(&task.item_id)
+            .to_owned();
+        is_local_file = true;
+        source_identity = format!("direct:{download_url}");
+    } else {
+        let Some(mut active_session) = session.clone() else {
+            return Err("Sign in to Adult Hub before downloading this video.".into());
+        };
+
+        let client = match adult_hub_client::AdultHubClient::new(&active_session.server_url) {
+            Ok(c) => c.with_token(&active_session.access_token),
+            Err(e) => {
+                return Err(format!("Invalid Adult Hub server configuration: {e}"));
+            }
+        };
+
+        // Fetch playback descriptor, refreshing token if 401
+        let mut descriptor_res = client.get_playback_descriptor(&task.item_id);
+        if let Err(ref err) = descriptor_res {
+            if err.is_unauthorized() {
+                match refresh_adult_hub_session_if_current(ctx, &active_session.access_token) {
+                    Ok(new_sess) => {
+                        active_session = new_sess;
+                        client.set_token(Some(active_session.access_token.clone()));
+                        descriptor_res = client.get_playback_descriptor(&task.item_id);
+                    }
+                    Err(RefreshSessionError::PersistenceFailed(msg)) => {
+                        return Err(format!(
+                            "Failed to persist refreshed session ({msg}). Please sign in again."
+                        ));
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+
+        let descriptor = match descriptor_res {
+            Ok(d) => d,
+            Err(err) => {
+                let msg = if err.is_unauthorized() {
+                    "Session expired (401 Unauthorized). Please sign in again.".to_string()
+                } else {
+                    format!(
+                        "Could not resolve download descriptor: {}",
+                        crate::playback::format_safe_adult_hub_error(&err)
+                    )
+                };
+                return Err(msg);
+            }
+        };
+
+        // Safely set expected_total_bytes and total_bytes from current descriptor / rendition
+        let descriptor_file_size = if let Some(ref rid) = task.rendition_id {
+            if rid != "original" {
+                descriptor
+                    .rendition_by_id(rid)
+                    .and_then(|r| r.file_size_bytes)
+                    .or(descriptor.file_size_bytes)
+            } else {
+                descriptor.file_size_bytes
+            }
+        } else {
+            descriptor.file_size_bytes
+        };
+
+        if let Some(sz) = descriptor_file_size {
+            if sz > 0 {
+                task.expected_total_bytes.store(sz, Ordering::SeqCst);
+                task.total_bytes.store(sz, Ordering::SeqCst);
+            }
+        }
+
+        let stream_path = descriptor.rendition_stream_path(task.rendition_id.as_deref());
+        let Some(stream_path) = stream_path else {
+            return Err("No stream path available in Adult Hub playback descriptor".into());
+        };
+
+        let resolved = match client.resolve_stream_url(stream_path) {
+            Ok(u) => u,
+            Err(e) => {
+                return Err(format!("Invalid stream URL: {e}"));
+            }
+        };
+
+        // client.resolve_stream_url(stream_path) has already validated canonical origin
+        // (including port canonicalization) and rejected embedded credentials.
+        download_url = resolved;
+        let token_val = client
+            .token()
+            .unwrap_or_else(|| active_session.access_token.clone());
+        download_headers.push(("Authorization".to_string(), format!("Bearer {token_val}")));
+        source_identity = format!(
+            "adulthub:{}|{}|{}|{}",
+            active_session.server_url.trim_end_matches('/'),
+            task.item_id,
+            task.rendition_id.as_deref().unwrap_or("default"),
+            stream_path
+        );
+    }
+    Ok(ResolvedDownloadSource {
+        url: download_url,
+        headers: download_headers,
+        is_local_file,
+        identity: source_identity,
+    })
+}
+
 /// Execute a single download task (called sequentially from queue worker thread)
 fn run_download_task(
     ctx: &crate::context::AppContext,
@@ -1030,165 +1176,22 @@ fn run_download_task(
         }
     }
 
-    // Step 2: Resolve media URL and headers
-    let session = ctx.credential_store.get().ok().flatten();
-
-    let download_url;
-    let mut download_headers = Vec::new();
-    let mut is_local_file = false;
-    let source_identity;
-
-    if task.item_id == "sample" || task.item_id == "sample2" {
-        let filename = if task.item_id == "sample2" {
-            "sample2.mp4"
-        } else {
-            "sample.mp4"
-        };
-        download_url = crate::options::resolve_named_sample_media(filename);
-        if !download_url.starts_with("http://") && !download_url.starts_with("https://") {
-            is_local_file = true;
-        }
-        source_identity = format!("sample:{filename}");
-    } else if task.item_id.starts_with("direct:") {
-        download_url = task
-            .item_id
-            .strip_prefix("direct:")
-            .unwrap_or(&task.item_id)
-            .to_owned();
-        is_local_file = true;
-        source_identity = format!("direct:{download_url}");
-    } else {
-        let Some(mut active_session) = session.clone() else {
+    let source = match resolve_download_source(ctx, &task) {
+        Ok(source) => source,
+        Err(message) => {
             *task
                 .status
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                DownloadStatus::Error("Sign in to Adult Hub before downloading this video.".into());
+                DownloadStatus::Error(message);
             manager.advance_queue_if_idle(ctx);
             return;
-        };
-
-        let client = match adult_hub_client::AdultHubClient::new(&active_session.server_url) {
-            Ok(c) => c.with_token(&active_session.access_token),
-            Err(e) => {
-                *task
-                    .status
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                    DownloadStatus::Error(format!("Invalid Adult Hub server configuration: {e}"));
-                manager.advance_queue_if_idle(ctx);
-                return;
-            }
-        };
-
-        // Fetch playback descriptor, refreshing token if 401
-        let mut descriptor_res = client.get_playback_descriptor(&task.item_id);
-        if let Err(ref err) = descriptor_res {
-            if err.is_unauthorized() {
-                match refresh_adult_hub_session_if_current(ctx, &active_session.access_token) {
-                    Ok(new_sess) => {
-                        active_session = new_sess;
-                        client.set_token(Some(active_session.access_token.clone()));
-                        descriptor_res = client.get_playback_descriptor(&task.item_id);
-                    }
-                    Err(RefreshSessionError::PersistenceFailed(msg)) => {
-                        *task
-                            .status
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                            DownloadStatus::Error(format!(
-                                "Failed to persist refreshed session ({msg}). Please sign in again."
-                            ));
-                        manager.advance_queue_if_idle(ctx);
-                        return;
-                    }
-                    Err(_) => {}
-                }
-            }
         }
-
-        let descriptor = match descriptor_res {
-            Ok(d) => d,
-            Err(err) => {
-                let msg = if err.is_unauthorized() {
-                    "Session expired (401 Unauthorized). Please sign in again.".to_string()
-                } else {
-                    format!(
-                        "Could not resolve download descriptor: {}",
-                        crate::playback::format_safe_adult_hub_error(&err)
-                    )
-                };
-                *task
-                    .status
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                    DownloadStatus::Error(msg);
-                manager.advance_queue_if_idle(ctx);
-                return;
-            }
-        };
-
-        // Safely set expected_total_bytes and total_bytes from current descriptor / rendition
-        let descriptor_file_size = if let Some(ref rid) = task.rendition_id {
-            if rid != "original" {
-                descriptor
-                    .rendition_by_id(rid)
-                    .and_then(|r| r.file_size_bytes)
-                    .or(descriptor.file_size_bytes)
-            } else {
-                descriptor.file_size_bytes
-            }
-        } else {
-            descriptor.file_size_bytes
-        };
-
-        if let Some(sz) = descriptor_file_size {
-            if sz > 0 {
-                task.expected_total_bytes.store(sz, Ordering::SeqCst);
-                task.total_bytes.store(sz, Ordering::SeqCst);
-            }
-        }
-
-        let stream_path = descriptor.rendition_stream_path(task.rendition_id.as_deref());
-        let Some(stream_path) = stream_path else {
-            *task
-                .status
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = DownloadStatus::Error(
-                "No stream path available in Adult Hub playback descriptor".into(),
-            );
-            manager.advance_queue_if_idle(ctx);
-            return;
-        };
-
-        let resolved = match client.resolve_stream_url(stream_path) {
-            Ok(u) => u,
-            Err(e) => {
-                *task
-                    .status
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                    DownloadStatus::Error(format!("Invalid stream URL: {e}"));
-                manager.advance_queue_if_idle(ctx);
-                return;
-            }
-        };
-
-        // client.resolve_stream_url(stream_path) has already validated canonical origin
-        // (including port canonicalization) and rejected embedded credentials.
-        download_url = resolved;
-        let token_val = client
-            .token()
-            .unwrap_or_else(|| active_session.access_token.clone());
-        download_headers.push(("Authorization".to_string(), format!("Bearer {token_val}")));
-        source_identity = format!(
-            "adulthub:{}|{}|{}|{}",
-            active_session.server_url.trim_end_matches('/'),
-            task.item_id,
-            task.rendition_id.as_deref().unwrap_or("default"),
-            stream_path
-        );
-    }
+    };
+    let download_url = source.url;
+    let mut download_headers = source.headers;
+    let is_local_file = source.is_local_file;
+    let source_identity = source.identity;
 
     let mut existing_bytes = 0;
     if !is_local_file && task.temp_path.is_file() {

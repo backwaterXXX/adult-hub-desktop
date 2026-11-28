@@ -431,6 +431,87 @@ impl UpdateError {
     }
 }
 
+/// Package files the updater stages in the temp directory.
+const UPDATE_FILE_PREFIX: &str = "adult-hub-update-";
+/// A file younger than this may belong to a download that is still running.
+const STALE_PACKAGE_AGE: Duration = Duration::from_secs(60 * 60);
+
+/// Where the Windows replacement helper records what it did.
+pub fn update_helper_log_path() -> PathBuf {
+    std::env::temp_dir().join("adult-hub-update.log")
+}
+
+/// Removes packages left behind by an attempt that failed or was abandoned.
+/// Nothing used to delete them, so every try could keep about 170 MB of EXE and
+/// runtime in the temp directory until the OS cleaned it up.
+pub fn prune_stale_packages() -> usize {
+    prune_packages_in(&std::env::temp_dir(), STALE_PACKAGE_AGE)
+}
+
+fn prune_packages_in(directory: &Path, min_age: Duration) -> usize {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !is_staged_package_name(name) {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .map(|modified| modified.elapsed().unwrap_or_default() >= min_age)
+            .unwrap_or(false);
+        if stale && std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// `adult-hub-update-<type>-<uuid>.<ext>`. The helper log, the AppImage helper
+/// directory and the swap files next to the executable must never match.
+fn is_staged_package_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix(UPDATE_FILE_PREFIX) else {
+        return false;
+    };
+    let Some((stem, extension)) = rest.rsplit_once('.') else {
+        return false;
+    };
+    stem.contains('-')
+        && matches!(
+            extension,
+            "staging" | "exe" | "dll" | "deb" | "AppImage" | "zip" | "bin"
+        )
+}
+
+/// Reason the previous update never finished, taken from the helper log.
+pub fn last_helper_failure(max_age: Duration) -> Option<String> {
+    let path = update_helper_log_path();
+    let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
+    if modified.elapsed().unwrap_or_default() > max_age {
+        return None;
+    }
+    let log = std::fs::read_to_string(&path).ok()?;
+    last_failure_line(&log).map(str::to_string)
+}
+
+/// The helper logs `error: ...`, `could not ...` and `... exited with code N`.
+fn last_failure_line(log: &str) -> Option<&str> {
+    log.lines().rev().find_map(|line| {
+        let lower = line.to_ascii_lowercase();
+        let failed = lower.contains("error:")
+            || lower.contains("could not ")
+            || lower.contains("exited with code")
+            || lower.contains("did not start");
+        failed.then(|| line.trim())
+    })
+}
+
 /// The mpv runtime that ships next to the executable.
 fn installed_runtime_library() -> Option<PathBuf> {
     let executable = std::env::current_exe().ok()?;
@@ -1261,6 +1342,104 @@ mod tests {
             "ADULT_HUB_REQUIRE_REAL_MANIFEST is set but no manifest was found in {searched:?}"
         );
         println!("skipping: no generated manifest in {searched:?}");
+    }
+
+    fn update_package(url: &str, size_bytes: u64) -> UpdatePackage {
+        UpdatePackage {
+            platform: "windows".into(),
+            arch: "x86_64".into(),
+            package_type: "exe".into(),
+            url: url.into(),
+            sha256: "0".repeat(64),
+            size_bytes,
+            runtime_dll: None,
+        }
+    }
+
+    #[test]
+    fn test_cancelled_download_never_reaches_the_network() {
+        let package = update_package(
+            "https://github.com/adult-hub/adult-hub-desktop/releases/download/desktop-v0.0.0/adult-hub-desktop.exe",
+            1024,
+        );
+        let result = download_and_verify_package(&package, &|| true, |_, _| {});
+        assert!(
+            matches!(result, Err(UpdateError::Cancelled)),
+            "an already-cancelled download must not open a connection"
+        );
+    }
+
+    #[test]
+    fn test_only_transport_failures_are_retried() {
+        assert!(UpdateError::DownloadFailed("connection reset".into()).is_retryable());
+        assert!(UpdateError::Io("disk full".into()).is_retryable());
+        assert!(!UpdateError::Cancelled.is_retryable());
+        assert!(
+            !UpdateError::HashMismatch {
+                expected: "a".repeat(64),
+                actual: "b".repeat(64),
+            }
+            .is_retryable(),
+            "a digest mismatch means the release or the CDN is wrong, not the link"
+        );
+        assert!(!UpdateError::InvalidSignature.is_retryable());
+    }
+
+    #[test]
+    fn test_only_staged_packages_are_pruned() {
+        assert!(is_staged_package_name(
+            "adult-hub-update-exe-7f3c1a2b-2f0e-4f0f-9d3c-1a2b3c4d5e6f.exe"
+        ));
+        assert!(is_staged_package_name(
+            "adult-hub-update-runtime-dll-7f3c1a2b-2f0e.staging"
+        ));
+        // The helper log, the AppImage helper directory and the swap files next
+        // to the executable must never be treated as downloads.
+        assert!(!is_staged_package_name("adult-hub-update.log"));
+        assert!(!is_staged_package_name("adult-hub-update-7f3c1a2b2f0e"));
+        assert!(!is_staged_package_name("adult-hub-desktop.exe.update"));
+        assert!(!is_staged_package_name("libmpv-2.dll"));
+    }
+
+    #[test]
+    fn test_prune_removes_stale_packages_only() {
+        let directory =
+            std::env::temp_dir().join(format!("adult-hub-prune-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let staged = directory.join("adult-hub-update-exe-1111-2222-3333-4444-5555.exe");
+        let staging = directory.join("adult-hub-update-exe-1111-2222-3333-4444-5555.staging");
+        let helper_log = directory.join("adult-hub-update.log");
+        for path in [&staged, &staging, &helper_log] {
+            std::fs::write(path, b"x").unwrap();
+        }
+
+        // A zero minimum age marks every staged file stale for this check.
+        assert_eq!(prune_packages_in(&directory, Duration::ZERO), 2);
+        assert!(!staged.exists());
+        assert!(!staging.exists());
+        assert!(helper_log.exists(), "the helper log must survive pruning");
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn test_last_failure_line_reports_the_latest_problem() {
+        let log = "2026-01-01T00:00:00 start; pid=1\n\
+                   2026-01-01T00:00:01 staged executable\n\
+                   2026-01-01T00:00:02 could not move the running executable aside\n\
+                   2026-01-01T00:00:03 error: could not install the new executable\n";
+        assert_eq!(
+            last_failure_line(log),
+            Some("2026-01-01T00:00:03 error: could not install the new executable")
+        );
+        assert_eq!(
+            last_failure_line("2026-01-01T00:00:00 start\n2026-01-01T00:00:04 done\n"),
+            None
+        );
+        assert_eq!(
+            last_failure_line("the new executable exited with code 1; restoring\n"),
+            Some("the new executable exited with code 1; restoring")
+        );
     }
 
     #[test]

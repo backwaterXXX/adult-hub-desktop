@@ -119,7 +119,7 @@ pub fn install_polling(ui: &MainWindow, ctx: &AppContext, frame_pending: Arc<Ato
     let player = ctx.player.clone();
     let rep = ctx.reporter.clone();
     let sctrl = ctx.session_ctrl.clone();
-    let cur_item = ctx.current_playing_item.clone();
+    let cur_item = ctx.playback.current_playing_item.clone();
     let phash_ref = ctx.phash_coord.clone();
     let download_mgr = ctx.download_manager.clone();
     let ctx_handle = ctx.clone();
@@ -571,11 +571,11 @@ fn handle_event(
 ) {
     let reporter = &ctx.reporter;
     let session_ctrl = &ctx.session_ctrl;
-    let current_item = &ctx.current_playing_item;
-    let hwdec_active = &ctx.hwdec_active;
+    let current_item = &ctx.playback.current_playing_item;
+    let hwdec_active = &ctx.playback.hwdec_active;
     let local_store = &ctx.local_store;
     let phash_coord = &ctx.phash_coord;
-    let pending_resume = &ctx.pending_resume_position;
+    let pending_resume = &ctx.playback.pending_resume_position;
     match event {
         PlayerEvent::FileLoaded { width, height } => {
             if recovery.retry_in_flight {

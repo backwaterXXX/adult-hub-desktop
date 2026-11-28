@@ -22,7 +22,7 @@ use adult_hub_client::{ResolverClient, ServiceUrlPolicy, ServiceUrlValidation, T
 use adult_hub_player::Player;
 use adult_hub_storage::{CredentialStore, LocalStore, Session, default_db_path};
 use catalog::{sample_catalog_tv_items, set_catalog};
-use context::AppContext;
+use context::{AppContext, CatalogCaches, NavigationState, PlaybackState};
 use options::{Options, initial_media};
 use playback::{load_media, show_error, start_item_playback};
 use renderer::install_renderer;
@@ -72,6 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     crate::diagnostics::init_logger();
+    install_panic_logger();
 
     let options = Options::parse(std::env::args().skip(1))?;
     DEBUG_MODE.store(options.debug, std::sync::atomic::Ordering::Relaxed);
@@ -278,25 +279,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         reporter: reporter.clone(),
         session_ctrl: session_ctrl.clone(),
         phash_coord: phash_coord.clone(),
-        current_playing_item: current_playing_item.clone(),
-        detail_active_item: Arc::new(Mutex::new(None)),
-        pending_resume_position: Arc::new(Mutex::new(None)),
-        cached_catalog: cached_catalog.clone(),
-        similar_catalog: Arc::new(Mutex::new(vec![])),
-        home_catalog: home_catalog.clone(),
-        performer_catalog: Arc::new(Mutex::new(Vec::new())),
-        studio_catalog: Arc::new(Mutex::new(Vec::new())),
-        channel_catalog: Arc::new(Mutex::new(Vec::new())),
-        autoplay_active: autoplay_active.clone(),
-        hwdec_active: hwdec_active.clone(),
-        player_paused_for_details: Arc::new(AtomicBool::new(false)),
-        is_navigating_back: Arc::new(AtomicBool::new(false)),
-        nav_history: Arc::new(Mutex::new(Vec::new())),
+        catalog: CatalogCaches {
+            cached_catalog: cached_catalog.clone(),
+            home_catalog: home_catalog.clone(),
+            ..Default::default()
+        },
+        playback: PlaybackState {
+            current_playing_item: current_playing_item.clone(),
+            autoplay_active: autoplay_active.clone(),
+            hwdec_active: hwdec_active.clone(),
+            ..Default::default()
+        },
+        nav: NavigationState::default(),
         shuffle_engine: Arc::new(crate::shuffle::ShuffleEngine::default()),
         download_manager: Arc::new(download::DownloadManager::new()),
-        active_playback_context: Arc::new(Mutex::new(Vec::new())),
-        current_video_variants: Arc::new(Mutex::new(Vec::new())),
-        active_quality_id: Arc::new(Mutex::new("original".to_string())),
     };
 
     let _session_keepalive = install_session_keepalive(&ui, &ctx);
@@ -1119,6 +1115,35 @@ fn probe_opengl() -> Result<String, String> {
         UnregisterClassW(class_name.as_ptr(), instance);
     }
     result
+}
+
+/// A panic used to leave nothing behind: the window vanished and the startup
+/// log stayed silent. Every panic is now recorded (redacted) before the default
+/// hook prints it, so a support case starts from the log line.
+fn install_panic_logger() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|location| format!("{}:{}", location.file(), location.line()))
+            .unwrap_or_else(|| "unknown location".to_string());
+        let payload = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|message| (*message).to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "non-string panic payload".to_string());
+        let thread = std::thread::current();
+        let message = format_panic(thread.name().unwrap_or("unnamed"), &location, &payload);
+        log_startup(&crate::diagnostics::redact(&message));
+        default_hook(info);
+    }));
+}
+
+/// Keeps the shape of the logged line in one place; dropping the location would
+/// make a reported crash impossible to place.
+fn format_panic(thread: &str, location: &str, payload: &str) -> String {
+    format!("panic in thread '{thread}' at {location}: {payload}")
 }
 
 pub(crate) fn startup_log_path() -> std::path::PathBuf {
@@ -2638,25 +2663,17 @@ mod tests {
             reporter,
             session_ctrl,
             phash_coord,
-            current_playing_item: Arc::new(Mutex::new(None)),
-            detail_active_item: Arc::new(Mutex::new(Some(detail_item.clone()))),
-            pending_resume_position: Arc::new(Mutex::new(None)),
-            cached_catalog: Arc::new(Mutex::new(vec![])), // Browse is empty!
-            similar_catalog: Arc::new(Mutex::new(vec![])),
-            home_catalog: Arc::new(Mutex::new(vec![home_item.clone()])),
-            performer_catalog: Arc::new(Mutex::new(vec![])),
-            studio_catalog: Arc::new(Mutex::new(vec![])),
-            channel_catalog: Arc::new(Mutex::new(vec![])),
-            autoplay_active: Arc::new(AtomicBool::new(false)),
-            hwdec_active: Arc::new(AtomicBool::new(false)),
-            player_paused_for_details: Arc::new(AtomicBool::new(false)),
-            is_navigating_back: Arc::new(AtomicBool::new(false)),
-            nav_history: Arc::new(Mutex::new(Vec::new())),
+            catalog: CatalogCaches {
+                home_catalog: Arc::new(Mutex::new(vec![home_item.clone()])),
+                ..Default::default()
+            },
+            playback: PlaybackState {
+                detail_active_item: Arc::new(Mutex::new(Some(detail_item.clone()))),
+                ..Default::default()
+            },
+            nav: NavigationState::default(),
             shuffle_engine: Arc::new(crate::shuffle::ShuffleEngine::default()),
             download_manager: Arc::new(download::DownloadManager::new()),
-            active_playback_context: Arc::new(Mutex::new(Vec::new())),
-            current_video_variants: Arc::new(Mutex::new(Vec::new())),
-            active_quality_id: Arc::new(Mutex::new("original".to_string())),
         };
 
         // 1. Home item should be found even when Browse cached_catalog is empty
@@ -3500,6 +3517,15 @@ mod tests {
         assert_eq!(
             compute_tooltip_x(1, 4, card_w, tooltip_w),
             (card_w - tooltip_w) / 2.0
+        );
+    }
+
+    #[test]
+    fn panic_log_line_carries_thread_location_and_payload() {
+        let line = format_panic("main", "src/main.rs:42", "index out of bounds");
+        assert_eq!(
+            line,
+            "panic in thread 'main' at src/main.rs:42: index out of bounds"
         );
     }
 }

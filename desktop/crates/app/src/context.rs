@@ -51,30 +51,82 @@ pub struct AppContext {
     pub reporter: Arc<PlaybackReporter>,
     pub session_ctrl: Arc<PlaybackSessionController>,
     pub phash_coord: Arc<PhashCoordinator>,
-    pub current_playing_item: Arc<Mutex<Option<TvItem>>>,
-    pub detail_active_item: Arc<Mutex<Option<TvItem>>>,
-    pub pending_resume_position: Arc<Mutex<Option<f64>>>,
+    pub catalog: CatalogCaches,
+    pub playback: PlaybackState,
+    pub nav: NavigationState,
+    pub shuffle_engine: Arc<crate::shuffle::ShuffleEngine>,
+    pub download_manager: Arc<crate::download::DownloadManager>,
+}
+
+/// Every list the browser renders. Handlers copy the one cache they touch, so
+/// grouping them keeps the constructor readable without changing that pattern.
+#[derive(Clone)]
+pub struct CatalogCaches {
     pub cached_catalog: Arc<Mutex<Vec<TvItem>>>,
     pub similar_catalog: Arc<Mutex<Vec<TvItem>>>,
     pub home_catalog: Arc<Mutex<Vec<TvItem>>>,
     pub performer_catalog: Arc<Mutex<Vec<TvItem>>>,
     pub studio_catalog: Arc<Mutex<Vec<TvItem>>>,
     pub channel_catalog: Arc<Mutex<Vec<TvItem>>>,
-    pub autoplay_active: Arc<AtomicBool>,
-    pub hwdec_active: Arc<AtomicBool>,
-    pub player_paused_for_details: Arc<AtomicBool>,
-    pub is_navigating_back: Arc<AtomicBool>,
-    pub nav_history: Arc<Mutex<Vec<NavDestination>>>,
-    pub shuffle_engine: Arc<crate::shuffle::ShuffleEngine>,
-    pub download_manager: Arc<crate::download::DownloadManager>,
+}
+
+impl Default for CatalogCaches {
+    fn default() -> Self {
+        fn cache() -> Arc<Mutex<Vec<TvItem>>> {
+            Arc::new(Mutex::new(Vec::new()))
+        }
+        Self {
+            cached_catalog: cache(),
+            similar_catalog: cache(),
+            home_catalog: cache(),
+            performer_catalog: cache(),
+            studio_catalog: cache(),
+            channel_catalog: cache(),
+        }
+    }
+}
+
+/// What is on screen / in the player right now.
+#[derive(Clone)]
+pub struct PlaybackState {
+    pub current_playing_item: Arc<Mutex<Option<TvItem>>>,
+    pub detail_active_item: Arc<Mutex<Option<TvItem>>>,
+    pub pending_resume_position: Arc<Mutex<Option<f64>>>,
     pub active_playback_context: Arc<Mutex<Vec<TvItem>>>,
     pub current_video_variants: Arc<Mutex<Vec<adult_hub_client::VideoVariantDto>>>,
     pub active_quality_id: Arc<Mutex<String>>,
+    pub autoplay_active: Arc<AtomicBool>,
+    pub hwdec_active: Arc<AtomicBool>,
+    pub player_paused_for_details: Arc<AtomicBool>,
+}
+
+impl Default for PlaybackState {
+    fn default() -> Self {
+        Self {
+            current_playing_item: Arc::new(Mutex::new(None)),
+            detail_active_item: Arc::new(Mutex::new(None)),
+            pending_resume_position: Arc::new(Mutex::new(None)),
+            active_playback_context: Arc::new(Mutex::new(Vec::new())),
+            current_video_variants: Arc::new(Mutex::new(Vec::new())),
+            active_quality_id: Arc::new(Mutex::new("original".to_string())),
+            autoplay_active: Arc::new(AtomicBool::new(false)),
+            hwdec_active: Arc::new(AtomicBool::new(false)),
+            player_paused_for_details: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+/// Back/forward history and the "a back navigation is in flight" flag.
+#[derive(Clone, Default)]
+pub struct NavigationState {
+    pub nav_history: Arc<Mutex<Vec<NavDestination>>>,
+    pub is_navigating_back: Arc<AtomicBool>,
 }
 
 impl AppContext {
     pub fn set_playback_context(&self, items: Vec<TvItem>) {
         *self
+            .playback
             .active_playback_context
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = items;
@@ -82,6 +134,7 @@ impl AppContext {
 
     pub fn get_next_contextual_item(&self, current_id: Option<&str>) -> Option<TvItem> {
         let items = self
+            .playback
             .active_playback_context
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -141,12 +194,14 @@ impl AppContext {
 
     pub fn push_nav_destination(&self, dest: NavDestination) {
         if self
+            .nav
             .is_navigating_back
             .load(std::sync::atomic::Ordering::SeqCst)
         {
             return;
         }
         let mut history = self
+            .nav
             .nav_history
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -168,7 +223,8 @@ impl AppContext {
     }
 
     pub fn pop_nav_destination(&self) -> Option<NavDestination> {
-        self.nav_history
+        self.nav
+            .nav_history
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .pop()
@@ -178,6 +234,7 @@ impl AppContext {
     /// Browse, Details, Channels, and fallback synthesis.
     pub fn find_catalog_item(&self, id: &str) -> Option<TvItem> {
         if let Some(item) = self
+            .catalog
             .home_catalog
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -187,6 +244,7 @@ impl AppContext {
             return Some(item.clone());
         }
         if let Some(item) = self
+            .playback
             .detail_active_item
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -197,6 +255,7 @@ impl AppContext {
             }
         }
         if let Some(item) = self
+            .playback
             .current_playing_item
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -207,6 +266,7 @@ impl AppContext {
             }
         }
         if let Some(item) = self
+            .catalog
             .cached_catalog
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -216,6 +276,7 @@ impl AppContext {
             return Some(item.clone());
         }
         if let Some(item) = self
+            .catalog
             .similar_catalog
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -225,6 +286,7 @@ impl AppContext {
             return Some(item.clone());
         }
         if let Some(item) = self
+            .catalog
             .performer_catalog
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -234,6 +296,7 @@ impl AppContext {
             return Some(item.clone());
         }
         if let Some(item) = self
+            .catalog
             .studio_catalog
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -243,6 +306,7 @@ impl AppContext {
             return Some(item.clone());
         }
         if let Some(item) = self
+            .catalog
             .channel_catalog
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

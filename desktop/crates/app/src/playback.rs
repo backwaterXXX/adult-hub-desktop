@@ -744,6 +744,41 @@ pub fn start_item_playback_ctx(ui: &MainWindow, ctx: &AppContext, item: TvItem) 
     start_item_playback_with_resume_ctx(ui, ctx, item, None);
 }
 
+/// Puts the player screen into its resolving state. Every field is reset so
+/// nothing from the previous item (title, quality, errors) leaks through.
+fn show_player_resolving(ui: &MainWindow, item: &TvItem, selected_quality: &str) {
+    ui.set_has_active_media(true);
+    ui.set_playing(true);
+    ui.set_player_is_favorite(item.is_favorite);
+    ui.set_player_favorite_enabled(!item.is_telegram() && item.source_provider.is_some());
+    ui.set_player_error_message(String::new().into());
+    ui.set_toast_visible(false); // Clear any stale error toast
+    ui.set_player_controls_visible(true);
+    ui.set_player_more_controls_visible(false);
+    ui.set_player_volume_flyout_open(false);
+    ui.set_download_panel_open(false);
+    ui.set_player_has_quality_alternatives(false);
+    ui.set_player_quality_panel_open(false);
+    ui.set_player_quality_subpage_open(false);
+    ui.set_player_selected_quality_id(selected_quality.into());
+    ui.set_player_selected_quality_label(if selected_quality == "original" {
+        "Original".into()
+    } else {
+        selected_quality.into()
+    });
+    ui.set_player_quality_options(slint::ModelRc::default());
+    ui.set_player_media_loaded(false);
+    ui.set_player_state("resolving".into());
+    ui.set_player_loading_message("Resolving stream address…".into());
+    ui.set_player_title(crate::catalog::display_title(item).into());
+    ui.set_player_subtitle(format_player_subtitle(item).into());
+    ui.set_status(format!("Preparing: {}", item.title).into());
+    ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
+    ui.set_player_is_telegram_stream(item.is_telegram());
+    ui.set_player_has_quality_alternatives(false);
+    ui.set_player_quality_subpage_open(false);
+}
+
 pub fn start_item_playback_with_resume_ctx(
     ui: &MainWindow,
     ctx: &AppContext,
@@ -758,6 +793,7 @@ pub fn start_item_playback_with_resume_ctx(
     // Ignore duplicate dispatch if this exact item is already resolving or loading
     if (ui.get_player_state() == "resolving" || ui.get_player_state() == "loading")
         && ctx
+            .playback
             .current_playing_item
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -778,6 +814,7 @@ pub fn start_item_playback_with_resume_ctx(
     let pos = (player.position().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
     let dur = (player.duration().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
     let is_same_item = ctx
+        .playback
         .current_playing_item
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -786,6 +823,7 @@ pub fn start_item_playback_with_resume_ctx(
     let preserve_quality = is_same_item;
 
     let prev_item = ctx
+        .playback
         .current_playing_item
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -805,6 +843,7 @@ pub fn start_item_playback_with_resume_ctx(
     let _ = player.set_pause(true);
 
     let initial_quality_id = ctx
+        .playback
         .active_quality_id
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -812,47 +851,21 @@ pub fn start_item_playback_with_resume_ctx(
     let selected_quality = if preserve_quality && initial_quality_id != "original" {
         initial_quality_id
     } else {
-        *ctx.active_quality_id
+        *ctx.playback
+            .active_quality_id
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = "original".to_string();
         "original".to_string()
     };
 
     // 2. Immediately update UI to show player screen and loading/resolving overlay
-    *ctx.current_playing_item
+    *ctx.playback
+        .current_playing_item
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(item.clone());
-    ui.set_has_active_media(true);
-    ui.set_playing(true);
-    ui.set_player_is_favorite(item.is_favorite);
-    ui.set_player_favorite_enabled(!item.is_telegram() && item.source_provider.is_some());
-    ui.set_player_error_message(String::new().into());
-    ui.set_toast_visible(false); // Clear any stale error toast
-    ui.set_player_controls_visible(true);
-    ui.set_player_more_controls_visible(false);
-    ui.set_player_volume_flyout_open(false);
-    ui.set_download_panel_open(false);
-    ui.set_player_has_quality_alternatives(false);
-    ui.set_player_quality_panel_open(false);
-    ui.set_player_quality_subpage_open(false);
-    ui.set_player_selected_quality_id(selected_quality.clone().into());
-    ui.set_player_selected_quality_label(if selected_quality == "original" {
-        "Original".into()
-    } else {
-        selected_quality.clone().into()
-    });
-    ui.set_player_quality_options(slint::ModelRc::default());
-    ui.set_player_media_loaded(false);
-    ui.set_player_state("resolving".into());
-    ui.set_player_loading_message("Resolving stream address…".into());
-    ui.set_player_title(crate::catalog::display_title(&item).into());
-    ui.set_player_subtitle(format_player_subtitle(&item).into());
-    ui.set_status(format!("Preparing: {}", item.title).into());
-    ui.set_status_color(slint::Color::from_rgb_u8(154, 160, 180));
-    ui.set_player_is_telegram_stream(item.is_telegram());
-    ui.set_player_has_quality_alternatives(false);
-    ui.set_player_quality_subpage_open(false);
-    *ctx.current_video_variants
+    show_player_resolving(ui, &item, &selected_quality);
+    *ctx.playback
+        .current_video_variants
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Vec::new();
     player.set_quality_variant(None);
@@ -1004,6 +1017,7 @@ pub fn start_item_playback_with_resume_ctx(
                     }
 
                     *ctx_q
+                        .playback
                         .current_video_variants
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = variants_q.clone();
@@ -1121,6 +1135,7 @@ pub fn start_item_playback_with_resume_ctx(
                     None
                 };
                 *ctx_clone
+                    .playback
                     .pending_resume_position
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = start_pos_opt;
@@ -1328,6 +1343,7 @@ pub fn switch_video_quality(ui: &MainWindow, ctx: &AppContext, target_variant_id
         return;
     };
     let current_variant = ctx
+        .playback
         .active_quality_id
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1340,6 +1356,7 @@ pub fn switch_video_quality(ui: &MainWindow, ctx: &AppContext, target_variant_id
     }
 
     let item = ctx
+        .playback
         .current_playing_item
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1450,6 +1467,7 @@ pub fn switch_video_quality(ui: &MainWindow, ctx: &AppContext, target_variant_id
                     // Fresh position right before load
                     let target_pos = player_clone.position().unwrap_or(current_pos_secs);
                     *ctx_clone
+                        .playback
                         .pending_resume_position
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = if target_pos > 0.0 {
@@ -1488,6 +1506,7 @@ pub fn switch_video_quality(ui: &MainWindow, ctx: &AppContext, target_variant_id
                     ui.set_url_text(new_stream_url.into());
 
                     *ctx_clone
+                        .playback
                         .active_quality_id
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner) =
@@ -1495,6 +1514,7 @@ pub fn switch_video_quality(ui: &MainWindow, ctx: &AppContext, target_variant_id
                     ui.set_player_selected_quality_id(target_variant_id.clone().into());
 
                     let variants = ctx_clone
+                        .playback
                         .current_video_variants
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)

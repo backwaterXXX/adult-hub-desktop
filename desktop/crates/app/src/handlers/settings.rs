@@ -624,7 +624,7 @@ pub fn install_stage4_handlers(ui: &MainWindow, ctx: &AppContext) {
 fn install_settings_system_handlers(ui: &MainWindow, ctx: &AppContext) {
     let player = ctx.player.clone();
     let session_ctrl = ctx.session_ctrl.clone();
-    let current_item = ctx.current_playing_item.clone();
+    let current_item = ctx.playback.current_playing_item.clone();
 
     {
         let weak = ui.as_weak();
@@ -687,7 +687,7 @@ fn install_settings_system_handlers(ui: &MainWindow, ctx: &AppContext) {
 /// The three "clear history" resets.
 fn install_settings_history_handlers(ui: &MainWindow, ctx: &AppContext) {
     let local_store = ctx.local_store.clone();
-    let cached_catalog = ctx.cached_catalog.clone();
+    let cached_catalog = ctx.catalog.cached_catalog.clone();
 
     // Clear Search History
     {
@@ -1278,7 +1278,7 @@ fn install_settings_config_handlers(ui: &MainWindow, ctx: &AppContext) {
     let credential_store = ctx.credential_store.clone();
     let phash_coord = ctx.phash_coord.clone();
     let player = ctx.player.clone();
-    let autoplay_active = ctx.autoplay_active.clone();
+    let autoplay_active = ctx.playback.autoplay_active.clone();
 
     // Export Configuration
     {
