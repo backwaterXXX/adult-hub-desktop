@@ -85,523 +85,538 @@ fn install_detail_link_handlers(ui: &MainWindow) {
     }
 }
 
-/// Opens the Details screen: fills every field from the record, then refreshes
-/// artwork and recommendations in the background.
-fn install_open_item_detail_handler(ui: &MainWindow, ctx: &AppContext) {
-    let local_store = ctx.local_store.clone();
-    let credential_store = ctx.credential_store.clone();
-    let session_ctrl = ctx.session_ctrl.clone();
+/// Builds the performer strip and remembers which portraits still need a
+/// fetch. The category-word filter matches the profile screen so generic tags
+/// never look like people.
+/// Generic tags and the item's own genres must never look like performers.
+fn is_category_word(name: &str, genre_lower: &std::collections::HashSet<String>) -> bool {
+    let lower = name.trim().to_lowercase();
+    if lower.is_empty() || genre_lower.contains(&lower) {
+        return true;
+    }
+    const KNOWN_CATEGORIES: &[&str] = &[
+        "locker room",
+        "body worship",
+        "behind the scenes",
+        "compilation",
+        "casting",
+        "threesome",
+        "foursome",
+        "solo",
+        "interracial",
+        "outdoor",
+        "public",
+        "pov",
+        "point of view",
+        "parody",
+        "fetish",
+        "foot fetish",
+        "massage",
+        "oil massage",
+        "deepthroat",
+        "blowjob",
+        "creampie",
+        "facial",
+        "masturbation",
+        "striptease",
+        "bdsm",
+        "bondage",
+        "roleplay",
+        "cosplay",
+        "hardcore",
+        "softcore",
+        "amateur",
+        "vintage",
+        "retro",
+        "uniform",
+        "lingerie",
+        "stockings",
+        "anal",
+        "oral",
+        "glamour",
+        "erotic",
+    ];
+    KNOWN_CATEGORIES.iter().any(|cat| lower == *cat)
+}
 
-    {
-        let weak = ui.as_weak();
-        let local_store = local_store.clone();
-        let credential_store = credential_store.clone();
-        let session_ctrl = session_ctrl.clone();
-        let ctx_detail = ctx.clone();
-        ui.on_open_item_detail(move |id| {
-            let Some(ui) = weak.upgrade() else { return };
-            let id = id.to_string();
-            if ui.get_active_screen() == "browse" {
-                ui.invoke_cache_catalog_view();
+fn performer_strip(
+    item: &TvItem,
+    artwork_server: Option<&str>,
+) -> (
+    Vec<crate::PerformerCardData>,
+    Vec<(String, Option<String>, String)>,
+) {
+    let genre_lower: std::collections::HashSet<String> = item
+        .genres
+        .iter()
+        .chain(item.tags.iter())
+        .map(|g| g.trim().to_lowercase())
+        .collect();
+    let mut performer_image_jobs = Vec::new();
+    let performer_cards = item
+        .people
+        .iter()
+        .filter(|person| {
+            if is_category_word(&person.name, &genre_lower) {
+                return false;
             }
-            // Snapshot the screen being left (player, list, …) before any part
-            // of this handler mutates UI state, so Back really returns there.
-            ctx_detail.push_nav_destination(crate::handlers::browsing::current_nav_destination(
-                &ui,
-                &ctx_detail,
-            ));
-            let target_item = ctx_detail
-                .find_catalog_item(&id)
-                .or_else(|| crate::handlers::browsing::synthesize_item_from_id(&id));
-            let target_item = match target_item {
-                Some(item) => {
-                    *ctx_detail
-                        .playback
-                        .detail_active_item
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(item.clone());
-                    item
-                }
-                None => {
-                    show_error(
-                        &ui,
-                        "This item is no longer in the current catalog. Refresh and try again.",
-                    );
-                    return;
-                }
-            };
-
-            if target_item
-                .genres
-                .iter()
-                .any(|tag| tag == "__adult_hub_genre")
-            {
-                ui.set_detail_visible(false);
-                ui.set_active_screen("browse".into());
-                ui.set_catalog_category_drilldown(true);
-                ui.set_active_category("Latest".into());
-                ui.set_search_query("".into());
-                ui.set_catalog_genre_query(target_item.title.clone().into());
-                ui.invoke_set_catalog_text_filter("genre".into(), target_item.title.into());
-                return;
-            }
-
-            if target_item
-                .genres
-                .iter()
-                .any(|tag| tag == "__adult_hub_performer")
-            {
-                let performer_key = if !target_item.id.is_empty() {
-                    target_item.id.clone()
-                } else {
-                    format!("name:{}", target_item.title)
-                };
-                ui.invoke_open_performer_profile(performer_key.into());
-                return;
-            }
-            if target_item
-                .genres
-                .iter()
-                .any(|tag| tag == "__adult_hub_studio")
-            {
-                ui.invoke_open_studio_profile(target_item.title.into());
-                return;
-            }
-
-            let is_telegram_item = target_item.is_telegram();
-            let year_str = target_item.year.map(|y| y.to_string()).unwrap_or_default();
-            let duration_str = target_item.formatted_duration();
-            let resolution_str = match (target_item.width, target_item.height) {
-                (Some(w), Some(h)) => format!("{w}x{h}"),
-                _ => String::new(),
-            };
-            let studio_str = target_item.studios.first().cloned().unwrap_or_default();
-            let genres_str = target_item.genres.join(", ");
-            let raw_overview = target_item.overview.clone().unwrap_or_default();
-            let clean_title = target_item.title.trim();
-            let disp_title_str = crate::catalog::display_title(&target_item);
-            let disp_title = disp_title_str.trim();
-            let ParsedOverview {
-                clean_overview: overview_str,
-                channel: extracted_channel,
-                source_url: extracted_source_url,
-                telegram_id: extracted_telegram_id,
-            } = parse_overview_metadata(&raw_overview, clean_title, disp_title);
-
-            let original_title_str = if clean_title.eq_ignore_ascii_case(disp_title) {
-                String::new()
-            } else {
-                target_item.title.clone()
-            };
-
-            // Use any already-cached artwork immediately, then fetch it off the UI thread.
-            let artwork_session = credential_store.get().ok().flatten();
-            let detail_card = artwork_session.as_ref().map_or_else(
-                || tv_item_to_card(&target_item),
-                |session| tv_item_to_card_for_server(&target_item, &session.server_url),
-            );
-            let artwork_url = detail_card.thumbnail_url.to_string();
-            let artwork_server = artwork_session
-                .as_ref()
-                .map(|session| session.server_url.clone());
-            let artwork_token = artwork_session
-                .as_ref()
-                .map(|session| session.access_token.clone());
-            let backdrop_url = if let Some(tag) = target_item
-                .backdrop_image_tag
+            person
+                .person_type
                 .as_deref()
-                .filter(|t| !t.trim().is_empty())
+                .is_none_or(|kind| kind.eq_ignore_ascii_case("actor"))
+        })
+        .take(20)
+        .map(|person| {
+            // A stable person GUID plus its artwork path yields
+            // the exact URL the profile screen uses for this actor, so
+            // both surfaces share one portrait cache entry. Name-slug
+            // IDs (resolver items) and tag-less entries are resolved
+            // through the Persons endpoint in the worker below.
+            let direct_url = if let Some(tag) = person
+                .primary_image_tag
+                .as_deref()
+                .filter(|tag| !tag.trim().is_empty())
             {
                 crate::thumbnails::resolve_resolver_thumbnail_url(tag.trim())
             } else {
                 None
             };
-            let cached_backdrop = backdrop_url.as_deref().and_then(|url| {
-                crate::thumbnails::cached_memory_image(url, crate::thumbnails::DETAIL_ARTWORK_WIDTH)
+            let cached_image = direct_url.as_deref().and_then(|url| {
+                crate::thumbnails::cached_memory_image(url, crate::thumbnails::CARD_ARTWORK_WIDTH)
             });
-
-            // Calculate resume information
-            let duration_ms = target_item
-                .runtime_ticks
-                .map(|t| (t / 10_000) as u64)
-                .unwrap_or(0);
-            let resume_ms = PlaybackSessionController::resolve_item_resume_position(
-                &local_store,
-                &session_ctrl,
-                &target_item,
-            );
-
-            let can_resume = resume_ms
-                .is_some_and(|ms| PlaybackSessionController::should_prompt_resume(ms, duration_ms));
-            let resume_text = if can_resume {
-                format_time(resume_ms.unwrap_or(0) as f64 / 1000.0)
-            } else {
-                String::new()
-            };
-
-            let genre_lower: std::collections::HashSet<String> = target_item
-                .genres
-                .iter()
-                .chain(target_item.tags.iter())
-                .map(|g| g.trim().to_lowercase())
-                .collect();
-
-            let is_category_word = |name: &str| -> bool {
-                let lower = name.trim().to_lowercase();
-                if lower.is_empty() || genre_lower.contains(&lower) {
-                    return true;
-                }
-                const KNOWN_CATEGORIES: &[&str] = &[
-                    "locker room",
-                    "body worship",
-                    "behind the scenes",
-                    "compilation",
-                    "casting",
-                    "threesome",
-                    "foursome",
-                    "solo",
-                    "interracial",
-                    "outdoor",
-                    "public",
-                    "pov",
-                    "point of view",
-                    "parody",
-                    "fetish",
-                    "foot fetish",
-                    "massage",
-                    "oil massage",
-                    "deepthroat",
-                    "blowjob",
-                    "creampie",
-                    "facial",
-                    "masturbation",
-                    "striptease",
-                    "bdsm",
-                    "bondage",
-                    "roleplay",
-                    "cosplay",
-                    "hardcore",
-                    "softcore",
-                    "amateur",
-                    "vintage",
-                    "retro",
-                    "uniform",
-                    "lingerie",
-                    "stockings",
-                    "anal",
-                    "oral",
-                    "glamour",
-                    "erotic",
-                ];
-                KNOWN_CATEGORIES.iter().any(|cat| lower == *cat)
-            };
-
-            let performers = target_item
-                .people
-                .iter()
-                .filter(|p| !is_category_word(&p.name))
-                .map(|p| p.name.clone().into())
-                .collect::<Vec<slint::SharedString>>();
-            let genre_items = target_item
-                .genres
-                .iter()
-                .cloned()
-                .map(Into::into)
-                .collect::<Vec<slint::SharedString>>();
-
-            let mut performer_image_jobs = Vec::new();
-            let performer_cards = target_item
-                .people
-                .iter()
-                .filter(|person| {
-                    if is_category_word(&person.name) {
-                        return false;
-                    }
-                    person
-                        .person_type
-                        .as_deref()
-                        .is_none_or(|kind| kind.eq_ignore_ascii_case("actor"))
-                })
-                .take(20)
-                .map(|person| {
-                    // A stable person GUID plus its artwork path yields
-                    // the exact URL the profile screen uses for this actor, so
-                    // both surfaces share one portrait cache entry. Name-slug
-                    // IDs (resolver items) and tag-less entries are resolved
-                    // through the Persons endpoint in the worker below.
-                    let direct_url = if let Some(tag) = person
-                        .primary_image_tag
-                        .as_deref()
-                        .filter(|tag| !tag.trim().is_empty())
-                    {
-                        crate::thumbnails::resolve_resolver_thumbnail_url(tag.trim())
-                    } else {
-                        None
-                    };
-                    let cached_image = direct_url.as_deref().and_then(|url| {
-                        crate::thumbnails::cached_memory_image(
-                            url,
-                            crate::thumbnails::CARD_ARTWORK_WIDTH,
-                        )
-                    });
-                    if cached_image.is_none() && artwork_server.is_some() {
-                        performer_image_jobs.push((
-                            person.id.clone(),
-                            direct_url,
-                            person.name.clone(),
-                        ));
-                    }
-                    crate::PerformerCardData {
-                        id: person.id.clone().into(),
-                        name: person.name.clone().into(),
-                        role: person.role.as_deref().unwrap_or("Actor").into(),
-                        has_image: cached_image.is_some(),
-                        image: cached_image.unwrap_or_default(),
-                    }
-                })
-                .collect::<Vec<_>>();
-
-            let mut combined_tags: Vec<String> = Vec::new();
-            let mut add_tag = |raw_tag: &str| {
-                let cleaned = raw_tag.trim().trim_start_matches('#').trim();
-                if !cleaned.is_empty()
-                    && !combined_tags
-                        .iter()
-                        .any(|existing: &String| existing.eq_ignore_ascii_case(cleaned))
-                {
-                    combined_tags.push(cleaned.to_string());
-                }
-            };
-
-            for t in &target_item.tags {
-                add_tag(t);
+            if cached_image.is_none() && artwork_server.is_some() {
+                performer_image_jobs.push((person.id.clone(), direct_url, person.name.clone()));
             }
-            let (_, extracted_tags) =
-                crate::catalog::extract_title_tags_and_clean_title(&target_item.title);
-            for t in extracted_tags {
-                add_tag(&t);
+            crate::PerformerCardData {
+                id: person.id.clone().into(),
+                name: person.name.clone().into(),
+                role: person.role.as_deref().unwrap_or("Actor").into(),
+                has_image: cached_image.is_some(),
+                image: cached_image.unwrap_or_default(),
             }
-            if let Some(overview) = target_item.overview.as_deref() {
-                let (_, overview_tags) =
-                    crate::catalog::extract_title_tags_and_clean_title(overview);
-                for t in overview_tags {
-                    add_tag(&t);
-                }
-            }
-            let tag_items = combined_tags
-                .into_iter()
-                .map(Into::into)
-                .collect::<Vec<slint::SharedString>>();
+        })
+        .collect::<Vec<_>>();
+    (performer_cards, performer_image_jobs)
+}
 
-            let size_str = target_item.format_media_size();
-
-            let provider_str = target_item.source_provider.clone().unwrap_or_else(|| {
-                if is_telegram_item {
-                    "Telegram".to_string()
-                } else {
-                    "Adult Hub".to_string()
-                }
-            });
-
-            let telegram_id_str = resolve_item_telegram_id(
-                &target_item,
-                (!extracted_telegram_id.is_empty()).then_some(&extracted_telegram_id),
-            )
-            .unwrap_or_default();
-
-            ui.set_detail_id(target_item.id.clone().into());
-            ui.set_detail_telegram_id(telegram_id_str.into());
-            ui.set_detail_title(crate::catalog::display_title(&target_item).into());
-            ui.set_detail_original_title(original_title_str.into());
-            ui.set_detail_channel(extracted_channel.into());
-            ui.set_detail_source_url(extracted_source_url.into());
-            ui.set_detail_id_copied(false);
-            ui.set_detail_telegram_id_copied(false);
-            ui.set_detail_overview(overview_str.into());
-            ui.set_detail_year(year_str.into());
-            ui.set_detail_duration(duration_str.into());
-            ui.set_detail_studio(studio_str.into());
-            ui.set_detail_genres(genres_str.into());
-            ui.set_detail_genre_items(Rc::new(slint::VecModel::from(genre_items)).into());
-            ui.set_detail_tag_items(Rc::new(slint::VecModel::from(tag_items)).into());
-            ui.set_detail_resolution(resolution_str.into());
-            ui.set_detail_container(target_item.container.clone().unwrap_or_default().into());
-            ui.set_detail_file_size(size_str.into());
-            ui.set_detail_provider(provider_str.into());
-            ui.set_detail_tech_expanded(false);
-            ui.set_detail_thumbnail(detail_card.thumbnail.clone());
-            ui.set_detail_has_thumbnail(detail_card.has_thumbnail);
-            ui.set_detail_backdrop(cached_backdrop.clone().unwrap_or_default());
-            ui.set_detail_has_backdrop(cached_backdrop.is_some());
-            ui.set_detail_is_favorite(target_item.is_favorite);
-            ui.set_detail_is_played(target_item.is_played);
-            ui.set_detail_can_resume(can_resume);
-            ui.set_detail_resume_text(resume_text.into());
-            let perf_model = Rc::new(slint::VecModel::from(performers));
-            ui.set_detail_performers(perf_model.into());
-            ui.set_detail_performer_cards(Rc::new(slint::VecModel::from(performer_cards)).into());
-            ui.set_detail_scroll_y(0.0);
-
-            // The library entry size is unreliable for referrals (.strm) and is
-            // often absent entirely. Resolve the real media size off the UI
-            // thread from trusted sources, keeping "Unavailable" when unknown.
-            if target_item.media_size_bytes().is_none() {
-                let weak = weak.clone();
-                let item_id = target_item.id.clone();
-                let item_for_size = target_item.clone();
-                let session_for_size = artwork_session.clone();
-                let ctx_for_size = ctx_detail.clone();
-                std::thread::spawn(move || {
-                    let Some(bytes) = resolve_real_media_size(
-                        &item_for_size,
-                        &ctx_for_size,
-                        session_for_size.as_ref(),
-                    ) else {
-                        return;
-                    };
-                    let text = adult_hub_player::format_file_size(bytes);
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = weak.upgrade()
-                            && ui.get_detail_id() == item_id.as_str()
-                        {
-                            ui.set_detail_file_size(text.into());
-                        }
-                    });
-                });
-            }
-
-            spawn_similar_items_fetch(
+/// Fills the Details screen from the record, then refreshes artwork and
+/// recommendations in the background. Split out of the handler so the
+/// registration stays a one-liner.
+fn open_item_detail(ui: &MainWindow, ctx: &AppContext, id: String) {
+    let weak = ui.as_weak();
+    let local_store = ctx.local_store.clone();
+    let credential_store = ctx.credential_store.clone();
+    let session_ctrl = ctx.session_ctrl.clone();
+    let ctx_detail = ctx.clone();
+    let Some(ui) = weak.upgrade() else { return };
+    let id = id.to_string();
+    if ui.get_active_screen() == "browse" {
+        ui.invoke_cache_catalog_view();
+    }
+    // Snapshot the screen being left (player, list, …) before any part
+    // of this handler mutates UI state, so Back really returns there.
+    ctx_detail.push_nav_destination(crate::handlers::browsing::current_nav_destination(
+        &ui,
+        &ctx_detail,
+    ));
+    let target_item = ctx_detail
+        .find_catalog_item(&id)
+        .or_else(|| crate::handlers::browsing::synthesize_item_from_id(&id));
+    let target_item = match target_item {
+        Some(item) => {
+            *ctx_detail
+                .playback
+                .detail_active_item
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(item.clone());
+            item
+        }
+        None => {
+            show_error(
                 &ui,
-                &target_item,
-                artwork_session.as_ref(),
-                artwork_token.clone(),
-                ctx_detail.catalog.similar_catalog.clone(),
+                "This item is no longer in the current catalog. Refresh and try again.",
             );
+            return;
+        }
+    };
 
-            ui.set_detail_visible(false);
-            ui.set_active_screen("video-details".into());
+    if target_item
+        .genres
+        .iter()
+        .any(|tag| tag == "__adult_hub_genre")
+    {
+        ui.set_detail_visible(false);
+        ui.set_active_screen("browse".into());
+        ui.set_catalog_category_drilldown(true);
+        ui.set_active_category("Latest".into());
+        ui.set_search_query("".into());
+        ui.set_catalog_genre_query(target_item.title.clone().into());
+        ui.invoke_set_catalog_text_filter("genre".into(), target_item.title.into());
+        return;
+    }
 
-            if cached_backdrop.is_none()
-                && let Some(backdrop_url) = backdrop_url
-            {
-                let weak = weak.clone();
-                let item_id = target_item.id.clone();
-                let token = artwork_token.clone();
-                std::thread::spawn(move || {
-                    let Ok(artwork) = crate::thumbnails::fetch_and_cache_artwork(
+    if target_item
+        .genres
+        .iter()
+        .any(|tag| tag == "__adult_hub_performer")
+    {
+        let performer_key = if !target_item.id.is_empty() {
+            target_item.id.clone()
+        } else {
+            format!("name:{}", target_item.title)
+        };
+        ui.invoke_open_performer_profile(performer_key.into());
+        return;
+    }
+    if target_item
+        .genres
+        .iter()
+        .any(|tag| tag == "__adult_hub_studio")
+    {
+        ui.invoke_open_studio_profile(target_item.title.into());
+        return;
+    }
+
+    let is_telegram_item = target_item.is_telegram();
+    let year_str = target_item.year.map(|y| y.to_string()).unwrap_or_default();
+    let duration_str = target_item.formatted_duration();
+    let resolution_str = match (target_item.width, target_item.height) {
+        (Some(w), Some(h)) => format!("{w}x{h}"),
+        _ => String::new(),
+    };
+    let studio_str = target_item.studios.first().cloned().unwrap_or_default();
+    let genres_str = target_item.genres.join(", ");
+    let raw_overview = target_item.overview.clone().unwrap_or_default();
+    let clean_title = target_item.title.trim();
+    let disp_title_str = crate::catalog::display_title(&target_item);
+    let disp_title = disp_title_str.trim();
+    let ParsedOverview {
+        clean_overview: overview_str,
+        channel: extracted_channel,
+        source_url: extracted_source_url,
+        telegram_id: extracted_telegram_id,
+    } = parse_overview_metadata(&raw_overview, clean_title, disp_title);
+
+    let original_title_str = if clean_title.eq_ignore_ascii_case(disp_title) {
+        String::new()
+    } else {
+        target_item.title.clone()
+    };
+
+    // Use any already-cached artwork immediately, then fetch it off the UI thread.
+    let artwork_session = credential_store.get().ok().flatten();
+    let detail_card = artwork_session.as_ref().map_or_else(
+        || tv_item_to_card(&target_item),
+        |session| tv_item_to_card_for_server(&target_item, &session.server_url),
+    );
+    let artwork_url = detail_card.thumbnail_url.to_string();
+    let artwork_server = artwork_session
+        .as_ref()
+        .map(|session| session.server_url.clone());
+    let artwork_token = artwork_session
+        .as_ref()
+        .map(|session| session.access_token.clone());
+    let backdrop_url = if let Some(tag) = target_item
+        .backdrop_image_tag
+        .as_deref()
+        .filter(|t| !t.trim().is_empty())
+    {
+        crate::thumbnails::resolve_resolver_thumbnail_url(tag.trim())
+    } else {
+        None
+    };
+    let cached_backdrop = backdrop_url.as_deref().and_then(|url| {
+        crate::thumbnails::cached_memory_image(url, crate::thumbnails::DETAIL_ARTWORK_WIDTH)
+    });
+
+    // Calculate resume information
+    let duration_ms = target_item
+        .runtime_ticks
+        .map(|t| (t / 10_000) as u64)
+        .unwrap_or(0);
+    let resume_ms = PlaybackSessionController::resolve_item_resume_position(
+        &local_store,
+        &session_ctrl,
+        &target_item,
+    );
+
+    let can_resume = resume_ms
+        .is_some_and(|ms| PlaybackSessionController::should_prompt_resume(ms, duration_ms));
+    let resume_text = if can_resume {
+        format_time(resume_ms.unwrap_or(0) as f64 / 1000.0)
+    } else {
+        String::new()
+    };
+
+    let genre_lower: std::collections::HashSet<String> = target_item
+        .genres
+        .iter()
+        .chain(target_item.tags.iter())
+        .map(|g| g.trim().to_lowercase())
+        .collect();
+
+    let performers = target_item
+        .people
+        .iter()
+        .filter(|p| !is_category_word(&p.name, &genre_lower))
+        .map(|p| p.name.clone().into())
+        .collect::<Vec<slint::SharedString>>();
+    let genre_items = target_item
+        .genres
+        .iter()
+        .cloned()
+        .map(Into::into)
+        .collect::<Vec<slint::SharedString>>();
+
+    let (performer_cards, performer_image_jobs) =
+        performer_strip(&target_item, artwork_server.as_deref());
+
+    let mut combined_tags: Vec<String> = Vec::new();
+    let mut add_tag = |raw_tag: &str| {
+        let cleaned = raw_tag.trim().trim_start_matches('#').trim();
+        if !cleaned.is_empty()
+            && !combined_tags
+                .iter()
+                .any(|existing: &String| existing.eq_ignore_ascii_case(cleaned))
+        {
+            combined_tags.push(cleaned.to_string());
+        }
+    };
+
+    for t in &target_item.tags {
+        add_tag(t);
+    }
+    let (_, extracted_tags) =
+        crate::catalog::extract_title_tags_and_clean_title(&target_item.title);
+    for t in extracted_tags {
+        add_tag(&t);
+    }
+    if let Some(overview) = target_item.overview.as_deref() {
+        let (_, overview_tags) = crate::catalog::extract_title_tags_and_clean_title(overview);
+        for t in overview_tags {
+            add_tag(&t);
+        }
+    }
+    let tag_items = combined_tags
+        .into_iter()
+        .map(Into::into)
+        .collect::<Vec<slint::SharedString>>();
+
+    let size_str = target_item.format_media_size();
+
+    let provider_str = target_item.source_provider.clone().unwrap_or_else(|| {
+        if is_telegram_item {
+            "Telegram".to_string()
+        } else {
+            "Adult Hub".to_string()
+        }
+    });
+
+    let telegram_id_str = resolve_item_telegram_id(
+        &target_item,
+        (!extracted_telegram_id.is_empty()).then_some(&extracted_telegram_id),
+    )
+    .unwrap_or_default();
+
+    ui.set_detail_id(target_item.id.clone().into());
+    ui.set_detail_telegram_id(telegram_id_str.into());
+    ui.set_detail_title(crate::catalog::display_title(&target_item).into());
+    ui.set_detail_original_title(original_title_str.into());
+    ui.set_detail_channel(extracted_channel.into());
+    ui.set_detail_source_url(extracted_source_url.into());
+    ui.set_detail_id_copied(false);
+    ui.set_detail_telegram_id_copied(false);
+    ui.set_detail_overview(overview_str.into());
+    ui.set_detail_year(year_str.into());
+    ui.set_detail_duration(duration_str.into());
+    ui.set_detail_studio(studio_str.into());
+    ui.set_detail_genres(genres_str.into());
+    ui.set_detail_genre_items(Rc::new(slint::VecModel::from(genre_items)).into());
+    ui.set_detail_tag_items(Rc::new(slint::VecModel::from(tag_items)).into());
+    ui.set_detail_resolution(resolution_str.into());
+    ui.set_detail_container(target_item.container.clone().unwrap_or_default().into());
+    ui.set_detail_file_size(size_str.into());
+    ui.set_detail_provider(provider_str.into());
+    ui.set_detail_tech_expanded(false);
+    ui.set_detail_thumbnail(detail_card.thumbnail.clone());
+    ui.set_detail_has_thumbnail(detail_card.has_thumbnail);
+    ui.set_detail_backdrop(cached_backdrop.clone().unwrap_or_default());
+    ui.set_detail_has_backdrop(cached_backdrop.is_some());
+    ui.set_detail_is_favorite(target_item.is_favorite);
+    ui.set_detail_is_played(target_item.is_played);
+    ui.set_detail_can_resume(can_resume);
+    ui.set_detail_resume_text(resume_text.into());
+    let perf_model = Rc::new(slint::VecModel::from(performers));
+    ui.set_detail_performers(perf_model.into());
+    ui.set_detail_performer_cards(Rc::new(slint::VecModel::from(performer_cards)).into());
+    ui.set_detail_scroll_y(0.0);
+
+    // The library entry size is unreliable for referrals (.strm) and is
+    // often absent entirely. Resolve the real media size off the UI
+    // thread from trusted sources, keeping "Unavailable" when unknown.
+    if target_item.media_size_bytes().is_none() {
+        let weak = weak.clone();
+        let item_id = target_item.id.clone();
+        let item_for_size = target_item.clone();
+        let session_for_size = artwork_session.clone();
+        let ctx_for_size = ctx_detail.clone();
+        std::thread::spawn(move || {
+            let Some(bytes) =
+                resolve_real_media_size(&item_for_size, &ctx_for_size, session_for_size.as_ref())
+            else {
+                return;
+            };
+            let text = adult_hub_player::format_file_size(bytes);
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade()
+                    && ui.get_detail_id() == item_id.as_str()
+                {
+                    ui.set_detail_file_size(text.into());
+                }
+            });
+        });
+    }
+
+    spawn_similar_items_fetch(
+        &ui,
+        &target_item,
+        artwork_session.as_ref(),
+        artwork_token.clone(),
+        ctx_detail.catalog.similar_catalog.clone(),
+    );
+
+    ui.set_detail_visible(false);
+    ui.set_active_screen("video-details".into());
+
+    if cached_backdrop.is_none()
+        && let Some(backdrop_url) = backdrop_url
+    {
+        let weak = weak.clone();
+        let item_id = target_item.id.clone();
+        let token = artwork_token.clone();
+        std::thread::spawn(move || {
+            let Ok(artwork) = crate::thumbnails::fetch_and_cache_artwork(
+                &backdrop_url,
+                token.as_deref(),
+                crate::thumbnails::DETAIL_ARTWORK_WIDTH,
+            ) else {
+                return;
+            };
+            // Reject empty/black artwork just like Android TV. The
+            // detail poster remains visible underneath as the fallback.
+            if artwork.poor {
+                return;
+            }
+            let backdrop_url = backdrop_url.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade()
+                    && ui.get_detail_id() == item_id.as_str()
+                {
+                    let image = crate::thumbnails::remember_artwork_image(
                         &backdrop_url,
-                        token.as_deref(),
                         crate::thumbnails::DETAIL_ARTWORK_WIDTH,
-                    ) else {
-                        return;
-                    };
-                    // Reject empty/black artwork just like Android TV. The
-                    // detail poster remains visible underneath as the fallback.
-                    if artwork.poor {
-                        return;
-                    }
-                    let backdrop_url = backdrop_url.clone();
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = weak.upgrade()
-                            && ui.get_detail_id() == item_id.as_str()
-                        {
-                            let image = crate::thumbnails::remember_artwork_image(
-                                &backdrop_url,
-                                crate::thumbnails::DETAIL_ARTWORK_WIDTH,
-                                &artwork,
-                            );
-                            ui.set_detail_backdrop(image);
-                            ui.set_detail_has_backdrop(true);
-                        }
-                    });
-                });
-            }
+                        &artwork,
+                    );
+                    ui.set_detail_backdrop(image);
+                    ui.set_detail_has_backdrop(true);
+                }
+            });
+        });
+    }
 
-            let needs_artwork_refresh = (!detail_card.fallback_thumbnail_url.is_empty()
-                && is_telegram_item)
-                || (!detail_card.has_thumbnail && !artwork_url.is_empty());
-            if needs_artwork_refresh {
-                let weak = weak.clone();
-                let item_id = target_item.id.clone();
-                let token = artwork_token.clone();
-                let thumbnail_request = crate::catalog::ThumbnailRequest::from(&detail_card);
-                std::thread::spawn(move || {
-                    let Some(thumbnail) = crate::catalog::fetch_card_thumbnail_sized(
-                        &thumbnail_request,
-                        token.as_deref(),
+    let needs_artwork_refresh = (!detail_card.fallback_thumbnail_url.is_empty()
+        && is_telegram_item)
+        || (!detail_card.has_thumbnail && !artwork_url.is_empty());
+    if needs_artwork_refresh {
+        let weak = weak.clone();
+        let item_id = target_item.id.clone();
+        let token = artwork_token.clone();
+        let thumbnail_request = crate::catalog::ThumbnailRequest::from(&detail_card);
+        std::thread::spawn(move || {
+            let Some(thumbnail) = crate::catalog::fetch_card_thumbnail_sized(
+                &thumbnail_request,
+                token.as_deref(),
+                crate::thumbnails::DETAIL_ARTWORK_WIDTH,
+            ) else {
+                return;
+            };
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade()
+                    && ui.get_detail_id() == item_id.as_str()
+                {
+                    let image = crate::thumbnails::remember_artwork_image(
+                        &thumbnail.url,
                         crate::thumbnails::DETAIL_ARTWORK_WIDTH,
-                    ) else {
-                        return;
-                    };
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = weak.upgrade()
-                            && ui.get_detail_id() == item_id.as_str()
-                        {
-                            let image = crate::thumbnails::remember_artwork_image(
-                                &thumbnail.url,
-                                crate::thumbnails::DETAIL_ARTWORK_WIDTH,
-                                &thumbnail.artwork,
-                            );
-                            ui.set_detail_thumbnail(image);
-                            ui.set_detail_has_thumbnail(true);
-                        }
-                    });
-                });
-            }
+                        &thumbnail.artwork,
+                    );
+                    ui.set_detail_thumbnail(image);
+                    ui.set_detail_has_thumbnail(true);
+                }
+            });
+        });
+    }
 
-            if !performer_image_jobs.is_empty() {
+    if !performer_image_jobs.is_empty() {
+        let weak = weak.clone();
+        let item_id = target_item.id.clone();
+        let session_for_cast = artwork_session.clone();
+        std::thread::spawn(move || {
+            let Some(session) = session_for_cast else {
+                return;
+            };
+            let token = session.access_token.as_str();
+            for (person_id, direct_url, _name) in performer_image_jobs {
+                let Some(url) = direct_url else {
+                    continue;
+                };
+                let Ok(artwork) = crate::thumbnails::fetch_and_cache_artwork(
+                    &url,
+                    Some(token),
+                    crate::thumbnails::CARD_ARTWORK_WIDTH,
+                ) else {
+                    continue;
+                };
                 let weak = weak.clone();
-                let item_id = target_item.id.clone();
-                let session_for_cast = artwork_session.clone();
-                std::thread::spawn(move || {
-                    let Some(session) = session_for_cast else {
-                        return;
-                    };
-                    let token = session.access_token.as_str();
-                    for (person_id, direct_url, _name) in performer_image_jobs {
-                        let Some(url) = direct_url else {
-                            continue;
-                        };
-                        let Ok(artwork) = crate::thumbnails::fetch_and_cache_artwork(
+                let item_id = item_id.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade()
+                        && ui.get_detail_id() == item_id.as_str()
+                    {
+                        let image = crate::thumbnails::remember_artwork_image(
                             &url,
-                            Some(token),
                             crate::thumbnails::CARD_ARTWORK_WIDTH,
-                        ) else {
-                            continue;
-                        };
-                        let weak = weak.clone();
-                        let item_id = item_id.clone();
-                        let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(ui) = weak.upgrade()
-                                && ui.get_detail_id() == item_id.as_str()
-                            {
-                                let image = crate::thumbnails::remember_artwork_image(
-                                    &url,
-                                    crate::thumbnails::CARD_ARTWORK_WIDTH,
-                                    &artwork,
-                                );
-                                let model = ui.get_detail_performer_cards();
-                                let mut cards = (0..model.row_count())
-                                    .filter_map(|row| model.row_data(row))
-                                    .collect::<Vec<_>>();
-                                // Attach by stable person id, never by the index
-                                // captured when the batch started.
-                                if let Some(card) =
-                                    cards.iter_mut().find(|card| card.id == person_id.as_str())
-                                {
-                                    card.image = image;
-                                    card.has_image = true;
-                                    ui.set_detail_performer_cards(
-                                        Rc::new(slint::VecModel::from(cards)).into(),
-                                    );
-                                }
-                            }
-                        });
+                            &artwork,
+                        );
+                        let model = ui.get_detail_performer_cards();
+                        let mut cards = (0..model.row_count())
+                            .filter_map(|row| model.row_data(row))
+                            .collect::<Vec<_>>();
+                        // Attach by stable person id, never by the index
+                        // captured when the batch started.
+                        if let Some(card) =
+                            cards.iter_mut().find(|card| card.id == person_id.as_str())
+                        {
+                            card.image = image;
+                            card.has_image = true;
+                            ui.set_detail_performer_cards(
+                                Rc::new(slint::VecModel::from(cards)).into(),
+                            );
+                        }
                     }
                 });
             }
         });
     }
+}
+
+/// Opens the Details screen: fills every field from the record.
+fn install_open_item_detail_handler(ui: &MainWindow, ctx: &AppContext) {
+    let weak = ui.as_weak();
+    let ctx = ctx.clone();
+    ui.on_open_item_detail(move |id| {
+        let Some(ui) = weak.upgrade() else { return };
+        open_item_detail(&ui, &ctx, id.to_string());
+    });
 }
 
 /// Closes the Details screen and returns to the screen that opened it.
@@ -1503,6 +1518,17 @@ pub fn resolve_item_telegram_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn category_words_never_become_performers() {
+        let genres = std::collections::HashSet::from(["anal".to_string()]);
+        // The item's own tags and the generic vocabulary are the same filter.
+        assert!(is_category_word("Anal", &genres));
+        assert!(is_category_word("  ", &genres));
+        assert!(is_category_word("threesome", &genres));
+        // A real name must survive both branches.
+        assert!(!is_category_word("Eva Green", &genres));
+    }
 
     #[test]
     fn test_resolve_item_telegram_id_from_provider_video_id() {
