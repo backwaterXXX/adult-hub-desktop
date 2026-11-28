@@ -88,6 +88,16 @@ fn install_detail_link_handlers(ui: &MainWindow) {
 /// Builds the performer strip and remembers which portraits still need a
 /// fetch. The category-word filter matches the profile screen so generic tags
 /// never look like people.
+/// Performer portraits that still need a fetch: person id, direct artwork URL
+/// and display name.
+type PerformerImageJob = (String, Option<String>, String);
+
+/// What the details screen shows under the poster, plus the work still owed.
+struct PerformerStrip {
+    cards: Vec<crate::PerformerCardData>,
+    image_jobs: Vec<PerformerImageJob>,
+}
+
 /// Generic tags and the item's own genres must never look like performers.
 fn is_category_word(name: &str, genre_lower: &std::collections::HashSet<String>) -> bool {
     let lower = name.trim().to_lowercase();
@@ -139,13 +149,7 @@ fn is_category_word(name: &str, genre_lower: &std::collections::HashSet<String>)
     KNOWN_CATEGORIES.iter().any(|cat| lower == *cat)
 }
 
-fn performer_strip(
-    item: &TvItem,
-    artwork_server: Option<&str>,
-) -> (
-    Vec<crate::PerformerCardData>,
-    Vec<(String, Option<String>, String)>,
-) {
+fn performer_strip(item: &TvItem, artwork_server: Option<&str>) -> PerformerStrip {
     let genre_lower: std::collections::HashSet<String> = item
         .genres
         .iter()
@@ -196,7 +200,10 @@ fn performer_strip(
             }
         })
         .collect::<Vec<_>>();
-    (performer_cards, performer_image_jobs)
+    PerformerStrip {
+        cards: performer_cards,
+        image_jobs: performer_image_jobs,
+    }
 }
 
 /// Fills the Details screen from the record, then refreshes artwork and
@@ -368,8 +375,10 @@ fn open_item_detail(ui: &MainWindow, ctx: &AppContext, id: String) {
         .map(Into::into)
         .collect::<Vec<slint::SharedString>>();
 
-    let (performer_cards, performer_image_jobs) =
-        performer_strip(&target_item, artwork_server.as_deref());
+    let PerformerStrip {
+        cards: performer_cards,
+        image_jobs: performer_image_jobs,
+    } = performer_strip(&target_item, artwork_server.as_deref());
 
     let mut combined_tags: Vec<String> = Vec::new();
     let mut add_tag = |raw_tag: &str| {
