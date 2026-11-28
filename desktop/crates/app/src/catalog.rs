@@ -1351,21 +1351,13 @@ pub fn tv_item_to_card(item: &TvItem) -> VideoCardData {
                 || tag == "__adult_hub_studio"
                 || tag == "__adult_hub_genre"
         }) {
-            let mut parts = Vec::new();
-            if let Some(provider) = item.source_provider.as_deref() {
-                let trimmed = provider.trim();
-                if !trimmed.is_empty() {
-                    parts.push(trimmed.to_string());
-                }
+            // The hub name is identical on every taxonomy card, so only the
+            // item count carries information.
+            match item.child_count.filter(|count| *count > 0) {
+                Some(1) => "1 movie".to_string(),
+                Some(count) => format!("{count} movies"),
+                None => String::new(),
             }
-            if let Some(count) = item.child_count.filter(|count| *count > 0) {
-                if count == 1 {
-                    parts.push("1 movie".to_string());
-                } else {
-                    parts.push(format!("{count} movies"));
-                }
-            }
-            parts.join(" • ")
         } else {
             item.studios.first().cloned().unwrap_or_default()
         }
