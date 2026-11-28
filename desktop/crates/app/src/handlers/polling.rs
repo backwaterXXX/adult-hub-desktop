@@ -111,23 +111,153 @@ struct PlaybackRecovery {
     load_requested_at: Option<Instant>,
 }
 
-pub fn install_polling(ui: &MainWindow, ctx: &AppContext, frame_pending: Arc<AtomicBool>) -> Timer {
-    let ui_weak = ui.as_weak();
-    let timer = Timer::default();
-    let mut tick: u64 = 0;
+/// Builds the 100 ms poll tick. The counters it mutates live in the returned
+/// closure, so the timer owns all of its state.
+/// Mirrors the running download's status into the player panel.
+fn sync_download_status(ui: &MainWindow, download_mgr: &crate::download::DownloadManager) {
+    if let Some(task) = download_mgr.current_task() {
+        let status = task
+            .status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let bytes = task.bytes_downloaded.load(Ordering::Relaxed);
+        let total = task.total_bytes.load(Ordering::Relaxed);
+        ui.set_download_can_pause(task.supports_range.load(Ordering::Relaxed));
 
-    let player = ctx.player.clone();
-    let rep = ctx.reporter.clone();
-    let sctrl = ctx.session_ctrl.clone();
-    let cur_item = ctx.playback.current_playing_item.clone();
-    let phash_ref = ctx.phash_coord.clone();
-    let download_mgr = ctx.download_manager.clone();
-    let ctx_handle = ctx.clone();
+        match status {
+            crate::download::DownloadStatus::Idle => {
+                if ui.get_download_status() != "idle" {
+                    ui.set_download_status("idle".into());
+                    ui.set_download_speed_text("".into());
+                }
+            }
+            crate::download::DownloadStatus::Queued => {
+                ui.set_download_status("queued".into());
+                ui.set_download_item_id(task.item_id.clone().into());
+                ui.set_download_title(task.item_title.clone().into());
+                ui.set_download_indeterminate(true);
+                ui.set_download_progress(0.0);
+                ui.set_download_bytes_text("Waiting in queue…".into());
+                ui.set_download_speed_text("".into());
+            }
+            crate::download::DownloadStatus::Preparing => {
+                ui.set_download_status("preparing".into());
+                ui.set_download_item_id(task.item_id.clone().into());
+                ui.set_download_title(task.item_title.clone().into());
+                ui.set_download_indeterminate(true);
+                ui.set_download_progress(0.0);
+                ui.set_download_bytes_text("Preparing video stream…".into());
+                ui.set_download_speed_text("".into());
+            }
+            crate::download::DownloadStatus::Downloading => {
+                ui.set_download_status("downloading".into());
+                ui.set_download_item_id(task.item_id.clone().into());
+                ui.set_download_title(task.item_title.clone().into());
+
+                let (speed_bps, eta_opt) = download_mgr.sample_speed(bytes, total);
+                let speed_str = crate::download::format_download_speed(speed_bps);
+                let speed_display = match (speed_str.is_empty(), eta_opt) {
+                    (false, Some(eta)) => format!("{speed_str} · {eta}"),
+                    (false, None) => speed_str,
+                    (true, _) => String::new(),
+                };
+                ui.set_download_speed_text(speed_display.into());
+
+                if total > 0 {
+                    let prog = (bytes as f32 / total as f32).clamp(0.0, 1.0);
+                    ui.set_download_progress(prog);
+                    ui.set_download_indeterminate(false);
+                    let pct = (prog * 100.0).round() as u32;
+                    let b_text = format!(
+                        "{} ({}%)",
+                        crate::download::format_download_bytes(bytes, total),
+                        pct
+                    );
+                    ui.set_download_bytes_text(b_text.into());
+                } else {
+                    ui.set_download_progress(0.0);
+                    ui.set_download_indeterminate(true);
+                    ui.set_download_bytes_text(
+                        format!(
+                            "{} (unknown size)",
+                            crate::download::format_download_bytes(bytes, 0)
+                        )
+                        .into(),
+                    );
+                }
+            }
+            crate::download::DownloadStatus::Paused => {
+                ui.set_download_status("paused".into());
+                ui.set_download_item_id(task.item_id.clone().into());
+                ui.set_download_title(task.item_title.clone().into());
+                ui.set_download_speed_text("Paused".into());
+                if total > 0 {
+                    let prog = (bytes as f32 / total as f32).clamp(0.0, 1.0);
+                    ui.set_download_progress(prog);
+                    ui.set_download_indeterminate(false);
+                    let pct = (prog * 100.0).round() as u32;
+                    ui.set_download_bytes_text(
+                        format!(
+                            "{} ({}% - Paused)",
+                            crate::download::format_download_bytes(bytes, total),
+                            pct
+                        )
+                        .into(),
+                    );
+                } else {
+                    ui.set_download_bytes_text(
+                        format!(
+                            "{} (Paused)",
+                            crate::download::format_download_bytes(bytes, 0)
+                        )
+                        .into(),
+                    );
+                }
+            }
+            crate::download::DownloadStatus::Completed { ref file_path, .. } => {
+                if ui.get_download_status() != "completed" {
+                    ui.set_download_status("completed".into());
+                    ui.set_download_progress(1.0);
+                    ui.set_download_indeterminate(false);
+                    ui.set_download_speed_text("".into());
+                    ui.set_download_file_path(file_path.to_string_lossy().to_string().into());
+                    ui.set_download_bytes_text(
+                        format!(
+                            "Downloaded: {}",
+                            crate::download::format_download_bytes(bytes, bytes)
+                        )
+                        .into(),
+                    );
+                }
+            }
+            crate::download::DownloadStatus::Error(ref err) => {
+                if ui.get_download_status() != "error" {
+                    ui.set_download_status("error".into());
+                    ui.set_download_speed_text("".into());
+                    ui.set_download_error_text(err.clone().into());
+                }
+            }
+        }
+    }
+}
+
+fn make_poll_tick(
+    ui_weak: slint::Weak<MainWindow>,
+    player: Option<Arc<Player>>,
+    rep: Arc<crate::reporter::PlaybackReporter>,
+    sctrl: Arc<crate::session::PlaybackSessionController>,
+    cur_item: Arc<std::sync::Mutex<Option<adult_hub_client::TvItem>>>,
+    phash_ref: Arc<phash::PhashCoordinator>,
+    download_mgr: Arc<crate::download::DownloadManager>,
+    ctx_handle: AppContext,
+    frame_pending: Arc<AtomicBool>,
+) -> impl FnMut() + 'static {
+    let mut tick: u64 = 0;
     let mut recovery = PlaybackRecovery::default();
     let mut stall_tracker = StallTracker::default();
     let mut toast_ticks: u32 = 0;
-
-    timer.start(TimerMode::Repeated, Duration::from_millis(100), move || {
+    move || {
         let Some(ui) = ui_weak.upgrade() else { return };
         if frame_pending.swap(false, Ordering::AcqRel) {
             ui.window().request_redraw();
@@ -182,128 +312,7 @@ pub fn install_polling(ui: &MainWindow, ctx: &AppContext, frame_pending: Arc<Ato
             toast_ticks = 0;
         }
 
-        // Synchronize download task status to UI
-        if let Some(task) = download_mgr.current_task() {
-            let status = task.status.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
-            let bytes = task.bytes_downloaded.load(Ordering::Relaxed);
-            let total = task.total_bytes.load(Ordering::Relaxed);
-            ui.set_download_can_pause(task.supports_range.load(Ordering::Relaxed));
-
-            match status {
-                crate::download::DownloadStatus::Idle => {
-                    if ui.get_download_status() != "idle" {
-                        ui.set_download_status("idle".into());
-                        ui.set_download_speed_text("".into());
-                    }
-                }
-                crate::download::DownloadStatus::Queued => {
-                    ui.set_download_status("queued".into());
-                    ui.set_download_item_id(task.item_id.clone().into());
-                    ui.set_download_title(task.item_title.clone().into());
-                    ui.set_download_indeterminate(true);
-                    ui.set_download_progress(0.0);
-                    ui.set_download_bytes_text("Waiting in queue…".into());
-                    ui.set_download_speed_text("".into());
-                }
-                crate::download::DownloadStatus::Preparing => {
-                    ui.set_download_status("preparing".into());
-                    ui.set_download_item_id(task.item_id.clone().into());
-                    ui.set_download_title(task.item_title.clone().into());
-                    ui.set_download_indeterminate(true);
-                    ui.set_download_progress(0.0);
-                    ui.set_download_bytes_text("Preparing video stream…".into());
-                    ui.set_download_speed_text("".into());
-                }
-                crate::download::DownloadStatus::Downloading => {
-                    ui.set_download_status("downloading".into());
-                    ui.set_download_item_id(task.item_id.clone().into());
-                    ui.set_download_title(task.item_title.clone().into());
-
-                    let (speed_bps, eta_opt) = download_mgr.sample_speed(bytes, total);
-                    let speed_str = crate::download::format_download_speed(speed_bps);
-                    let speed_display = match (speed_str.is_empty(), eta_opt) {
-                        (false, Some(eta)) => format!("{speed_str} · {eta}"),
-                        (false, None) => speed_str,
-                        (true, _) => String::new(),
-                    };
-                    ui.set_download_speed_text(speed_display.into());
-
-                    if total > 0 {
-                        let prog = (bytes as f32 / total as f32).clamp(0.0, 1.0);
-                        ui.set_download_progress(prog);
-                        ui.set_download_indeterminate(false);
-                        let pct = (prog * 100.0).round() as u32;
-                        let b_text = format!(
-                            "{} ({}%)",
-                            crate::download::format_download_bytes(bytes, total),
-                            pct
-                        );
-                        ui.set_download_bytes_text(b_text.into());
-                    } else {
-                        ui.set_download_progress(0.0);
-                        ui.set_download_indeterminate(true);
-                        ui.set_download_bytes_text(
-                            format!(
-                                "{} (unknown size)",
-                                crate::download::format_download_bytes(bytes, 0)
-                            )
-                            .into(),
-                        );
-                    }
-                }
-                crate::download::DownloadStatus::Paused => {
-                    ui.set_download_status("paused".into());
-                    ui.set_download_item_id(task.item_id.clone().into());
-                    ui.set_download_title(task.item_title.clone().into());
-                    ui.set_download_speed_text("Paused".into());
-                    if total > 0 {
-                        let prog = (bytes as f32 / total as f32).clamp(0.0, 1.0);
-                        ui.set_download_progress(prog);
-                        ui.set_download_indeterminate(false);
-                        let pct = (prog * 100.0).round() as u32;
-                        ui.set_download_bytes_text(
-                            format!(
-                                "{} ({}% - Paused)",
-                                crate::download::format_download_bytes(bytes, total),
-                                pct
-                            )
-                            .into(),
-                        );
-                    } else {
-                        ui.set_download_bytes_text(
-                            format!(
-                                "{} (Paused)",
-                                crate::download::format_download_bytes(bytes, 0)
-                            )
-                            .into(),
-                        );
-                    }
-                }
-                crate::download::DownloadStatus::Completed { ref file_path, .. } => {
-                    if ui.get_download_status() != "completed" {
-                        ui.set_download_status("completed".into());
-                        ui.set_download_progress(1.0);
-                        ui.set_download_indeterminate(false);
-                        ui.set_download_speed_text("".into());
-                        ui.set_download_file_path(file_path.to_string_lossy().to_string().into());
-                        ui.set_download_bytes_text(
-                            format!(
-                                "Downloaded: {}",
-                                crate::download::format_download_bytes(bytes, bytes)
-                            )
-                            .into(),
-                        );
-                    }
-                }
-                crate::download::DownloadStatus::Error(ref err) => {
-                    if ui.get_download_status() != "error" {
-                        ui.set_download_status("error".into());
-                        ui.set_download_speed_text("".into());
-                        ui.set_download_error_text(err.clone().into());
-                    }
-                }
-            }
-        }
+        sync_download_status(&ui, &download_mgr);
 
         // Periodic sync of download queue and history (every 500ms / 5 ticks)
         if tick % 5 == 0 {
@@ -408,7 +417,8 @@ pub fn install_polling(ui: &MainWindow, ctx: &AppContext, frame_pending: Arc<Ato
 
                     let stats = player.stats();
                     let current_dropped = stats.dropped_frames.unwrap_or(0);
-                    let dropped_diff = current_dropped.saturating_sub(stall_tracker.stall_start_dropped_frames);
+                    let dropped_diff =
+                        current_dropped.saturating_sub(stall_tracker.stall_start_dropped_frames);
                     let current_input_rate = stats.raw_input_rate_bps;
                     let active_profile = player.buffer_profile();
 
@@ -490,7 +500,10 @@ pub fn install_polling(ui: &MainWindow, ctx: &AppContext, frame_pending: Arc<Ato
             ui.set_playing(!paused);
         }
 
-        if ui.get_is_switching_movie() && ui.get_player_media_loaded() && ui.get_software_ui_renderer() {
+        if ui.get_is_switching_movie()
+            && ui.get_player_media_loaded()
+            && ui.get_software_ui_renderer()
+        {
             ui.set_is_switching_movie(false);
         }
 
@@ -530,7 +543,11 @@ pub fn install_polling(ui: &MainWindow, ctx: &AppContext, frame_pending: Arc<Ato
 
         // Update pHash video matching status in player overlay
         if tick % 5 == 0 {
-            if let Some(item) = cur_item.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
+            if let Some(item) = cur_item
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+            {
                 if let Some(vid) = phash::adult_hub_video_id(item) {
                     if let Some(st) = phash_ref.get_status(&vid) {
                         ui.set_phash_status_text(st.message.into());
@@ -550,13 +567,32 @@ pub fn install_polling(ui: &MainWindow, ctx: &AppContext, frame_pending: Arc<Ato
             let pos_ms = (player.position().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
             let dur_ms = (player.duration().unwrap_or(0.0) * 1000.0).max(0.0) as u64;
             rep.tick_periodic();
-            if let Some(item) = cur_item.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
+            if let Some(item) = cur_item
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+            {
                 sctrl.checkpoint_progress(item, pos_ms, dur_ms, false);
                 rep.report_api_progress(&item.id, pos_ms, dur_ms, false);
             }
         }
-    });
+    }
+}
 
+pub fn install_polling(ui: &MainWindow, ctx: &AppContext, frame_pending: Arc<AtomicBool>) -> Timer {
+    let timer = Timer::default();
+    let tick = make_poll_tick(
+        ui.as_weak(),
+        ctx.player.clone(),
+        ctx.reporter.clone(),
+        ctx.session_ctrl.clone(),
+        ctx.playback.current_playing_item.clone(),
+        ctx.phash_coord.clone(),
+        ctx.download_manager.clone(),
+        ctx.clone(),
+        frame_pending,
+    );
+    timer.start(TimerMode::Repeated, Duration::from_millis(100), tick);
     // Slint timers stop when their handle is dropped. Return it so the caller
     // can keep polling alive for the lifetime of the window.
     timer
